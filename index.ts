@@ -1,89 +1,158 @@
+// Marlang CLI
+import * as readline from 'readline';
 import * as Lexer from './lexer';
 import * as Parser from './parser';
 import * as Interpreter from './interpreter';
+import { typeCheck, formatError, formatTypes } from './type-checker';
 
-// Helper to run code and print result
-const run = (interp: Interpreter.T, code: string): Interpreter.T => {
-  const tokens = Lexer.lex(Lexer.empty(code));
-  const parsed = Parser.parse(Parser.empty(tokens));
-  const result = Interpreter.evalMany(interp, parsed.exprs);
+const command = process.argv[2];
 
-  for (const expr of parsed.exprs) {
-    // Skip printing nil for define statements
-    if (expr.kind === 'list') {
-      const head = expr.head;
-      if (head.kind === 'atom' && head.value.kind === 'symbol' && head.value.value === 'define') {
-        continue;
-      }
-    }
-  }
+const printUsage = () => {
+  console.log(`Usage: bun index.ts <command> [options]
 
-  console.log(`${code}`);
-  console.log(`  => ${Interpreter.formatValue(result.value)}`);
-  return result.interp;
+Commands:
+  run <file.mar> [--no-typecheck]  Run a Marlang file
+  repl                             Start interactive REPL
+  typecheck <file.mar> [--verbose] Type check a file without running
+
+Examples:
+  bun index.ts run examples/factorial.mar
+  bun index.ts run examples/factorial.mar --no-typecheck
+  bun index.ts repl
+  bun index.ts typecheck examples/factorial.mar
+  bun index.ts typecheck examples/factorial.mar --verbose`);
 };
 
-// Run all tests
-console.log('=== Marlang Interpreter Tests ===\n');
+const runFile = async () => {
+  const filename = process.argv[3];
+  const noTypecheck = process.argv.includes('--no-typecheck');
 
-let interp = Interpreter.empty();
+  if (!filename) {
+    console.error('Error: Missing filename');
+    console.error('Usage: bun index.ts run <file.mar> [--no-typecheck]');
+    process.exit(1);
+  }
 
-// Basic arithmetic
-console.log('--- Arithmetic ---');
-interp = run(interp, '(+ 1 2)');
-interp = run(interp, '(- 10 3)');
-interp = run(interp, '(* 4 5)');
-interp = run(interp, '(/ 20 4)');
-interp = run(interp, '(+ 1 2 3 4 5)');
+  const file = Bun.file(filename);
+  const code = await file.text();
 
-// Variables
-console.log('\n--- Variables ---');
-interp = run(interp, '(define x 10)');
-interp = run(interp, '(+ x 5)');
+  try {
+    const tokens = Lexer.lex(Lexer.empty(code));
+    const parsed = Parser.parse(Parser.empty(tokens));
 
-// Functions
-console.log('\n--- Functions ---');
-interp = run(interp, '(define square (lambda (n) (* n n)))');
-interp = run(interp, '(square 4)');
+    // Type check unless --no-typecheck flag is provided
+    if (!noTypecheck) {
+      const typeResult = typeCheck(parsed.exprs);
+      if (!typeResult.ok) {
+        console.error(`Type error: ${formatError(typeResult.error)}`);
+        process.exit(1);
+      }
+    }
 
-// Conditionals
-console.log('\n--- Conditionals ---');
-interp = run(interp, '(if (< 1 2) 10 20)');
-interp = run(interp, '(if (> 1 2) 10 20)');
+    const result = Interpreter.evalMany(Interpreter.empty(), parsed.exprs);
 
-// Let bindings
-console.log('\n--- Let Bindings ---');
-interp = run(interp, '(let ((a 1) (b 2)) (+ a b))');
+    // Print the final result if it's not nil
+    if (result.value.kind !== 'nil') {
+      console.log(Interpreter.formatValue(result.value));
+    }
+  } catch (e) {
+    console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
+};
 
-// Recursion (factorial)
-console.log('\n--- Recursion ---');
-interp = run(interp, '(define fact (lambda (n) (if (= n 0) 1 (* n (fact (- n 1))))))');
-interp = run(interp, '(fact 5)');
+const startRepl = () => {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
 
-// Closures
-console.log('\n--- Closures ---');
-interp = run(interp, '(define make-adder (lambda (n) (lambda (x) (+ n x))))');
-interp = run(interp, '((make-adder 5) 10)');
+  let interp = Interpreter.empty();
 
-// Cond
-console.log('\n--- Cond ---');
-interp = run(interp, '(define grade (lambda (score) (cond ((>= score 90) 1) ((>= score 80) 2) ((>= score 70) 3) (else 4))))');
-interp = run(interp, '(grade 95)');
-interp = run(interp, '(grade 85)');
-interp = run(interp, '(grade 65)');
+  const evaluate = (code: string): string => {
+    try {
+      const tokens = Lexer.lex(Lexer.empty(code));
+      const parsed = Parser.parse(Parser.empty(tokens));
+      const result = Interpreter.evalMany(interp, parsed.exprs);
+      interp = result.interp;
+      return Interpreter.formatValue(result.value);
+    } catch (e) {
+      return `Error: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  };
 
-// Strings
-console.log('\n--- Strings ---');
-interp = run(interp, '"hello world"');
-interp = run(interp, '(list "a" "b" "c")');
+  const prompt = () => {
+    rl.question('marlang> ', (input) => {
+      if (input === null || input === '.exit' || input === '(quit)') {
+        console.log('Goodbye!');
+        rl.close();
+        return;
+      }
 
-// FFI with libm
-console.log('\n--- FFI (libm) ---');
-interp = run(interp, '(define math (ffi-open "m" (list (list "sin" (list "f64") "f64") (list "cos" (list "f64") "f64") (list "pow" (list "f64" "f64") "f64"))))');
-interp = run(interp, '(ffi-call math "sin" 0.0)');
-interp = run(interp, '(ffi-call math "sin" 1.5707963267948966)');
-interp = run(interp, '(ffi-call math "cos" 0.0)');
-interp = run(interp, '(ffi-call math "pow" 2.0 10.0)');
-interp = run(interp, '(ffi-close math)');
+      if (input.trim()) {
+        console.log(`  => ${evaluate(input)}`);
+      }
 
-console.log('\n=== All tests completed ===');
+      prompt();
+    });
+  };
+
+  console.log('Marlang REPL - Type .exit or (quit) to exit');
+  prompt();
+};
+
+const typecheckFile = async () => {
+  const filename = process.argv[3];
+  const verbose = process.argv.includes('--verbose');
+
+  if (!filename) {
+    console.error('Error: Missing filename');
+    console.error('Usage: bun index.ts typecheck <file.mar> [--verbose]');
+    process.exit(1);
+  }
+
+  const file = Bun.file(filename);
+  const code = await file.text();
+
+  try {
+    const tokens = Lexer.lex(Lexer.empty(code));
+    const parsed = Parser.parse(Parser.empty(tokens));
+
+    const typeResult = typeCheck(parsed.exprs);
+
+    if (!typeResult.ok) {
+      console.error(`Type error: ${formatError(typeResult.error)}`);
+      process.exit(1);
+    }
+
+    if (verbose) {
+      const types = formatTypes(typeResult);
+      console.log('Inferred types:');
+      types.forEach((type, i) => {
+        console.log(`  ${i + 1}: ${type}`);
+      });
+    } else {
+      console.log(`Type check passed: ${filename}`);
+    }
+  } catch (e) {
+    console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
+};
+
+switch (command) {
+  case 'run':
+    await runFile();
+    break;
+  case 'repl':
+    startRepl();
+    break;
+  case 'typecheck':
+    await typecheckFile();
+    break;
+  default:
+    printUsage();
+    if (command) {
+      process.exit(1);
+    }
+}

@@ -1,7 +1,7 @@
 // Shared AST types
 export type LispValue =
   | { kind: 'symbol', value: string }
-  | { kind: 'number', value: number }
+  | { kind: 'number', value: number, isFloat?: boolean }
   | { kind: 'string', value: string }
 
 export type Expr =
@@ -44,6 +44,8 @@ export type RuntimeValue =
   | { kind: 'ffi-struct-def', def: StructDef }
   | { kind: 'ffi-struct', def: StructDef, buffer: Uint8Array }
   | { kind: 'environment', env: Env }
+  | { kind: 'adt-value', constructor: string, args: RuntimeValue[] }
+  | { kind: 'adt-constructor', name: string, arity: number }
 
 export type Env = {
   bindings: Map<string, RuntimeValue>;

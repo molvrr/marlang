@@ -583,6 +583,128 @@ const isTruthy = (value: RuntimeValue): boolean => {
   return true;
 };
 
+// Set of known constructor names (populated by data definitions)
+const knownConstructors = new Set<string>();
+
+// Pattern matching helper
+// Returns null if pattern doesn't match, otherwise returns bindings
+const matchPattern = (pattern: Expr, value: RuntimeValue, env: Env): Map<string, RuntimeValue> | null => {
+  // Wildcard pattern: _
+  if (pattern.kind === 'atom' && pattern.value.kind === 'symbol' && pattern.value.value === '_') {
+    return new Map();
+  }
+
+  // Variable pattern or nullary constructor
+  if (pattern.kind === 'atom' && pattern.value.kind === 'symbol') {
+    const name = pattern.value.value;
+
+    // Check if it's a known nullary constructor by looking up in environment
+    try {
+      const binding = Environment.lookup(env, name);
+      if (binding && binding.kind === 'adt-value' && binding.args.length === 0) {
+        // It's a nullary constructor pattern - match against same constructor
+        if (value.kind === 'adt-value' && value.constructor === name && value.args.length === 0) {
+          return new Map();
+        }
+        return null;
+      }
+    } catch {
+      // Variable not found in environment - treat as binding variable
+    }
+
+    // Otherwise it's a variable that binds the value
+    return new Map([[name, value]]);
+  }
+
+  // Number literal pattern
+  if (pattern.kind === 'atom' && pattern.value.kind === 'number') {
+    if (value.kind === 'number' && value.value === pattern.value.value) {
+      return new Map();
+    }
+    return null;
+  }
+
+  // String literal pattern
+  if (pattern.kind === 'atom' && pattern.value.kind === 'string') {
+    if (value.kind === 'string' && value.value === pattern.value.value) {
+      return new Map();
+    }
+    return null;
+  }
+
+  // Nil pattern
+  if (pattern.kind === 'nil') {
+    if (value.kind === 'nil') {
+      return new Map();
+    }
+    // Also match Nil constructor
+    if (value.kind === 'adt-value' && value.constructor === 'Nil' && value.args.length === 0) {
+      return new Map();
+    }
+    return null;
+  }
+
+  // Constructor pattern: (CtorName args...)
+  if (pattern.kind === 'list') {
+    const patternElements = listToArray(pattern);
+    if (patternElements.length === 0) {
+      // Empty list matches nil
+      return value.kind === 'nil' ? new Map() : null;
+    }
+
+    const first = patternElements[0]!;
+    if (first.kind !== 'atom' || first.value.kind !== 'symbol') {
+      return null;
+    }
+
+    const ctorName = first.value.value;
+    const argPatterns = patternElements.slice(1);
+
+    // Match against ADT value
+    if (value.kind === 'adt-value') {
+      if (value.constructor !== ctorName) return null;
+      if (value.args.length !== argPatterns.length) return null;
+
+      const bindings = new Map<string, RuntimeValue>();
+      for (let i = 0; i < argPatterns.length; i++) {
+        const subMatch = matchPattern(argPatterns[i]!, value.args[i]!, env);
+        if (subMatch === null) return null;
+        for (const [k, v] of subMatch) {
+          bindings.set(k, v);
+        }
+      }
+      return bindings;
+    }
+
+    // Match list against Cons pattern
+    if (ctorName === 'Cons' && argPatterns.length === 2 && value.kind === 'list') {
+      if (value.elements.length === 0) return null;
+      const head = value.elements[0]!;
+      const tail: RuntimeValue = { kind: 'list', elements: value.elements.slice(1) };
+
+      const headMatch = matchPattern(argPatterns[0]!, head, env);
+      if (headMatch === null) return null;
+
+      const tailMatch = matchPattern(argPatterns[1]!, tail, env);
+      if (tailMatch === null) return null;
+
+      const bindings = new Map<string, RuntimeValue>();
+      for (const [k, v] of headMatch) bindings.set(k, v);
+      for (const [k, v] of tailMatch) bindings.set(k, v);
+      return bindings;
+    }
+
+    // Match empty list against Nil
+    if (ctorName === 'Nil' && argPatterns.length === 0 && value.kind === 'list') {
+      return value.elements.length === 0 ? new Map() : null;
+    }
+
+    return null;
+  }
+
+  return null;
+};
+
 // Evaluate a sequence of expressions, returning the last value
 const evalSequence = (interp: T, exprs: Expr[], isTail: boolean): EvalOutcome => {
   if (exprs.length === 0) {
@@ -606,7 +728,7 @@ const applyTailCall = (tc: TailCall): EvalOutcome => {
   return applyInternal(tc.fn, tc.args);
 };
 
-// Trampoline: execute thunks until we get a real value
+// Trampoline: execute thunks until we get a real value (tmj, @leandronsp)
 const trampoline = (outcome: EvalOutcome): RuntimeValue => {
   while (isTailCall(outcome)) {
     outcome = applyTailCall(outcome);
@@ -633,6 +755,13 @@ const applyInternal = (fn: RuntimeValue, args: RuntimeValue[]): EvalOutcome => {
     }
     // Evaluate body in new environment with tail position enabled
     return evalSequence({ env: fnEnv }, fn.body, true);
+  }
+  // ADT constructor application
+  if (fn.kind === 'adt-constructor') {
+    if (args.length !== fn.arity) {
+      throw new Error(`Constructor ${fn.name} expects ${fn.arity} arguments, got ${args.length}`);
+    }
+    return { kind: 'adt-value', constructor: fn.name, args };
   }
   throw new Error(`Cannot apply non-function: ${fn.kind}`);
 };
@@ -674,15 +803,36 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
     const sym = first.value.value;
 
     // define - never in tail position (returns nil, side effect)
+    // Supports: (define name value) or (define (name : Type) value)
     if (sym === 'define') {
       if (elements.length !== 3) throw new Error('define expects 2 arguments');
       const nameExpr = elements[1];
       const valueExpr = elements[2];
-      if (nameExpr?.kind !== 'atom' || nameExpr.value.kind !== 'symbol') {
+
+      // Check for type-annotated define: (define (name : Type) value)
+      let name: string;
+      if (nameExpr?.kind === 'list') {
+        const nameParts = listToArray(nameExpr);
+        // Should be (name : Type)
+        if (nameParts.length === 3) {
+          const first = nameParts[0];
+          const colon = nameParts[1];
+          if (first?.kind === 'atom' && first.value.kind === 'symbol' &&
+              colon?.kind === 'atom' && colon.value.kind === 'symbol' && colon.value.value === ':') {
+            name = first.value.value;
+          } else {
+            throw new Error('define expects (name : Type) for type annotation');
+          }
+        } else {
+          throw new Error('define expects a symbol or (symbol : Type) as first argument');
+        }
+      } else if (nameExpr?.kind === 'atom' && nameExpr.value.kind === 'symbol') {
+        name = nameExpr.value.value;
+      } else {
         throw new Error('define expects a symbol as first argument');
       }
+
       if (valueExpr === undefined) throw new Error('define expects a value');
-      const name = nameExpr.value.value;
       // For recursive functions: mutate the environment in-place so the closure can see itself
       interp.env.bindings.set(name, { kind: 'nil' }); // placeholder
       const value = trampoline(evalExprTail(interp, valueExpr, false));
@@ -691,15 +841,30 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
     }
 
     // lambda - returns function value, not a tail call
+    // Supports: (lambda (params...) body) or (lambda ((x : Type)...) body)
     if (sym === 'lambda') {
       if (elements.length < 3) throw new Error('lambda expects at least 2 arguments');
       const paramsExpr = elements[1];
       if (paramsExpr === undefined) throw new Error('lambda expects parameters');
 
-      // Parse parameters
+      // Parse parameters (may be annotated: (x : Type) or plain: x)
       const paramExprs = listToArray(paramsExpr);
       const params: string[] = [];
       for (const p of paramExprs) {
+        // Check for annotated parameter: (x : Type)
+        if (p.kind === 'list') {
+          const parts = listToArray(p);
+          if (parts.length === 3) {
+            const first = parts[0];
+            const colon = parts[1];
+            if (first?.kind === 'atom' && first.value.kind === 'symbol' &&
+                colon?.kind === 'atom' && colon.value.kind === 'symbol' && colon.value.value === ':') {
+              params.push(first.value.value);
+              continue;
+            }
+          }
+          throw new Error('lambda parameters must be symbols or (symbol : Type)');
+        }
         if (p.kind !== 'atom' || p.value.kind !== 'symbol') {
           throw new Error('lambda parameters must be symbols');
         }
@@ -730,6 +895,7 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
     }
 
     // let - propagates tail position to body
+    // Supports: (let ((name value)...) body) or (let (((name : Type) value)...) body)
     if (sym === 'let') {
       if (elements.length < 3) throw new Error('let expects at least 2 arguments');
       const bindingsExpr = elements[1];
@@ -738,18 +904,37 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
       // Create child environment
       let letEnv = Environment.child(interp.env);
 
-      // Parse bindings ((name value) ...)
+      // Parse bindings ((name value) ...) or (((name : Type) value) ...)
       const bindingsList = listToArray(bindingsExpr);
       for (const binding of bindingsList) {
         const pair = listToArray(binding);
         if (pair.length !== 2) throw new Error('let binding must be (name value)');
         const nameExpr = pair[0];
         const valExpr = pair[1];
-        if (nameExpr?.kind !== 'atom' || nameExpr.value.kind !== 'symbol') {
+
+        // Check for type-annotated binding: ((name : Type) value)
+        let name: string;
+        if (nameExpr?.kind === 'list') {
+          const nameParts = listToArray(nameExpr);
+          if (nameParts.length === 3) {
+            const first = nameParts[0];
+            const colon = nameParts[1];
+            if (first?.kind === 'atom' && first.value.kind === 'symbol' &&
+                colon?.kind === 'atom' && colon.value.kind === 'symbol' && colon.value.value === ':') {
+              name = first.value.value;
+            } else {
+              throw new Error('let binding name must be a symbol or (symbol : Type)');
+            }
+          } else {
+            throw new Error('let binding name must be a symbol or (symbol : Type)');
+          }
+        } else if (nameExpr?.kind === 'atom' && nameExpr.value.kind === 'symbol') {
+          name = nameExpr.value.value;
+        } else {
           throw new Error('let binding name must be a symbol');
         }
+
         if (valExpr === undefined) throw new Error('let binding must have a value');
-        const name = nameExpr.value.value;
         // Evaluate value in the let environment (for sequential let)
         const value = trampoline(evalExprTail({ env: letEnv }, valExpr, false));
         letEnv = Environment.define(letEnv, name, value);
@@ -795,6 +980,110 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
     if (sym === 'current-env') {
       if (elements.length !== 1) throw new Error('current-env takes no arguments');
       return { kind: 'environment', env: interp.env };
+    }
+
+    // data - define algebraic data type
+    // (data (TypeName params...) constructor...)
+    if (sym === 'data') {
+      if (elements.length < 3) throw new Error('data expects type name and at least one constructor');
+
+      const typeExpr = elements[1];
+      const ctorExprs = elements.slice(2);
+
+      // Parse type name (ignore params - they're for type checking only)
+      let typeName: string;
+      if (typeExpr?.kind === 'list') {
+        const typeElements = listToArray(typeExpr);
+        const first = typeElements[0];
+        if (first?.kind !== 'atom' || first.value.kind !== 'symbol') {
+          throw new Error('data type name must be a symbol');
+        }
+        typeName = first.value.value;
+      } else if (typeExpr?.kind === 'atom' && typeExpr.value.kind === 'symbol') {
+        typeName = typeExpr.value.value;
+      } else {
+        throw new Error('data type name must be a symbol');
+      }
+
+      // Register constructors
+      for (const ctorExpr of ctorExprs) {
+        if (ctorExpr.kind === 'atom' && ctorExpr.value.kind === 'symbol') {
+          // Nullary constructor
+          const ctorName = ctorExpr.value.value;
+          const ctorValue: RuntimeValue = { kind: 'adt-value', constructor: ctorName, args: [] };
+          interp.env.bindings.set(ctorName, ctorValue);
+        } else if (ctorExpr.kind === 'list') {
+          // Constructor with parameters
+          const ctorElements = listToArray(ctorExpr);
+          const first = ctorElements[0];
+          if (first?.kind !== 'atom' || first.value.kind !== 'symbol') {
+            throw new Error('constructor name must be a symbol');
+          }
+          const ctorName = first.value.value;
+          const arity = ctorElements.length - 1;
+
+          if (arity === 0) {
+            // Nullary constructor
+            const ctorValue: RuntimeValue = { kind: 'adt-value', constructor: ctorName, args: [] };
+            interp.env.bindings.set(ctorName, ctorValue);
+          } else {
+            // Constructor function
+            const ctorFn: RuntimeValue = { kind: 'adt-constructor', name: ctorName, arity };
+            interp.env.bindings.set(ctorName, ctorFn);
+          }
+        }
+      }
+
+      return { kind: 'nil' };
+    }
+
+    // match - pattern matching
+    // (match scrutinee (pattern body)...)
+    if (sym === 'match') {
+      if (elements.length < 3) throw new Error('match expects scrutinee and at least one branch');
+
+      const scrutineeExpr = elements[1];
+      const branches = elements.slice(2);
+
+      if (scrutineeExpr === undefined) throw new Error('match expects a scrutinee');
+      const scrutinee = trampoline(evalExprTail(interp, scrutineeExpr, false));
+
+      for (const branchExpr of branches) {
+        const branchElements = listToArray(branchExpr);
+        if (branchElements.length !== 2) {
+          throw new Error('match branch must be (pattern body)');
+        }
+
+        const patternExpr = branchElements[0]!;
+        const bodyExpr = branchElements[1]!;
+
+        const matchResult = matchPattern(patternExpr, scrutinee, interp.env);
+        if (matchResult !== null) {
+          // Pattern matched - extend environment with bindings and evaluate body
+          let matchEnv = Environment.child(interp.env);
+          for (const [name, value] of matchResult) {
+            matchEnv = Environment.define(matchEnv, name, value);
+          }
+          return evalExprTail({ env: matchEnv }, bodyExpr, isTail);
+        }
+      }
+
+      throw new Error('No pattern matched in match expression');
+    }
+
+    // class - define typeclass (no-op at runtime)
+    if (sym === 'class') {
+      return { kind: 'nil' };
+    }
+
+    // instance - define typeclass instance (no-op at runtime for now)
+    if (sym === 'instance') {
+      return { kind: 'nil' };
+    }
+
+    // type - define type alias (no-op at runtime)
+    if (sym === 'type') {
+      return { kind: 'nil' };
     }
   }
 
@@ -854,5 +1143,13 @@ export const formatValue = (value: RuntimeValue): string => {
       const hasParent = value.env.parent !== null;
       return `#<environment [${names.join(', ')}]${hasParent ? ' +parent' : ''}>`;
     }
+    case 'adt-value': {
+      if (value.args.length === 0) {
+        return value.constructor;
+      }
+      return `(${value.constructor} ${value.args.map(formatValue).join(' ')})`;
+    }
+    case 'adt-constructor':
+      return `#<constructor ${value.name}/${value.arity}>`;
   }
 };

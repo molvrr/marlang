@@ -1,17 +1,18 @@
 # Marlang
 
-A Lisp-like interpreter written in TypeScript, running on Bun. Features include closures, recursion, and a Foreign Function Interface (FFI) for calling native C libraries.
+A Lisp-like interpreter written in TypeScript, running on Bun. Features include a Haskell-style static type system, algebraic data types, pattern matching, closures, tail call optimization, and a Foreign Function Interface (FFI) for calling native C libraries.
 
 ## Features
 
-- Lexer, parser, and tree-walking interpreter
+- **Type System**: Static type checking with local inference, parametric polymorphism, and typeclasses
+- **Algebraic Data Types**: Define sum types with constructors
+- **Pattern Matching**: Destructure values with `match` expressions
+- **Tail Call Optimization**: Efficient recursion without stack overflow
 - First-class functions with lexical closures
-- Recursive function support
 - First-class environments for introspection
 - FFI for calling native libraries (via Bun's FFI)
 - FFI struct support for C struct interop
 - Interactive REPL
-- Example bindings for raylib game library
 
 ## Installation
 
@@ -27,16 +28,22 @@ Run a Marlang file:
 bun run.ts <filename.mar>
 ```
 
+Run without type checking:
+
+```bash
+bun run.ts <filename.mar> --no-typecheck
+```
+
 Run the test suite:
 
 ```bash
-bun run index.ts
+bun test
 ```
 
 Start the interactive REPL:
 
 ```bash
-bun run repl.ts
+bun repl.ts
 ```
 
 ## Language Reference
@@ -53,9 +60,9 @@ bun run repl.ts
 **Numbers** - integers and floating-point:
 
 ```lisp
-42
-3.14
--17
+42        ; Int
+3.14      ; Float
+-17       ; Int
 ```
 
 **Strings** - double-quoted with escape sequences:
@@ -85,6 +92,126 @@ bun run repl.ts
 
 ```lisp
 (current-env)   ; => #<environment [+, -, *, /, ...] +parent>
+```
+
+## Type System
+
+Marlang features a Haskell-style static type system with local type inference.
+
+### Type Annotations
+
+Use `:` to annotate types:
+
+```lisp
+; Annotated variable
+(define (x : Int) 42)
+(define (y : Float) 3.14)
+(define (name : String) "marlang")
+
+; Annotated function
+(define (add : (-> Int Int Int))
+  (lambda (a b) (+ a b)))
+
+; Annotated lambda parameters
+(lambda ((x : Int) (y : Int)) (+ x y))
+
+; Annotated let bindings
+(let (((x : Int) 42)) x)
+```
+
+### Function Types
+
+Function types use the `->` syntax:
+
+```lisp
+(-> Int Int)           ; Int -> Int
+(-> Int Int Int)       ; Int -> Int -> Int
+(-> a a)               ; Polymorphic: a -> a
+```
+
+### Type Inference
+
+Types are inferred when annotations are omitted:
+
+```lisp
+(define id (lambda (x) x))  ; Inferred: forall a. a -> a
+(id 42)                      ; OK: Int
+(id "hello")                 ; OK: String
+```
+
+### Typeclasses
+
+Built-in typeclasses provide polymorphic operations:
+
+| Class | Methods | Instances |
+|-------|---------|-----------|
+| `Num` | `+`, `-`, `*`, `/` | Int, Float |
+| `Eq` | `=` | Int, Float, Bool, String |
+| `Ord` | `<`, `>`, `<=`, `>=` | Int, Float, String |
+| `Show` | `show` | Int, Float, Bool, String |
+
+```lisp
+; Works with any Num type
+(define double (lambda (x) (+ x x)))
+(double 5)      ; => 10 : Int
+(double 2.5)    ; => 5.0 : Float
+```
+
+## Algebraic Data Types
+
+Define sum types with the `data` form:
+
+```lisp
+; Option type
+(data (Option a)
+  None
+  (Some a))
+
+; List type
+(data (List a)
+  Nil
+  (Cons a (List a)))
+
+; Pair type
+(data (Pair a b)
+  (MkPair a b))
+```
+
+Constructors become values or functions:
+
+```lisp
+None                    ; => None
+(Some 42)               ; => (Some 42)
+(Cons 1 (Cons 2 Nil))   ; => (Cons 1 (Cons 2 Nil))
+```
+
+## Pattern Matching
+
+Use `match` to destructure values:
+
+```lisp
+; Match on Option
+(match (Some 42)
+  (None 0)
+  ((Some v) v))          ; => 42
+
+; Match on List
+(define length
+  (lambda (lst)
+    (match lst
+      (Nil 0)
+      ((Cons h t) (+ 1 (length t))))))
+
+(length (Cons 1 (Cons 2 (Cons 3 Nil))))  ; => 3
+
+; Wildcard pattern
+(match x
+  (_ "default"))
+
+; Nested patterns
+(match (MkPair (Some 1) (Some 2))
+  ((MkPair (Some x) (Some y)) (+ x y))
+  (_ 0))                 ; => 3
 ```
 
 ### Arithmetic Operations
@@ -187,15 +314,26 @@ All comparisons return `#t` or `#f`:
   (+ x y))          ; => 30
 ```
 
-Useful for executing multiple expressions where only one is expected, such as in `if` branches:
+## Tail Call Optimization
+
+Marlang implements proper tail call optimization, allowing efficient recursive algorithms:
 
 ```lisp
-(if (> score 100)
-  (begin
-    (print "High score!")
-    (save-score score)
-    score)
-  0)
+; Tail-recursive factorial - won't overflow
+(define fact-tail (lambda (n acc)
+  (if (= n 0)
+    acc
+    (fact-tail (- n 1) (* n acc)))))
+
+(fact-tail 50000 1)  ; Works! (returns Infinity due to number overflow)
+
+; Mutual recursion also optimized
+(define is-even (lambda (n)
+  (if (= n 0) #t (is-odd (- n 1)))))
+(define is-odd (lambda (n)
+  (if (= n 0) #f (is-even (- n 1)))))
+
+(is-even 50000)  ; => #t (no stack overflow)
 ```
 
 ## FFI (Foreign Function Interface)
@@ -255,18 +393,6 @@ Marlang can call functions from native C libraries using Bun's FFI.
 (ffi-close math)
 ```
 
-### Example: Using an absolute path
-
-```lisp
-; Load a custom library by absolute path
-(define mylib (ffi-open "/usr/local/lib/libcustom.dylib"
-  (list
-    (list "custom_fn" (list "i32") "i32"))))
-
-(ffi-call mylib "custom_fn" 42)
-(ffi-close mylib)
-```
-
 ## FFI Structs
 
 Marlang supports C struct definitions for passing structured data to native libraries.
@@ -309,101 +435,6 @@ Marlang supports C struct definitions for passing structured data to native libr
 (struct-get red "g")    ; => 128
 ```
 
-### Passing Structs to FFI
-
-Once a struct type is defined with `ffi-struct`, you can use its name in function signatures:
-
-```lisp
-(define rl (ffi-open "/path/to/libraylib.dylib"
-  (list
-    (list "ClearBackground" (list "Color") "void")
-    (list "DrawCircle" (list "i32" "i32" "f32" "Color") "void"))))
-
-(define white (struct-new Color 255 255 255 255))
-(ffi-call rl "ClearBackground" white)
-```
-
-## Example: Raylib Graphics
-
-Marlang includes full bindings for the [raylib](https://www.raylib.com/) game library in `examples/raylib.mar`.
-
-### Running the Example
-
-```bash
-# Requires raylib installed (e.g., brew install raylib on macOS)
-bun run.ts examples/raylib.mar
-```
-
-### What's Included
-
-The raylib bindings provide:
-
-- **Struct definitions**: Vector2, Vector3, Color, Rectangle, Camera2D, Camera3D, Texture, Image, etc.
-- **Color constants**: WHITE, BLACK, RED, GREEN, BLUE, RAYWHITE, and more
-- **Key constants**: KEY_SPACE, KEY_ESCAPE, KEY_A-Z, arrow keys, etc.
-- **150+ function bindings** for:
-  - Window management (InitWindow, CloseWindow, WindowShouldClose)
-  - Drawing (DrawCircle, DrawRectangle, DrawText, DrawLine)
-  - Input (IsKeyPressed, IsMouseButtonDown, GetMouseX/Y)
-  - Textures (LoadTexture, DrawTexture)
-  - Audio (LoadSound, PlaySound, LoadMusicStream)
-  - 3D graphics (DrawCube, DrawSphere, BeginMode3D)
-
-### Example Code
-
-```lisp
-; Define Color struct and constants
-(define Color (ffi-struct "Color" (list
-  (list "r" "u8") (list "g" "u8")
-  (list "b" "u8") (list "a" "u8"))))
-
-(define RED (struct-new Color 230 41 55 255))
-(define RAYWHITE (struct-new Color 245 245 245 255))
-
-; Load raylib
-(define rl (ffi-open "/opt/homebrew/Cellar/raylib/5.5/lib/libraylib.dylib"
-  (list
-    (list "InitWindow" (list "i32" "i32" "cstring") "void")
-    (list "WindowShouldClose" (list "void") "bool")
-    (list "BeginDrawing" (list "void") "void")
-    (list "EndDrawing" (list "void") "void")
-    (list "ClearBackground" (list "Color") "void")
-    (list "DrawCircle" (list "i32" "i32" "f32" "Color") "void")
-    (list "CloseWindow" (list "void") "void"))))
-
-; Initialize and run
-(ffi-call rl "InitWindow" 800 600 "Hello Raylib")
-
-(define loop (lambda (f)
-  (if (ffi-call rl "WindowShouldClose") nil
-    (let ((a (ffi-call rl "BeginDrawing"))
-          (b (ffi-call rl "ClearBackground" RAYWHITE))
-          (c (ffi-call rl "DrawCircle" 400 300 50 RED))
-          (d (ffi-call rl "EndDrawing")))
-      (f f)))))
-
-(loop loop)
-(ffi-call rl "CloseWindow")
-```
-
-## Architecture
-
-The interpreter follows a classic pipeline:
-
-1. **Lexer** (`lexer.ts`) - tokenizes source code into tokens (parens, numbers, strings, identifiers)
-2. **Parser** (`parser.ts`) - builds an AST of S-expressions from tokens
-3. **Interpreter** (`interpreter.ts`) - evaluates the AST using a tree-walking approach
-
-### Environment Model
-
-Variables are stored in environments with lexical scoping:
-
-- Each environment has a map of bindings and an optional parent
-- Variable lookup walks up the parent chain
-- Closures capture their defining environment
-- `define` mutates the current environment (enabling recursion)
-- `let` creates a child environment for local bindings
-
 ## Environment Introspection
 
 Marlang provides first-class access to lexical environments for metaprogramming and debugging.
@@ -431,11 +462,42 @@ Marlang provides first-class access to lexical environments for metaprogramming 
 (let ((outer 100))
   (let ((inner 200))
     (env-get (env-parent (current-env)) "outer"))) ; => 100
+```
 
-; Function parameters are visible
-(define show-env (lambda (x y) (current-env)))
-(env-bindings (show-env 1 2))  ; => (("x" 1) ("y" 2))
+## Architecture
 
-; Top-level environment has no parent
-(env-parent (current-env))     ; => nil
+The interpreter follows a classic pipeline:
+
+1. **Lexer** (`lexer.ts`) - tokenizes source code into tokens
+2. **Parser** (`parser.ts`) - builds an AST of S-expressions
+3. **Type Checker** (`type-checker.ts`) - validates types statically
+4. **Interpreter** (`interpreter.ts`) - evaluates the AST with tail call optimization
+
+### Type System Architecture
+
+- **`type-ast.ts`** - Type representation (Type, TypeScheme, Constraint, Pattern)
+- **`type-env.ts`** - Type environment and substitution operations
+- **`type-unify.ts`** - Unification algorithm
+- **`type-infer.ts`** - Constraint generation and inference
+- **`type-builtins.ts`** - Built-in types and typeclass definitions
+- **`type-errors.ts`** - Error types and formatting
+
+### Project Structure
+
+```
+marlang/
+├── lexer.ts           # Tokenizer
+├── parser.ts          # S-expression parser
+├── types.ts           # AST and runtime value types
+├── interpreter.ts     # Tree-walking interpreter with TCO
+├── type-*.ts          # Type system modules
+├── run.ts             # CLI entry point
+├── repl.ts            # Interactive REPL
+├── spec/              # Test suite
+│   ├── interpreter.test.ts
+│   ├── tco.test.ts
+│   └── type-system.test.ts
+└── examples/
+    ├── types.mar      # Type system demo
+    └── raylib.mar     # Raylib graphics bindings
 ```

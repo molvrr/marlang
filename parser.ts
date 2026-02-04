@@ -29,7 +29,7 @@ const parseExpr = (p: T): { parser: T, expr: Expr } => {
   if (token.kind === 'number') {
     return {
       parser: advance(p),
-      expr: { kind: 'atom', value: { kind: 'number', value: token.value } }
+      expr: { kind: 'atom', value: { kind: 'number', value: token.value, isFloat: token.isFloat } }
     };
   }
 

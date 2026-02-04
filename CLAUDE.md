@@ -1,111 +1,76 @@
----
-description: Use Bun instead of Node.js, npm, pnpm, or vite.
-globs: "*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json"
-alwaysApply: false
----
+# Marlang Development Guide
 
-Default to using Bun instead of Node.js.
+## Running
 
-- Use `bun <file>` instead of `node <file>` or `ts-node <file>`
-- Use `bun test` instead of `jest` or `vitest`
-- Use `bun build <file.html|file.ts|file.css>` instead of `webpack` or `esbuild`
-- Use `bun install` instead of `npm install` or `yarn install` or `pnpm install`
-- Use `bun run <script>` instead of `npm run <script>` or `yarn run <script>` or `pnpm run <script>`
-- Use `bunx <package> <command>` instead of `npx <package> <command>`
-- Bun automatically loads .env, so don't use dotenv.
-
-## APIs
-
-- `Bun.serve()` supports WebSockets, HTTPS, and routes. Don't use `express`.
-- `bun:sqlite` for SQLite. Don't use `better-sqlite3`.
-- `Bun.redis` for Redis. Don't use `ioredis`.
-- `Bun.sql` for Postgres. Don't use `pg` or `postgres.js`.
-- `WebSocket` is built-in. Don't use `ws`.
-- Prefer `Bun.file` over `node:fs`'s readFile/writeFile
-- Bun.$`ls` instead of execa.
+```bash
+bun index.ts run <file.mar>              # Run with type checking
+bun index.ts run <file.mar> --no-typecheck  # Skip type checking
+bun index.ts repl                        # Interactive REPL
+bun index.ts typecheck <file.mar>        # Type check only
+bun index.ts typecheck <file.mar> --verbose  # Type check with inferred types
+```
 
 ## Testing
 
-Use `bun test` to run tests.
-
-```ts#index.test.ts
-import { test, expect } from "bun:test";
-
-test("hello world", () => {
-  expect(1).toBe(1);
-});
+```bash
+bun test                           # Run all tests
+bun test spec/type-system.test.ts  # Run specific test file
 ```
 
-## Frontend
+Tests are in `spec/` directory using bun:test.
 
-Use HTML imports with `Bun.serve()`. Don't use `vite`. HTML imports fully support React, CSS, Tailwind.
+## Project Structure
 
-Server:
+### Core Pipeline
+- `lexer.ts` - Tokenizer (handles comments, strings, numbers, symbols)
+- `parser.ts` - S-expression parser (builds cons-list AST)
+- `types.ts` - AST types (Expr, LispValue) and runtime values (RuntimeValue)
+- `interpreter.ts` - Tree-walking interpreter with TCO
 
-```ts#index.ts
-import index from "./index.html"
+### Type System
+- `type-ast.ts` - Type representation (Type, TypeScheme, Constraint, Pattern)
+- `type-env.ts` - Type environment, substitution, generalization
+- `type-unify.ts` - Robinson's unification algorithm
+- `type-infer.ts` - Constraint generation and inference
+- `type-builtins.ts` - Built-in types (Int, Float, Bool, String) and typeclasses (Num, Eq, Ord)
+- `type-checker.ts` - Main entry point for type checking
+- `type-errors.ts` - Error types and formatting
 
-Bun.serve({
-  routes: {
-    "/": index,
-    "/api/users/:id": {
-      GET: (req) => {
-        return new Response(JSON.stringify({ id: req.params.id }));
-      },
-    },
-  },
-  // optional websocket support
-  websocket: {
-    open: (ws) => {
-      ws.send("Hello, world!");
-    },
-    message: (ws, message) => {
-      ws.send(message);
-    },
-    close: (ws) => {
-      // handle close
-    }
-  },
-  development: {
-    hmr: true,
-    console: true,
-  }
-})
-```
+### Special Forms
+Handled in `interpreter.ts`:
+- `define`, `lambda`, `if`, `let`, `cond`, `begin`
+- `data` - ADT definitions
+- `match` - Pattern matching
+- `class`, `instance`, `type` - Type system (no-op at runtime)
+- `current-env` - Environment introspection
 
-HTML files can import .tsx, .jsx or .js files directly and Bun's bundler will transpile & bundle automatically. `<link>` tags can point to stylesheets and Bun's CSS bundler will bundle.
+### Built-in Functions
+Defined in `interpreter.ts` builtins array:
+- Arithmetic: `+`, `-`, `*`, `/`
+- Comparison: `<`, `>`, `=`, `<=`, `>=`
+- Lists: `list`
+- FFI: `ffi-open`, `ffi-call`, `ffi-close`
+- Structs: `ffi-struct`, `struct-new`, `struct-get`, `struct-set`
+- Environment: `env-bindings`, `env-get`, `env-parent`
 
-```html#index.html
-<html>
-  <body>
-    <h1>Hello, world!</h1>
-    <script type="module" src="./frontend.tsx"></script>
-  </body>
-</html>
-```
+## Code Conventions
 
-With the following `frontend.tsx`:
+- Use Bun APIs (not Node.js)
+- Immutable data structures where practical
+- `kind` field discriminator for union types
+- Namespaces for related functions (e.g., `Environment.lookup`)
 
-```tsx#frontend.tsx
-import React from "react";
-import { createRoot } from "react-dom/client";
+## Adding Features
 
-// import .css files directly and it works
-import './index.css';
+### New Special Form
+1. Add handling in `evalExprTail()` in `interpreter.ts`
+2. Add type inference in `inferExpr()` in `type-infer.ts`
+3. Add tests in `spec/`
 
-const root = createRoot(document.body);
+### New Built-in Function
+1. Add to `builtins` array in `interpreter.ts`
+2. Add type scheme in `createBuiltinEnv()` in `type-builtins.ts`
 
-export default function Frontend() {
-  return <h1>Hello, world!</h1>;
-}
-
-root.render(<Frontend />);
-```
-
-Then, run index.ts
-
-```sh
-bun --hot ./index.ts
-```
-
-For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+### New Type
+1. Add to `type-ast.ts`
+2. Update `type-builtins.ts` if it's a built-in type

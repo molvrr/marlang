@@ -3,7 +3,7 @@ export type Token =
   { kind: 'lparen' }
   | { kind: 'rparen' }
   | { kind: 'identifier', value: string }
-  | { kind: 'number', value: number }
+  | { kind: 'number', value: number, isFloat: boolean }
   | { kind: 'string', value: string }
   | { kind: 'spc' }
   | { kind: 'eof' }
@@ -15,7 +15,7 @@ const isWhitespace = (input: string): boolean => input === ' ' || input === '\n'
 const isNumber = (input: string): boolean => !!input.match(/[0-9]/);
 const isNumberChar = (input: string): boolean => !!input.match(/[0-9.]/);
 const isAlphanum = (input: string): boolean => !!input.match(/[0-9A-Za-z]/);
-const isSymbolChar = (input: string): boolean => !!input.match(/[0-9A-Za-z+\-*\/<>=!?_#]/);
+const isSymbolChar = (input: string): boolean => !!input.match(/[0-9A-Za-z+\-*\/<>=!?_#:]/);
 
 // Parse a string literal starting at idx (after the opening quote)
 const parseString = (code: string, startIdx: number): { value: string, endIdx: number } => {
@@ -75,7 +75,7 @@ export const peek = (lexer: T): [T, Token] => {
       return [lexer, { kind: 'identifier', value: num }];
     }
 
-    return [lexer, { kind: 'number', value: parseFloat(num) }];
+    return [lexer, { kind: 'number', value: parseFloat(num), isFloat: num.includes('.') }];
   }
   if (isWhitespace(c)) return [lexer, { kind: 'spc' }];
   if (isSymbolChar(c)) {
@@ -122,13 +122,8 @@ export const advance = (lexer: T): [T, Token] => {
   if (isChar(c, ';')) {
     // Skip comment until end of line
     const endIdx = skipComment(lexer.code, lexer.idx);
-    let peeked = peek({ ...lexer, idx: endIdx });
-
-    while (peeked[1].kind === 'spc') {
-      peeked = peek(incrIdx(peeked[0]));
-    }
-
-    return [addToken({ ...lexer, idx: peeked[0].idx }, { kind: 'spc' }), { kind: 'spc' }];
+    // Just return a spc token - let the next advance() handle whatever comes next
+    return [addToken({ ...lexer, idx: endIdx }, { kind: 'spc' }), { kind: 'spc' }];
   }
   if (isChar(c, '"')) {
     const { value, endIdx } = parseString(lexer.code, lexer.idx + 1);
@@ -157,18 +152,13 @@ export const advance = (lexer: T): [T, Token] => {
       return [addToken({ ...lexer, idx }, token), token];
     }
 
-    const token: Token = { kind: 'number', value: parseFloat(num) };
+    const token: Token = { kind: 'number', value: parseFloat(num), isFloat: num.includes('.') };
     return [addToken({ ...lexer, idx }, token), token];
   }
 
   if (isWhitespace(c)) {
-    let peeked = peek({ ...lexer, idx: lexer.idx + 1 });
-
-    while (peeked[1].kind === 'spc') {
-      peeked = peek(incrIdx(peeked[0]));
-    }
-
-    return [addToken({ ...lexer, idx: peeked[0].idx }, { kind: 'spc' }), { kind: 'spc' }];
+    // Just skip one whitespace character - next advance() will handle subsequent whitespace
+    return [addToken(incrIdx(lexer), { kind: 'spc' }), { kind: 'spc' }];
   }
 
   if (isSymbolChar(c)) {
