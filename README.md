@@ -9,7 +9,9 @@ A Lisp-like interpreter written in TypeScript, running on Bun. Features include 
 - Recursive function support
 - First-class environments for introspection
 - FFI for calling native libraries (via Bun's FFI)
+- FFI struct support for C struct interop
 - Interactive REPL
+- Example bindings for raylib game library
 
 ## Installation
 
@@ -243,6 +245,125 @@ Marlang can call functions from native C libraries using Bun's FFI.
 
 (ffi-call mylib "custom_fn" 42)
 (ffi-close mylib)
+```
+
+## FFI Structs
+
+Marlang supports C struct definitions for passing structured data to native libraries.
+
+### Struct Functions
+
+- **`ffi-struct`** - define a struct layout with field types
+- **`struct-new`** - create a struct instance with field values
+- **`struct-get`** - read a field value from a struct
+- **`struct-set`** - write a value to a struct field
+
+### Defining Structs
+
+```lisp
+; Define a Color struct (4 bytes: r, g, b, a)
+(define Color (ffi-struct "Color" (list
+  (list "r" "u8")
+  (list "g" "u8")
+  (list "b" "u8")
+  (list "a" "u8"))))
+
+; Define a Vector2 struct (8 bytes: x, y)
+(define Vector2 (ffi-struct "Vector2" (list
+  (list "x" "f32")
+  (list "y" "f32"))))
+```
+
+### Creating and Using Structs
+
+```lisp
+; Create a red color
+(define red (struct-new Color 255 0 0 255))
+
+; Read fields
+(struct-get red "r")    ; => 255
+(struct-get red "a")    ; => 255
+
+; Modify fields
+(struct-set red "g" 128)
+(struct-get red "g")    ; => 128
+```
+
+### Passing Structs to FFI
+
+Once a struct type is defined with `ffi-struct`, you can use its name in function signatures:
+
+```lisp
+(define rl (ffi-open "/path/to/libraylib.dylib"
+  (list
+    (list "ClearBackground" (list "Color") "void")
+    (list "DrawCircle" (list "i32" "i32" "f32" "Color") "void"))))
+
+(define white (struct-new Color 255 255 255 255))
+(ffi-call rl "ClearBackground" white)
+```
+
+## Example: Raylib Graphics
+
+Marlang includes full bindings for the [raylib](https://www.raylib.com/) game library in `examples/raylib.mar`.
+
+### Running the Example
+
+```bash
+# Requires raylib installed (e.g., brew install raylib on macOS)
+bun run.ts examples/raylib.mar
+```
+
+### What's Included
+
+The raylib bindings provide:
+
+- **Struct definitions**: Vector2, Vector3, Color, Rectangle, Camera2D, Camera3D, Texture, Image, etc.
+- **Color constants**: WHITE, BLACK, RED, GREEN, BLUE, RAYWHITE, and more
+- **Key constants**: KEY_SPACE, KEY_ESCAPE, KEY_A-Z, arrow keys, etc.
+- **150+ function bindings** for:
+  - Window management (InitWindow, CloseWindow, WindowShouldClose)
+  - Drawing (DrawCircle, DrawRectangle, DrawText, DrawLine)
+  - Input (IsKeyPressed, IsMouseButtonDown, GetMouseX/Y)
+  - Textures (LoadTexture, DrawTexture)
+  - Audio (LoadSound, PlaySound, LoadMusicStream)
+  - 3D graphics (DrawCube, DrawSphere, BeginMode3D)
+
+### Example Code
+
+```lisp
+; Define Color struct and constants
+(define Color (ffi-struct "Color" (list
+  (list "r" "u8") (list "g" "u8")
+  (list "b" "u8") (list "a" "u8"))))
+
+(define RED (struct-new Color 230 41 55 255))
+(define RAYWHITE (struct-new Color 245 245 245 255))
+
+; Load raylib
+(define rl (ffi-open "/opt/homebrew/Cellar/raylib/5.5/lib/libraylib.dylib"
+  (list
+    (list "InitWindow" (list "i32" "i32" "cstring") "void")
+    (list "WindowShouldClose" (list "void") "bool")
+    (list "BeginDrawing" (list "void") "void")
+    (list "EndDrawing" (list "void") "void")
+    (list "ClearBackground" (list "Color") "void")
+    (list "DrawCircle" (list "i32" "i32" "f32" "Color") "void")
+    (list "CloseWindow" (list "void") "void"))))
+
+; Initialize and run
+(ffi-call rl "InitWindow" 800 600 "Hello Raylib")
+
+(define loop (lambda (f)
+  (if (ffi-call rl "WindowShouldClose") nil
+    (let ((a (ffi-call rl "BeginDrawing"))
+          (b (ffi-call rl "ClearBackground" RAYWHITE))
+          (c (ffi-call rl "DrawCircle" 400 300 50 RED))
+          (d (ffi-call rl "EndDrawing")))
+      (f f)))))
+
+(loop loop)
+(ffi-call rl "CloseWindow")
 ```
 
 ## Architecture

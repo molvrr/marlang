@@ -15,6 +15,21 @@ export type FFISignature = {
   returns: string;
 }
 
+// Struct field definition
+export type StructField = {
+  name: string;
+  type: string;
+  offset: number;
+  size: number;
+}
+
+// Struct definition
+export type StructDef = {
+  name: string;
+  fields: StructField[];
+  size: number;
+}
+
 // Runtime types
 export type RuntimeValue =
   | { kind: 'number', value: number }
@@ -26,6 +41,8 @@ export type RuntimeValue =
   | { kind: 'builtin', name: string, fn: (args: RuntimeValue[]) => RuntimeValue }
   | { kind: 'ffi-library', path: string, lib: any, signatures: Map<string, FFISignature> }
   | { kind: 'ffi-pointer', ptr: number }
+  | { kind: 'ffi-struct-def', def: StructDef }
+  | { kind: 'ffi-struct', def: StructDef, buffer: Uint8Array }
   | { kind: 'environment', env: Env }
 
 export type Env = {

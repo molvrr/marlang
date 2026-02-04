@@ -1,5 +1,5 @@
-import type { Expr, RuntimeValue, Env, FFISignature, TailCall, EvalOutcome } from './types';
-import { dlopen, FFIType, suffix, ptr, CString } from 'bun:ffi';
+import type { Expr, RuntimeValue, Env, FFISignature, TailCall, EvalOutcome, StructField, StructDef } from './types';
+import { dlopen, FFIType, suffix, ptr, CString, toArrayBuffer, read } from 'bun:ffi';
 
 // Environment operations
 export namespace Environment {
@@ -225,7 +225,231 @@ const builtins: [string, (args: RuntimeValue[]) => RuntimeValue][] = [
     if (envArg.env.parent === null) return { kind: 'nil' };
     return { kind: 'environment', env: envArg.env.parent };
   }],
+  ['ffi-struct', (args) => {
+    if (args.length !== 2) throw new Error('ffi-struct expects 2 arguments: name and fields');
+    const nameArg = args[0];
+    const fieldsArg = args[1];
+
+    if (nameArg?.kind !== 'string') throw new Error('ffi-struct: name must be a string');
+    if (fieldsArg?.kind !== 'list') throw new Error('ffi-struct: fields must be a list');
+
+    const structName = nameArg.value;
+    const fields: StructField[] = [];
+    let offset = 0;
+
+    for (const fieldDef of fieldsArg.elements) {
+      if (fieldDef.kind !== 'list' || fieldDef.elements.length !== 2) {
+        throw new Error('ffi-struct: each field must be (list "name" "type")');
+      }
+      const fieldName = fieldDef.elements[0];
+      const fieldType = fieldDef.elements[1];
+      if (fieldName?.kind !== 'string') throw new Error('ffi-struct: field name must be a string');
+      if (fieldType?.kind !== 'string') throw new Error('ffi-struct: field type must be a string');
+
+      const size = getTypeSize(fieldType.value);
+      const alignment = getTypeAlignment(fieldType.value);
+
+      // Align offset
+      offset = Math.ceil(offset / alignment) * alignment;
+
+      fields.push({
+        name: fieldName.value,
+        type: fieldType.value,
+        offset,
+        size
+      });
+
+      offset += size;
+    }
+
+    // Final size must be aligned to largest alignment
+    const maxAlignment = Math.max(...fields.map(f => getTypeAlignment(f.type)), 1);
+    const totalSize = Math.ceil(offset / maxAlignment) * maxAlignment;
+
+    const def: StructDef = { name: structName, fields, size: totalSize };
+    // Register the struct for FFI type conversion
+    structRegistry.set(structName, def);
+    return { kind: 'ffi-struct-def', def };
+  }],
+  ['struct-new', (args) => {
+    if (args.length < 1) throw new Error('struct-new expects at least 1 argument: struct-def');
+    const defArg = args[0];
+    if (defArg?.kind !== 'ffi-struct-def') throw new Error('struct-new: first argument must be an ffi-struct-def');
+
+    const def = defArg.def;
+    const values = args.slice(1);
+
+    if (values.length !== def.fields.length) {
+      throw new Error(`struct-new: ${def.name} expects ${def.fields.length} values, got ${values.length}`);
+    }
+
+    const buffer = new Uint8Array(def.size);
+    const view = new DataView(buffer.buffer);
+
+    for (let i = 0; i < def.fields.length; i++) {
+      const field = def.fields[i]!;
+      const value = values[i]!;
+      writeFieldValue(view, field, value);
+    }
+
+    return { kind: 'ffi-struct', def, buffer };
+  }],
+  ['struct-get', (args) => {
+    if (args.length !== 2) throw new Error('struct-get expects 2 arguments: struct and field-name');
+    const structArg = args[0];
+    const fieldNameArg = args[1];
+
+    if (structArg?.kind !== 'ffi-struct') throw new Error('struct-get: first argument must be an ffi-struct');
+    if (fieldNameArg?.kind !== 'string') throw new Error('struct-get: second argument must be a string');
+
+    const field = structArg.def.fields.find(f => f.name === fieldNameArg.value);
+    if (!field) throw new Error(`struct-get: field '${fieldNameArg.value}' not found in struct ${structArg.def.name}`);
+
+    const view = new DataView(structArg.buffer.buffer);
+    return readFieldValue(view, field);
+  }],
+  ['struct-set', (args) => {
+    if (args.length !== 3) throw new Error('struct-set expects 3 arguments: struct, field-name, value');
+    const structArg = args[0];
+    const fieldNameArg = args[1];
+    const value = args[2];
+
+    if (structArg?.kind !== 'ffi-struct') throw new Error('struct-set: first argument must be an ffi-struct');
+    if (fieldNameArg?.kind !== 'string') throw new Error('struct-set: second argument must be a string');
+    if (value === undefined) throw new Error('struct-set: value is required');
+
+    const field = structArg.def.fields.find(f => f.name === fieldNameArg.value);
+    if (!field) throw new Error(`struct-set: field '${fieldNameArg.value}' not found in struct ${structArg.def.name}`);
+
+    const view = new DataView(structArg.buffer.buffer);
+    writeFieldValue(view, field, value);
+
+    return { kind: 'nil' };
+  }],
 ];
+
+// Get size of a type in bytes
+const getTypeSize = (typeStr: string): number => {
+  const sizeMap: Record<string, number> = {
+    'i8': 1, 'u8': 1,
+    'i16': 2, 'u16': 2,
+    'i32': 4, 'u32': 4, 'f32': 4,
+    'i64': 8, 'u64': 8, 'f64': 8, 'ptr': 8,
+    'bool': 1,
+  };
+  const size = sizeMap[typeStr];
+  if (size === undefined) throw new Error(`Unknown type size: ${typeStr}`);
+  return size;
+};
+
+// Get alignment of a type
+const getTypeAlignment = (typeStr: string): number => {
+  // Alignment is typically the same as size for primitive types
+  return getTypeSize(typeStr);
+};
+
+// Write a value to a struct field
+const writeFieldValue = (view: DataView, field: StructField, value: RuntimeValue): void => {
+  const { offset, type } = field;
+  switch (type) {
+    case 'u8':
+      if (value.kind !== 'number') throw new Error(`Expected number for ${type}`);
+      view.setUint8(offset, value.value);
+      break;
+    case 'i8':
+      if (value.kind !== 'number') throw new Error(`Expected number for ${type}`);
+      view.setInt8(offset, value.value);
+      break;
+    case 'u16':
+      if (value.kind !== 'number') throw new Error(`Expected number for ${type}`);
+      view.setUint16(offset, value.value, true);
+      break;
+    case 'i16':
+      if (value.kind !== 'number') throw new Error(`Expected number for ${type}`);
+      view.setInt16(offset, value.value, true);
+      break;
+    case 'u32':
+      if (value.kind !== 'number') throw new Error(`Expected number for ${type}`);
+      view.setUint32(offset, value.value, true);
+      break;
+    case 'i32':
+      if (value.kind !== 'number') throw new Error(`Expected number for ${type}`);
+      view.setInt32(offset, value.value, true);
+      break;
+    case 'f32':
+      if (value.kind !== 'number') throw new Error(`Expected number for ${type}`);
+      view.setFloat32(offset, value.value, true);
+      break;
+    case 'u64':
+      if (value.kind !== 'number') throw new Error(`Expected number for ${type}`);
+      view.setBigUint64(offset, BigInt(Math.floor(value.value)), true);
+      break;
+    case 'i64':
+      if (value.kind !== 'number') throw new Error(`Expected number for ${type}`);
+      view.setBigInt64(offset, BigInt(Math.floor(value.value)), true);
+      break;
+    case 'f64':
+      if (value.kind !== 'number') throw new Error(`Expected number for ${type}`);
+      view.setFloat64(offset, value.value, true);
+      break;
+    case 'ptr':
+      if (value.kind === 'ffi-pointer') {
+        view.setBigUint64(offset, BigInt(value.ptr), true);
+      } else if (value.kind === 'nil') {
+        view.setBigUint64(offset, 0n, true);
+      } else if (value.kind === 'number') {
+        view.setBigUint64(offset, BigInt(Math.floor(value.value)), true);
+      } else {
+        throw new Error(`Cannot convert ${value.kind} to ptr`);
+      }
+      break;
+    case 'bool':
+      if (value.kind !== 'boolean') throw new Error('Expected boolean for bool');
+      view.setUint8(offset, value.value ? 1 : 0);
+      break;
+    default:
+      throw new Error(`Unknown field type: ${type}`);
+  }
+};
+
+// Read a value from a struct field
+const readFieldValue = (view: DataView, field: StructField): RuntimeValue => {
+  const { offset, type } = field;
+  switch (type) {
+    case 'u8':
+      return { kind: 'number', value: view.getUint8(offset) };
+    case 'i8':
+      return { kind: 'number', value: view.getInt8(offset) };
+    case 'u16':
+      return { kind: 'number', value: view.getUint16(offset, true) };
+    case 'i16':
+      return { kind: 'number', value: view.getInt16(offset, true) };
+    case 'u32':
+      return { kind: 'number', value: view.getUint32(offset, true) };
+    case 'i32':
+      return { kind: 'number', value: view.getInt32(offset, true) };
+    case 'f32':
+      return { kind: 'number', value: view.getFloat32(offset, true) };
+    case 'u64':
+      return { kind: 'number', value: Number(view.getBigUint64(offset, true)) };
+    case 'i64':
+      return { kind: 'number', value: Number(view.getBigInt64(offset, true)) };
+    case 'f64':
+      return { kind: 'number', value: view.getFloat64(offset, true) };
+    case 'ptr': {
+      const ptrValue = Number(view.getBigUint64(offset, true));
+      if (ptrValue === 0) return { kind: 'nil' };
+      return { kind: 'ffi-pointer', ptr: ptrValue };
+    }
+    case 'bool':
+      return { kind: 'boolean', value: view.getUint8(offset) !== 0 };
+    default:
+      throw new Error(`Unknown field type: ${type}`);
+  }
+};
+
+// Registry for struct definitions (for FFI conversion)
+const structRegistry = new Map<string, StructDef>();
 
 // Map type string to FFIType
 const stringToFFIType = (typeStr: string): FFIType => {
@@ -246,8 +470,14 @@ const stringToFFIType = (typeStr: string): FFIType => {
     'void': FFIType.void,
   };
   const ffiType = typeMap[typeStr];
-  if (ffiType === undefined) throw new Error(`Unknown FFI type: ${typeStr}`);
-  return ffiType;
+  if (ffiType !== undefined) return ffiType;
+
+  // Check if it's a struct type - structs are passed as pointers
+  if (structRegistry.has(typeStr)) {
+    return FFIType.ptr;
+  }
+
+  throw new Error(`Unknown FFI type: ${typeStr}`);
 };
 
 // Convert Lisp value to FFI argument
@@ -267,9 +497,21 @@ const lispToFFI = (value: RuntimeValue, typeStr: string): any => {
         return Buffer.from(value.value + '\0');
       }
       if (value.kind === 'ffi-pointer') return value.ptr;
+      if (value.kind === 'ffi-struct') {
+        // Structs are passed as pointers to their buffer
+        return ptr(value.buffer);
+      }
       if (value.kind === 'nil') return null;
       throw new Error(`Cannot convert ${value.kind} to ${typeStr}`);
     default:
+      // Check if it's a struct type
+      if (structRegistry.has(typeStr)) {
+        if (value.kind === 'ffi-struct') {
+          return ptr(value.buffer);
+        }
+        if (value.kind === 'nil') return null;
+        throw new Error(`Expected struct ${typeStr}, got ${value.kind}`);
+      }
       throw new Error(`Unknown FFI type: ${typeStr}`);
   }
 };
@@ -292,6 +534,17 @@ const ffiToLisp = (result: any, typeStr: string): RuntimeValue => {
     case 'void':
       return { kind: 'nil' };
     default:
+      // Check if it's a struct type
+      const structDef = structRegistry.get(typeStr);
+      if (structDef) {
+        // Result is a pointer to struct data - copy it into a new buffer
+        if (result === null || result === 0) return { kind: 'nil' };
+        const ptrNum = typeof result === 'bigint' ? Number(result) : result;
+        const buffer = new Uint8Array(structDef.size);
+        const sourceBuffer = toArrayBuffer(ptrNum, 0, structDef.size);
+        buffer.set(new Uint8Array(sourceBuffer));
+        return { kind: 'ffi-struct', def: structDef, buffer };
+      }
       throw new Error(`Unknown FFI type: ${typeStr}`);
   }
 };
@@ -573,6 +826,8 @@ export const formatValue = (value: RuntimeValue): string => {
     case 'builtin': return `#<builtin ${value.name}>`;
     case 'ffi-library': return `#<ffi-library ${value.path}>`;
     case 'ffi-pointer': return `#<ffi-pointer 0x${value.ptr.toString(16)}>`;
+    case 'ffi-struct-def': return `#<ffi-struct-def ${value.def.name} (${value.def.size} bytes)>`;
+    case 'ffi-struct': return `#<ffi-struct ${value.def.name}>`;
     case 'environment': {
       const names = Array.from(value.env.bindings.keys());
       const hasParent = value.env.parent !== null;
