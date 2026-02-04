@@ -599,6 +599,16 @@ textarea::-webkit-scrollbar-thumb:hover {
   font-size: 0.7rem;
 }
 
+/* Hidden input for capturing dead keys and IME input */
+.hidden-input {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 /* ═══════════════════════════════════════════════════════════════
    Output Section Tabs
    ═══════════════════════════════════════════════════════════════ */

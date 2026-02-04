@@ -1,4 +1,4 @@
-import { createSignal, createMemo, createEffect, onMount, onCleanup, Show, batch } from 'solid-js';
+import { createSignal, createMemo, createEffect, onMount, onCleanup, Show, batch, type Accessor } from 'solid-js';
 import * as Marlang from '@marlang/browser';
 import ASTRenderer, { createASTState, navigate, scrollToPath, type NodePath, type NavigationDirection } from './ASTRenderer';
 import ReferencePanel from './ReferencePanel';
@@ -29,6 +29,9 @@ export default function App() {
 
   // Editor state (for structural editing)
   const editor = createEditorState();
+
+  // Hidden input for capturing composed characters (dead keys, IME)
+  let hiddenInputRef: HTMLInputElement | undefined;
 
   // AST state (for visual selection/collapse in display)
   const astState = createASTState();
@@ -358,31 +361,54 @@ export default function App() {
     }
   };
 
-  // Handle keys in insert mode
+  // Handle keys in insert mode (special keys only - characters go through hidden input)
   const handleInsertModeKey = (e: KeyboardEvent) => {
+    // Special keys are handled here; character input goes through hidden input
     switch (e.key) {
       case 'Escape':
         editor.exitInsertMode();
         e.preventDefault();
         return;
-
       case 'Enter':
         editor.commitInsert();
         e.preventDefault();
         return;
-
       case 'Backspace':
         editor.handleInsertBackspace();
         e.preventDefault();
         return;
+    }
+  };
 
-      default:
-        // Only accept printable characters
-        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-          editor.handleInsertInput(e.key);
-          e.preventDefault();
-        }
-        return;
+  // Handle input from hidden input (captures composed characters)
+  const handleHiddenInput = (e: InputEvent) => {
+    if (editor.mode() !== 'insert') return;
+    const input = e.target as HTMLInputElement;
+    const value = input.value;
+    if (value) {
+      for (const char of value) {
+        editor.handleInsertInput(char);
+      }
+      input.value = '';
+    }
+  };
+
+  // Handle keydown on hidden input for special keys
+  const handleHiddenKeyDown = (e: KeyboardEvent) => {
+    if (editor.mode() !== 'insert') return;
+    switch (e.key) {
+      case 'Escape':
+        editor.exitInsertMode();
+        e.preventDefault();
+        break;
+      case 'Enter':
+        editor.commitInsert();
+        e.preventDefault();
+        break;
+      case 'Backspace':
+        editor.handleInsertBackspace();
+        e.preventDefault();
+        break;
     }
   };
 
@@ -401,6 +427,15 @@ export default function App() {
     if (path.length > 0) {
       // Small delay to ensure DOM is updated
       requestAnimationFrame(() => scrollToPath(path));
+    }
+  });
+
+  // Focus hidden input when entering insert mode, blur when exiting
+  createEffect(() => {
+    if (editor.mode() === 'insert' && hiddenInputRef) {
+      hiddenInputRef.focus();
+    } else if (editor.mode() === 'normal' && hiddenInputRef) {
+      hiddenInputRef.blur();
     }
   });
 
@@ -512,6 +547,21 @@ export default function App() {
               <span class="insert-buffer">{editor.inputBuffer()}<span class="cursor-blink">|</span></span>
               <span class="insert-hint">Enter to confirm, Esc to cancel</span>
             </div>
+          </Show>
+
+          {/* Hidden input for capturing composed characters (dead keys, IME) - always rendered in AST mode */}
+          <Show when={viewMode() === 'ast'}>
+            <input
+              ref={hiddenInputRef}
+              type="text"
+              class="hidden-input"
+              onInput={handleHiddenInput}
+              onKeyDown={handleHiddenKeyDown}
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck={false}
+            />
           </Show>
 
           <Show when={viewMode() === 'ast' && editor.mode() === 'normal'}>
