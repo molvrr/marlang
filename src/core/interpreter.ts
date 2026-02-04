@@ -1,5 +1,9 @@
 import type { Expr, RuntimeValue, Env, FFISignature, TailCall, EvalOutcome, StructField, StructDef, EffectSuspension, Continuation } from './types';
+import type { ModuleContext, ModuleExports } from '../modules/module-types';
+import { emptyModuleContext, fileModuleContext } from '../modules/module-types';
+import { resolveModulePath, loadAndParseModule } from '../modules/module-loader';
 import { dlopen, FFIType, suffix, ptr, CString, toArrayBuffer, read } from 'bun:ffi';
+import * as path from 'path';
 
 // Environment operations
 export namespace Environment {
@@ -568,14 +572,42 @@ export const createDefaultEnv = (): Env => {
   for (const [name, fn] of builtins) {
     env = Environment.define(env, name, { kind: 'builtin', name, fn });
   }
+
+  // Add built-in ADT constructors
+  // Option type: None and Some
+  env = Environment.define(env, 'None', { kind: 'adt-value', constructor: 'None', args: [] });
+  env = Environment.define(env, 'Some', { kind: 'adt-constructor', name: 'Some', arity: 1 });
+
+  // List type: Nil and Cons
+  env = Environment.define(env, 'Nil', { kind: 'adt-value', constructor: 'Nil', args: [] });
+  env = Environment.define(env, 'Cons', { kind: 'adt-constructor', name: 'Cons', arity: 2 });
+
+  // Pair type: MkPair
+  env = Environment.define(env, 'MkPair', { kind: 'adt-constructor', name: 'MkPair', arity: 2 });
+
   return env;
 };
 
 // Interpreter
-export type T = { env: Env }
+export type T = {
+  env: Env;
+  moduleContext: ModuleContext;
+}
 export type EvalResult = { value: RuntimeValue, interp: T }
 
-export const empty = (): T => ({ env: createDefaultEnv() });
+export const empty = (filePath?: string): T => {
+  // For browser compatibility, only use path.resolve for non-absolute paths
+  let resolvedPath: string | null = null;
+  if (filePath) {
+    // Check if it's an absolute path (starts with / or Windows drive letter)
+    const isAbsolute = filePath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(filePath);
+    resolvedPath = isAbsolute ? filePath : path.resolve(filePath);
+  }
+  return {
+    env: createDefaultEnv(),
+    moduleContext: resolvedPath ? fileModuleContext(resolvedPath) : emptyModuleContext()
+  };
+};
 
 // Convert list Expr to array of Expr
 const listToArray = (expr: Expr): Expr[] => {
@@ -615,6 +647,37 @@ type HandlerFrame = {
 
 // Global handler stack (thread-local in a real implementation)
 let handlerStack: HandlerFrame[] = [];
+
+// =============================================================================
+// Effect Operation Registry
+// =============================================================================
+// Maps operation name -> effect name so default handlers only handle IO operations
+const effectOperationRegistry = new Map<string, string>();
+
+export function registerEffectOperation(effectName: string, opName: string) {
+  effectOperationRegistry.set(opName, effectName);
+}
+
+export function getEffectForOperation(opName: string): string | undefined {
+  return effectOperationRegistry.get(opName);
+}
+
+// =============================================================================
+// Default Handler Registry
+// =============================================================================
+// Default handlers that work without explicit handle blocks
+type DefaultHandler = (args: RuntimeValue[]) => RuntimeValue;
+
+// Map from "effectName:opName" to handler
+const defaultHandlers = new Map<string, DefaultHandler>();
+
+export function registerDefaultHandler(effectName: string, opName: string, handler: DefaultHandler) {
+  defaultHandlers.set(`${effectName}:${opName}`, handler);
+}
+
+export function getDefaultHandler(effectName: string, opName: string): DefaultHandler | undefined {
+  return defaultHandlers.get(`${effectName}:${opName}`);
+}
 
 
 // Pattern matching helper
@@ -833,7 +896,7 @@ function* evalExprGen(interp: T, expr: Expr): EvalGen {
       // Yield the effect suspension - the handler will provide the result
       const suspension: EffectSuspension = {
         kind: 'effect-suspension',
-        effectName: 'anonymous',
+        effectName: getEffectForOperation(opName) ?? 'anonymous',
         opName,
         args,
         continuation: null as any // Will be filled by handler
@@ -1197,12 +1260,19 @@ function* applyGen(fn: RuntimeValue, args: RuntimeValue[]): EvalGen {
   throw new Error(`Cannot apply non-function: ${fn.kind}`);
 }
 
-// Run a generator to completion, re-throwing any effect suspensions as errors
+// Run a generator to completion, using default handlers for effects
 function runGeneratorToCompletion(gen: EvalGen): RuntimeValue {
   let result = gen.next();
   while (!result.done) {
-    // If the generator yields, it means an unhandled effect
-    throw new Error(`Unhandled effect: ${result.value.opName}`);
+    const suspension = result.value;
+    // Check default handlers before throwing
+    const defaultHandler = getDefaultHandler(suspension.effectName, suspension.opName);
+    if (defaultHandler) {
+      const handlerResult = defaultHandler(suspension.args);
+      result = gen.next(handlerResult);
+      continue;
+    }
+    throw new Error(`Unhandled effect: ${suspension.opName}`);
   }
   return result.value;
 }
@@ -1229,6 +1299,14 @@ function runHandledComputation(gen: EvalGen, frame: HandlerFrame, outerEnv: Env)
     }
 
     if (foundHandler === null) {
+      // Check default handlers before throwing
+      const defaultHandler = getDefaultHandler(suspension.effectName, suspension.opName);
+      if (defaultHandler) {
+        const handlerResult = defaultHandler(suspension.args);
+        // Resume continuation with the result
+        result = gen.next(handlerResult);
+        continue;
+      }
       throw new Error(`Unhandled effect: ${suspension.opName}`);
     }
 
@@ -1308,6 +1386,152 @@ const apply = (fn: RuntimeValue, args: RuntimeValue[]): RuntimeValue => {
   return trampoline(applyInternal(fn, args));
 };
 
+// Import a module and merge its exports into the current environment
+// Syntax:
+//   (import "path/to/module.mar") - import all bindings
+//   (import "path/to/module.mar" (foo bar)) - selective imports
+//   (import "path/to/module.mar" as m) - qualified imports (m/foo)
+const evalImport = (interp: T, elements: Expr[]): RuntimeValue => {
+  if (elements.length < 2) throw new Error('import expects at least a path');
+
+  // Get the import path (must be a string literal)
+  const pathExpr = elements[1];
+  if (pathExpr?.kind !== 'atom' || pathExpr.value.kind !== 'string') {
+    throw new Error('import path must be a string literal');
+  }
+  const importPath = pathExpr.value.value;
+
+  // Determine import form
+  let importForm: 'all' | 'selective' | 'qualified' = 'all';
+  let selectedNames: string[] = [];
+  let qualifier = '';
+
+  if (elements.length >= 3) {
+    const second = elements[2];
+    // Check for (import "path" as m)
+    if (second?.kind === 'atom' && second.value.kind === 'symbol' && second.value.value === 'as') {
+      if (elements.length !== 4) throw new Error('import as expects a qualifier name');
+      const qualExpr = elements[3];
+      if (qualExpr?.kind !== 'atom' || qualExpr.value.kind !== 'symbol') {
+        throw new Error('import qualifier must be a symbol');
+      }
+      importForm = 'qualified';
+      qualifier = qualExpr.value.value;
+    } else if (second?.kind === 'list') {
+      // Check for (import "path" (foo bar))
+      importForm = 'selective';
+      const names = listToArray(second);
+      for (const n of names) {
+        if (n.kind !== 'atom' || n.value.kind !== 'symbol') {
+          throw new Error('import names must be symbols');
+        }
+        selectedNames.push(n.value.value);
+      }
+    } else {
+      throw new Error('Invalid import syntax');
+    }
+  }
+
+  // Resolve the module path
+  if (!interp.moduleContext.filePath) {
+    throw new Error('Cannot use import without a file context (use from REPL not supported)');
+  }
+  const absolutePath = resolveModulePath(importPath, interp.moduleContext.filePath);
+
+  // Check cache for already loaded module
+  const cached = interp.moduleContext.cache.get(absolutePath);
+  if (cached) {
+    if (cached.status === 'loading') {
+      throw new Error(`Circular dependency detected: ${absolutePath}`);
+    }
+    // Module already loaded - merge exports
+    mergeExports(interp, cached.exports.bindings, importForm, selectedNames, qualifier);
+    return { kind: 'nil' };
+  }
+
+  // Mark module as loading (for circular dependency detection)
+  interp.moduleContext.cache.set(absolutePath, { status: 'loading' });
+
+  // Load and parse the module
+  const moduleExprs = loadAndParseModule(absolutePath);
+
+  // Create a fresh interpreter for the module with shared cache
+  const moduleInterp: T = {
+    env: createDefaultEnv(),
+    moduleContext: {
+      filePath: absolutePath,
+      cache: interp.moduleContext.cache, // Share the cache
+    },
+  };
+
+  // Evaluate the module
+  for (const expr of moduleExprs) {
+    trampoline(evalExprTail(moduleInterp, expr, false));
+  }
+
+  // Collect exports (all top-level bindings)
+  const exports: ModuleExports = {
+    bindings: new Map(moduleInterp.env.bindings),
+    typeEnv: null as any, // Type env is handled by type checker separately
+  };
+
+  // Cache the loaded module
+  interp.moduleContext.cache.set(absolutePath, { status: 'loaded', exports });
+
+  // Merge exports into current environment
+  mergeExports(interp, exports.bindings, importForm, selectedNames, qualifier);
+
+  return { kind: 'nil' };
+};
+
+// Merge module exports into the current environment
+const mergeExports = (
+  interp: T,
+  exports: Map<string, RuntimeValue>,
+  importForm: 'all' | 'selective' | 'qualified',
+  selectedNames: string[],
+  qualifier: string
+): void => {
+  if (importForm === 'all') {
+    // Import all bindings
+    for (const [name, value] of exports) {
+      // Skip built-ins (they're already in the env)
+      if (!isBuiltinName(name)) {
+        interp.env.bindings.set(name, value);
+      }
+    }
+  } else if (importForm === 'selective') {
+    // Import only selected bindings
+    for (const name of selectedNames) {
+      const value = exports.get(name);
+      if (value === undefined) {
+        throw new Error(`Module does not export: ${name}`);
+      }
+      interp.env.bindings.set(name, value);
+    }
+  } else if (importForm === 'qualified') {
+    // Import with prefix
+    for (const [name, value] of exports) {
+      if (!isBuiltinName(name)) {
+        interp.env.bindings.set(`${qualifier}/${name}`, value);
+      }
+    }
+  }
+};
+
+// Check if a name is a built-in (to avoid re-exporting built-ins)
+const isBuiltinName = (name: string): boolean => {
+  const builtinNames = new Set([
+    '+', '-', '*', '/', 'negate', '<', '>', '=', '<=', '>=',
+    'list', 'show', 'nil',
+    'ffi-open', 'ffi-call', 'ffi-close',
+    'ffi-struct', 'struct-new', 'struct-get', 'struct-set',
+    'env-bindings', 'env-get', 'env-parent',
+    'Nil', 'Cons', 'None', 'Some', 'MkPair',
+  ]);
+  return builtinNames.has(name);
+};
+
 // Tail-position-aware expression evaluation
 // Returns EvalOutcome which may be a TailCall thunk when isTail is true
 const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
@@ -1323,6 +1547,13 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
     }
     if (expr.value.kind === 'string') {
       return { kind: 'string', value: expr.value.value };
+    }
+    // Boolean literals
+    if (expr.value.value === '#t') {
+      return { kind: 'boolean', value: true };
+    }
+    if (expr.value.value === '#f') {
+      return { kind: 'boolean', value: false };
     }
     // Symbol lookup
     return Environment.lookup(interp.env, expr.value.value);
@@ -1623,19 +1854,63 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
       return { kind: 'nil' };
     }
 
-    // effect - define effect type (no-op at runtime for now)
-    // Syntax: (effect EffectName (op1 : Type1 -> Type2) ...)
+    // effect - define effect type and register operations
+    // Syntax: (effect EffectName (op1 (-> Type1 Type2)) ...)
     if (sym === 'effect') {
-      // Effect declarations are processed at type-check time
-      // At runtime, we just validate basic structure
       if (elements.length < 2) throw new Error('effect expects a name');
+      const nameExpr = elements[1];
+      if (nameExpr?.kind !== 'atom' || nameExpr.value.kind !== 'symbol') {
+        throw new Error('effect name must be a symbol');
+      }
+      const effectName = nameExpr.value.value;
+
+      // Register each operation with the effect registry
+      for (let i = 2; i < elements.length; i++) {
+        const opExpr = elements[i];
+        if (opExpr?.kind === 'list') {
+          const opElements = listToArray(opExpr);
+          const opNameExpr = opElements[0];
+          if (opNameExpr?.kind === 'atom' && opNameExpr.value.kind === 'symbol') {
+            registerEffectOperation(effectName, opNameExpr.value.value);
+          }
+        }
+      }
       return { kind: 'nil' };
     }
 
-    // perform - this should only be called in non-generator context
-    // Real performs happen in evalExprGen
+    // import - load and evaluate a module
+    // Syntax:
+    //   (import "path/to/module.mar") - import all bindings
+    //   (import "path/to/module.mar" (foo bar)) - selective imports
+    //   (import "path/to/module.mar" as m) - qualified imports (m/foo)
+    if (sym === 'import') {
+      return evalImport(interp, elements);
+    }
+
+    // perform - use generator-based evaluation to allow default handlers
     if (sym === 'perform') {
-      throw new Error('perform must be used inside a handle expression');
+      if (elements.length < 2) throw new Error('perform expects an operation name');
+      const opExpr = elements[1];
+      if (opExpr?.kind !== 'atom' || opExpr.value.kind !== 'symbol') {
+        throw new Error('perform expects an operation name symbol');
+      }
+      const opName = opExpr.value.value;
+
+      // Evaluate arguments
+      const argExprs = elements.slice(2);
+      const args: RuntimeValue[] = [];
+      for (const argExpr of argExprs) {
+        args.push(trampoline(evalExprTail(interp, argExpr, false)));
+      }
+
+      // Check for default handler
+      const effectName = getEffectForOperation(opName) ?? 'anonymous';
+      const defaultHandler = getDefaultHandler(effectName, opName);
+      if (defaultHandler) {
+        return defaultHandler(args);
+      }
+
+      throw new Error(`Unhandled effect: ${opName}`);
     }
 
     // handle - install effect handlers using generator-based evaluation

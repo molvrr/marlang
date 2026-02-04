@@ -1,7 +1,7 @@
 import { test, expect, describe } from 'bun:test';
-import * as Lexer from '../lexer';
-import * as Parser from '../parser';
-import type { Expr } from '../types';
+import * as Lexer from '../src/core/lexer';
+import * as Parser from '../src/core/parser';
+import type { Expr } from '../src/core/types';
 
 // Helper to parse code
 const parse = (code: string): Expr[] => {

@@ -1,0 +1,237 @@
+; List utilities for the built-in List type
+; List is already defined as: (data (List a) Nil (Cons a (List a)))
+
+; Pair type for zip operations
+(data (Pair a b) (Pair a b))
+
+; ============================================================
+; Higher-Order Functions (defined first for use in other functions)
+; ============================================================
+
+; foldl : (-> (-> b a b) b (List a) b)
+; Left fold (tail-recursive)
+(define (foldl : (-> (-> b a b) b (List a) b))
+  (lambda (f acc lst)
+    (match lst
+      ((Nil) acc)
+      ((Cons h t) (foldl f (f acc h) t)))))
+
+; foldr : (-> (-> a b b) b (List a) b)
+; Right fold
+(define (foldr : (-> (-> a b b) b (List a) b))
+  (lambda (f acc lst)
+    (match lst
+      ((Nil) acc)
+      ((Cons h t) (f h (foldr f acc t))))))
+
+; ============================================================
+; Basic Operations
+; ============================================================
+
+; length : (-> (List a) Int)
+; Count the number of elements in a list
+(define (length : (-> (List a) Int))
+  (lambda (lst)
+    (match lst
+      ((Nil) 0)
+      ((Cons _ t) (+ 1 (length t))))))
+
+; reverse : (-> (List a) (List a))
+; Reverse a list
+(define (reverse : (-> (List a) (List a)))
+  (lambda (lst)
+    (foldl (lambda (acc x) (Cons x acc)) Nil lst)))
+
+; concat : (-> (List a) (List a) (List a))
+; Append two lists
+(define (concat : (-> (List a) (List a) (List a)))
+  (lambda (xs ys)
+    (match xs
+      ((Nil) ys)
+      ((Cons h t) (Cons h (concat t ys))))))
+
+; singleton : (-> a (List a))
+; Create a single-element list
+(define (singleton : (-> a (List a)))
+  (lambda (x)
+    (Cons x Nil)))
+
+; is-empty : (-> (List a) Bool)
+; Check if a list is empty
+(define (is-empty : (-> (List a) Bool))
+  (lambda (lst)
+    (match lst
+      ((Nil) #t)
+      ((Cons _ _) #f))))
+
+; ============================================================
+; Safe Accessors (Option-returning)
+; ============================================================
+
+; head : (-> (List a) (Option a))
+; Get the first element, or None if empty
+(define (head : (-> (List a) (Option a)))
+  (lambda (lst)
+    (match lst
+      ((Nil) None)
+      ((Cons h _) (Some h)))))
+
+; tail : (-> (List a) (Option (List a)))
+; Get all but the first element, or None if empty
+(define (tail : (-> (List a) (Option (List a))))
+  (lambda (lst)
+    (match lst
+      ((Nil) None)
+      ((Cons _ t) (Some t)))))
+
+; last : (-> (List a) (Option a))
+; Get the last element, or None if empty
+(define (last : (-> (List a) (Option a)))
+  (lambda (lst)
+    (match lst
+      ((Nil) None)
+      ((Cons h (Nil)) (Some h))
+      ((Cons _ t) (last t)))))
+
+; init : (-> (List a) (Option (List a)))
+; Get all but the last element, or None if empty
+(define (init : (-> (List a) (Option (List a))))
+  (lambda (lst)
+    (match lst
+      ((Nil) None)
+      ((Cons _ (Nil)) (Some Nil))
+      ((Cons h t)
+        (match (init t)
+          (None None)
+          ((Some rest) (Some (Cons h rest))))))))
+
+; nth : (-> Int (List a) (Option a))
+; Get element at index (0-based), or None if out of bounds
+(define (nth : (-> Int (List a) (Option a)))
+  (lambda (n lst)
+    (match lst
+      ((Nil) None)
+      ((Cons h t) (if (= n 0) (Some h) (nth (- n 1) t))))))
+
+; ============================================================
+; Map and Filter
+; ============================================================
+
+; map : (-> (-> a b) (List a) (List b))
+; Apply a function to each element
+(define (map : (-> (-> a b) (List a) (List b)))
+  (lambda (f lst)
+    (match lst
+      ((Nil) Nil)
+      ((Cons h t) (Cons (f h) (map f t))))))
+
+; filter : (-> (-> a Bool) (List a) (List a))
+; Keep elements that satisfy the predicate
+(define (filter : (-> (-> a Bool) (List a) (List a)))
+  (lambda (pred lst)
+    (match lst
+      ((Nil) Nil)
+      ((Cons h t)
+        (if (pred h)
+          (Cons h (filter pred t))
+          (filter pred t))))))
+
+; ============================================================
+; Predicates
+; ============================================================
+
+; any : (-> (-> a Bool) (List a) Bool)
+; True if any element satisfies the predicate
+(define (any : (-> (-> a Bool) (List a) Bool))
+  (lambda (pred lst)
+    (match lst
+      ((Nil) #f)
+      ((Cons h t) (if (pred h) #t (any pred t))))))
+
+; all : (-> (-> a Bool) (List a) Bool)
+; True if all elements satisfy the predicate
+(define (all : (-> (-> a Bool) (List a) Bool))
+  (lambda (pred lst)
+    (match lst
+      ((Nil) #t)
+      ((Cons h t) (if (pred h) (all pred t) #f)))))
+
+; find : (-> (-> a Bool) (List a) (Option a))
+; Find the first element that satisfies the predicate
+(define (find : (-> (-> a Bool) (List a) (Option a)))
+  (lambda (pred lst)
+    (match lst
+      ((Nil) None)
+      ((Cons h t) (if (pred h) (Some h) (find pred t))))))
+
+; ============================================================
+; Subsequences
+; ============================================================
+
+; take : (-> Int (List a) (List a))
+; Take the first n elements
+(define (take : (-> Int (List a) (List a)))
+  (lambda (n lst)
+    (if (<= n 0)
+      Nil
+      (match lst
+        ((Nil) Nil)
+        ((Cons h t) (Cons h (take (- n 1) t)))))))
+
+; drop : (-> Int (List a) (List a))
+; Drop the first n elements
+(define (drop : (-> Int (List a) (List a)))
+  (lambda (n lst)
+    (if (<= n 0)
+      lst
+      (match lst
+        ((Nil) Nil)
+        ((Cons _ t) (drop (- n 1) t))))))
+
+; take-while : (-> (-> a Bool) (List a) (List a))
+; Take elements while predicate holds
+(define (take-while : (-> (-> a Bool) (List a) (List a)))
+  (lambda (pred lst)
+    (match lst
+      ((Nil) Nil)
+      ((Cons h t)
+        (if (pred h)
+          (Cons h (take-while pred t))
+          Nil)))))
+
+; drop-while : (-> (-> a Bool) (List a) (List a))
+; Drop elements while predicate holds
+(define (drop-while : (-> (-> a Bool) (List a) (List a)))
+  (lambda (pred lst)
+    (match lst
+      ((Nil) Nil)
+      ((Cons h t)
+        (if (pred h)
+          (drop-while pred t)
+          lst)))))
+
+; ============================================================
+; Combining Lists
+; ============================================================
+
+; zip : (-> (List a) (List b) (List (Pair a b)))
+; Pair up elements from two lists
+(define (zip : (-> (List a) (List b) (List (Pair a b))))
+  (lambda (xs ys)
+    (match xs
+      ((Nil) Nil)
+      ((Cons x xt)
+        (match ys
+          ((Nil) Nil)
+          ((Cons y yt) (Cons (Pair x y) (zip xt yt))))))))
+
+; zip-with : (-> (-> a b c) (List a) (List b) (List c))
+; Combine elements from two lists using a function
+(define (zip-with : (-> (-> a b c) (List a) (List b) (List c)))
+  (lambda (f xs ys)
+    (match xs
+      ((Nil) Nil)
+      ((Cons x xt)
+        (match ys
+          ((Nil) Nil)
+          ((Cons y yt) (Cons (f x y) (zip-with f xt yt))))))))

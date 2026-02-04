@@ -1,7 +1,7 @@
 import { test, expect, describe } from 'bun:test';
-import * as Lexer from '../lexer';
-import * as Parser from '../parser';
-import * as Interpreter from '../interpreter';
+import * as Lexer from '../src/core/lexer';
+import * as Parser from '../src/core/parser';
+import * as Interpreter from '../src/core/interpreter';
 
 // Helper to run code and return result
 const run = (interp: Interpreter.T, code: string): { interp: Interpreter.T; value: string } => {

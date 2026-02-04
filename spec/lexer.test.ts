@@ -1,5 +1,5 @@
 import { test, expect, describe } from 'bun:test';
-import * as Lexer from '../lexer';
+import * as Lexer from '../src/core/lexer';
 
 // Helper to lex code and return tokens (excluding whitespace/comments)
 const lex = (code: string): Lexer.Token[] => {

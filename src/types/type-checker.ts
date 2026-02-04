@@ -1,6 +1,6 @@
 // Main type checker entry point
 
-import type { Expr } from './types';
+import type { Expr } from '../core/types';
 import type { Type } from './type-ast';
 import { formatType, formatScheme } from './type-ast';
 import type { TypeEnv } from './type-env';
@@ -16,7 +16,7 @@ export type TypeCheckResult =
   | { ok: false; error: TypeError };
 
 // Type check a program
-export const typeCheck = (exprs: Expr[]): TypeCheckResult => {
+export const typeCheck = (exprs: Expr[], filePath?: string): TypeCheckResult => {
   // Reset type variable counter for fresh inference
   resetTypeVarCounter();
 
@@ -24,7 +24,7 @@ export const typeCheck = (exprs: Expr[]): TypeCheckResult => {
   const env = createBuiltinEnv();
 
   // Run type inference
-  const result = inferProgram(env, exprs);
+  const result = inferProgram(env, exprs, filePath);
 
   if (!result.ok) {
     return { ok: false, error: result.error };

@@ -139,7 +139,7 @@ export const lookupEffect = (env: TypeEnv, name: string): EffectDeclaration | un
 export const lookupEffectOp = (
   env: TypeEnv,
   opName: string
-): { effect: EffectDeclaration; op: { name: string; params: Type[]; result: Type } } | undefined => {
+): { effect: EffectDeclaration; op: { name: string; typeParams: string[]; constraints: Constraint[]; params: Type[]; result: Type } } | undefined => {
   let current: TypeEnv | null = env;
   while (current !== null) {
     for (const effect of current.effects.values()) {
@@ -400,4 +400,225 @@ export const instantiate = (scheme: TypeScheme): { type: Type; constraints: Cons
     type: applySubst(subst, scheme.qualType.type),
     constraints: scheme.qualType.constraints.map((c) => applySubstConstraint(subst, c)),
   };
+};
+
+// Rewrite type constant names in a Type based on a name mapping
+// Used for qualified imports to transform type references
+const rewriteType = (t: Type, nameMap: Map<string, string>): Type => {
+  switch (t.kind) {
+    case 'type-var':
+      return t;
+    case 'type-const': {
+      const newName = nameMap.get(t.name);
+      return newName ? { kind: 'type-const', name: newName } : t;
+    }
+    case 'type-app': {
+      const newConstructor = rewriteType(t.constructor, nameMap);
+      const newArgs = t.args.map(arg => rewriteType(arg, nameMap));
+      return { kind: 'type-app', constructor: newConstructor, args: newArgs };
+    }
+    case 'type-arrow': {
+      const newParams = t.params.map(p => rewriteType(p, nameMap));
+      const newResult = rewriteType(t.result, nameMap);
+      const newEffects = t.effects ? rewriteEffectRow(t.effects, nameMap) : null;
+      return { kind: 'type-arrow', params: newParams, effects: newEffects, result: newResult };
+    }
+    case 'type-rec': {
+      const newBody = rewriteType(t.body, nameMap);
+      return { kind: 'type-rec', var: t.var, body: newBody };
+    }
+  }
+};
+
+// Rewrite effect row (effect names might need qualification too)
+const rewriteEffectRow = (row: EffectRow, nameMap: Map<string, string>): EffectRow => {
+  const newEffects = row.effects.map(e => nameMap.get(e) || e);
+  if (row.kind === 'effect-row-open') {
+    return { kind: 'effect-row-open', effects: newEffects, rowVar: row.rowVar };
+  }
+  return { kind: 'effect-row-closed', effects: newEffects };
+};
+
+// Rewrite constraint type references
+const rewriteConstraint = (c: Constraint, nameMap: Map<string, string>): Constraint => ({
+  class: c.class,
+  typeArg: rewriteType(c.typeArg, nameMap),
+});
+
+// Rewrite type scheme
+const rewriteTypeScheme = (scheme: TypeScheme, nameMap: Map<string, string>): TypeScheme => ({
+  quantifiedVars: scheme.quantifiedVars,
+  qualType: {
+    constraints: scheme.qualType.constraints.map(c => rewriteConstraint(c, nameMap)),
+    type: rewriteType(scheme.qualType.type, nameMap),
+  },
+});
+
+// Rewrite constructor
+const rewriteConstructor = (ctor: Constructor, nameMap: Map<string, string>): Constructor => ({
+  name: ctor.name,
+  params: ctor.params.map(p => rewriteType(p, nameMap)),
+  resultType: rewriteType(ctor.resultType, nameMap),
+});
+
+// Rewrite data type definition
+const rewriteDataType = (dt: DataType, nameMap: Map<string, string>, newName: string): DataType => ({
+  name: newName,
+  typeParams: dt.typeParams,
+  constructors: dt.constructors.map(c => rewriteConstructor(c, nameMap)),
+});
+
+// Rewrite effect declaration
+const rewriteEffectDecl = (effect: EffectDeclaration, nameMap: Map<string, string>, newName: string): EffectDeclaration => ({
+  name: newName,
+  typeParams: effect.typeParams,
+  operations: effect.operations.map(op => ({
+    name: op.name,
+    typeParams: op.typeParams,
+    constraints: op.constraints.map(c => rewriteConstraint(c, nameMap)),
+    params: op.params.map(p => rewriteType(p, nameMap)),
+    result: rewriteType(op.result, nameMap),
+  })),
+});
+
+// Merge another environment's exports into this one
+// Used for imports - merges bindings, dataTypes, constructors, effects, etc.
+export const mergeEnv = (
+  target: TypeEnv,
+  source: TypeEnv,
+  options: {
+    mode: 'all' | 'selective' | 'qualified';
+    selectedNames?: string[];
+    qualifier?: string;
+  }
+): TypeEnv => {
+  const { mode, selectedNames = [], qualifier = '' } = options;
+
+  let result = { ...target };
+
+  // Helper to decide if a name should be imported
+  const shouldImport = (name: string): boolean => {
+    if (mode === 'all') return true;
+    if (mode === 'selective') return selectedNames.includes(name);
+    if (mode === 'qualified') return true;
+    return false;
+  };
+
+  // Helper to transform name based on mode
+  const transformName = (name: string): string => {
+    if (mode === 'qualified') return `${qualifier}/${name}`;
+    return name;
+  };
+
+  // Build a name mapping for type rewriting (only for qualified imports)
+  // Maps original type names to their qualified versions
+  // Important: Only rewrite types that are actually NEW in the source module,
+  // not built-in types that already exist in the target environment
+  const typeNameMap = new Map<string, string>();
+  if (mode === 'qualified') {
+    // Add data type names (only those not already in target)
+    for (const [name] of source.dataTypes) {
+      if (!target.dataTypes.has(name)) {
+        typeNameMap.set(name, `${qualifier}/${name}`);
+      }
+    }
+    // Add effect names (only those not already in target)
+    for (const [name] of source.effects) {
+      if (!target.effects.has(name)) {
+        typeNameMap.set(name, `${qualifier}/${name}`);
+      }
+    }
+    // Add type alias names (only those not already in target)
+    for (const [name] of source.aliases) {
+      if (!target.aliases.has(name)) {
+        typeNameMap.set(name, `${qualifier}/${name}`);
+      }
+    }
+  }
+
+  // Merge bindings (with type rewriting for qualified imports)
+  const newBindings = new Map(target.bindings);
+  for (const [name, scheme] of source.bindings) {
+    if (shouldImport(name)) {
+      const rewrittenScheme = mode === 'qualified' ? rewriteTypeScheme(scheme, typeNameMap) : scheme;
+      newBindings.set(transformName(name), rewrittenScheme);
+    }
+  }
+  result = { ...result, bindings: newBindings };
+
+  // Merge dataTypes (with type rewriting for qualified imports)
+  const newDataTypes = new Map(target.dataTypes);
+  for (const [name, dt] of source.dataTypes) {
+    if (shouldImport(name)) {
+      const newName = transformName(name);
+      const rewrittenDt = mode === 'qualified' ? rewriteDataType(dt, typeNameMap, newName) : dt;
+      newDataTypes.set(newName, rewrittenDt);
+    }
+  }
+  result = { ...result, dataTypes: newDataTypes };
+
+  // Merge constructors (with type rewriting for qualified imports)
+  const newConstructors = new Map(target.constructors);
+  for (const [name, entry] of source.constructors) {
+    if (shouldImport(name)) {
+      const newName = transformName(name);
+      if (mode === 'qualified') {
+        // Rewrite constructor and update dataType reference
+        const rewrittenCtor = rewriteConstructor(entry.constructor, typeNameMap);
+        // Also need the rewritten dataType
+        const dtNewName = transformName(entry.dataType.name);
+        const rewrittenDt = rewriteDataType(entry.dataType, typeNameMap, dtNewName);
+        newConstructors.set(newName, { dataType: rewrittenDt, constructor: rewrittenCtor });
+      } else {
+        newConstructors.set(newName, entry);
+      }
+    }
+  }
+  result = { ...result, constructors: newConstructors };
+
+  // Merge effects (with type rewriting for qualified imports)
+  const newEffects = new Map(target.effects);
+  for (const [name, effect] of source.effects) {
+    if (shouldImport(name)) {
+      const newName = transformName(name);
+      const rewrittenEffect = mode === 'qualified' ? rewriteEffectDecl(effect, typeNameMap, newName) : effect;
+      newEffects.set(newName, rewrittenEffect);
+    }
+  }
+  result = { ...result, effects: newEffects };
+
+  // Merge aliases (with type rewriting for qualified imports)
+  const newAliases = new Map(target.aliases);
+  for (const [name, alias] of source.aliases) {
+    if (shouldImport(name)) {
+      const newName = transformName(name);
+      if (mode === 'qualified') {
+        const rewrittenAlias: TypeAlias = {
+          name: newName,
+          typeParams: alias.typeParams,
+          body: rewriteType(alias.body, typeNameMap),
+        };
+        newAliases.set(newName, rewrittenAlias);
+      } else {
+        newAliases.set(newName, alias);
+      }
+    }
+  }
+  result = { ...result, aliases: newAliases };
+
+  // Classes and instances are typically global, import all for now
+  const newClasses = new Map(target.classes);
+  for (const [name, cls] of source.classes) {
+    newClasses.set(name, cls);
+  }
+  result = { ...result, classes: newClasses };
+
+  const newInstances = new Map(target.instances);
+  for (const [name, insts] of source.instances) {
+    const existing = newInstances.get(name) || [];
+    newInstances.set(name, [...existing, ...insts]);
+  }
+  result = { ...result, instances: newInstances };
+
+  return result;
 };

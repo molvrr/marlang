@@ -1,0 +1,167 @@
+; Math utilities module
+; Provides mathematical functions and constants
+
+; ============================================================
+; Constants
+; ============================================================
+
+; pi : Float
+; The mathematical constant pi (3.14159...)
+(define (pi : Float) 3.141592653589793)
+
+; e : Float
+; Euler's number (2.71828...)
+(define (e : Float) 2.718281828459045)
+
+; tau : Float
+; Tau (2 * pi)
+(define (tau : Float) 6.283185307179586)
+
+; ============================================================
+; Basic Operations (polymorphic via Num/Ord typeclasses)
+; ============================================================
+
+; abs uses the built-in abs function
+; sign uses the built-in sign function
+
+; min-of : (=> (Ord a) (-> a a a))
+; Minimum of two values
+(define (min-of : (=> (Ord a) (-> a a a)))
+  (lambda (x y)
+    (if (< x y) x y)))
+
+; max-of : (=> (Ord a) (-> a a a))
+; Maximum of two values
+(define (max-of : (=> (Ord a) (-> a a a)))
+  (lambda (x y)
+    (if (> x y) x y)))
+
+; clamp : (=> (Ord a) (-> a a a a))
+; Clamp a value between min and max bounds
+(define (clamp : (=> (Ord a) (-> a a a a)))
+  (lambda (lo hi x)
+    (if (< x lo) lo
+      (if (> x hi) hi x))))
+
+; ============================================================
+; Rounding (Float -> Int)
+; ============================================================
+
+; Note: floor, ceil, round, truncate are built-in functions
+
+; ============================================================
+; Powers and Roots
+; ============================================================
+
+; Note: pow, sqrt are built-in functions
+
+; square : (=> (Num a) (-> a a))
+; Square a number
+(define (square : (=> (Num a) (-> a a)))
+  (lambda (x) (* x x)))
+
+; cube : (=> (Num a) (-> a a))
+; Cube a number
+(define (cube : (=> (Num a) (-> a a)))
+  (lambda (x) (* x (* x x))))
+
+; ============================================================
+; Integer Division and Modulo
+; ============================================================
+
+; Note: mod, rem are built-in functions
+
+; div : (=> (Num a) (-> a a a))
+; Integer division (truncated toward zero)
+; Uses rem to compute: a = (a / b) * b + (a rem b)
+; So (a / b) = (a - (a rem b)) / b
+(define (div : (=> (Num a) (-> a a a)))
+  (lambda (a b)
+    (let ((r (rem a b)))
+      (/ (- a r) b))))
+
+; even : (-> Int Bool)
+; Check if an integer is even
+(define (even : (-> Int Bool))
+  (lambda (n)
+    (= (rem n 2) 0)))
+
+; odd : (-> Int Bool)
+; Check if an integer is odd
+(define (odd : (-> Int Bool))
+  (lambda (n)
+    (if (even n) #f #t)))
+
+; ============================================================
+; Exponentials and Logarithms
+; ============================================================
+
+; Note: exp, log, log10, log2 are built-in functions
+
+; log-base : (-> Float Float Float)
+; Logarithm with arbitrary base
+(define (log-base : (-> Float Float Float))
+  (lambda (base x)
+    (/ (log x) (log base))))
+
+; ============================================================
+; Trigonometric Functions
+; ============================================================
+
+; Note: sin, cos, tan, asin, acos, atan, atan2 are built-in functions
+
+; ============================================================
+; Hyperbolic Functions
+; ============================================================
+
+; Note: sinh, cosh, tanh are built-in functions
+
+; ============================================================
+; Angle Conversion
+; ============================================================
+
+; degrees : (-> Float Float)
+; Convert radians to degrees
+(define (degrees : (-> Float Float))
+  (lambda (radians)
+    (* radians (/ 180.0 pi))))
+
+; radians : (-> Float Float)
+; Convert degrees to radians
+(define (radians : (-> Float Float))
+  (lambda (deg)
+    (* deg (/ pi 180.0))))
+
+; ============================================================
+; Special Value Checks
+; ============================================================
+
+; Note: is-nan, is-infinite, is-finite are built-in functions
+
+; ============================================================
+; Number Theory Functions
+; ============================================================
+
+; gcd : (-> Int Int Int)
+; Greatest common divisor (Euclidean algorithm)
+(define (gcd : (-> Int Int Int))
+  (lambda (a b)
+    (if (= b 0)
+      (abs a)
+      (gcd b (rem a b)))))
+
+; lcm : (-> Int Int Int)
+; Least common multiple
+(define (lcm : (-> Int Int Int))
+  (lambda (a b)
+    (if (= a 0)
+      0
+      (abs (* (div a (gcd a b)) b)))))
+
+; factorial : (-> Int Int)
+; Factorial (n!)
+(define (factorial : (-> Int Int))
+  (lambda (n)
+    (if (<= n 1)
+      1
+      (* n (factorial (- n 1))))))

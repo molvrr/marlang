@@ -36,7 +36,7 @@ const send = (msg: Message): void => {
 
 // Analyze a document and publish diagnostics
 const analyzeDocument = (uri: string, content: string, version?: number): void => {
-  const result = analyze(content);
+  const result = analyze(content, uri);
   analysisCache.set(uri, result);
   send(publishDiagnostics(uri, result.diagnostics, version));
 };

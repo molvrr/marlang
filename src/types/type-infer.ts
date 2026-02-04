@@ -1,7 +1,11 @@
 // Type inference engine
 
-import type { Expr, LispValue } from './types';
+import type { Expr, LispValue } from '../core/types';
 import type { Type, TypeScheme, Constraint, Pattern, MatchBranch, DataType, EffectRow, EffectDeclaration } from './type-ast';
+import type { ModuleContext } from '../modules/module-types';
+import { emptyModuleContext, fileModuleContext } from '../modules/module-types';
+import { resolveModulePath, loadAndParseModule } from '../modules/module-loader';
+import * as path from 'path';
 import {
   typeVar,
   typeConst,
@@ -43,6 +47,7 @@ import {
   instantiate,
   defineDataType,
   extendEnvMany,
+  mergeEnv,
   type EffectRowSubstitution,
   emptyEffectRowSubst,
   applyEffectRowSubst,
@@ -362,6 +367,10 @@ export const inferExpr = (
         return inferHandle(env, elements);
       case 'resume':
         return inferResume(env, elements);
+      case 'import':
+        // Import is processed at program level in inferProgram
+        // Here we just return Unit to avoid "undefined variable" errors
+        return ok(pureResult(tUnit));
     }
   }
 
@@ -1319,20 +1328,20 @@ const inferTypeAlias = (_env: TypeEnv, _elements: Expr[]): TypeResult<InferResul
 
 // ===== Effect System =====
 
-// Parse an effect operation from (op-name : ParamType -> ResultType)
+// Parse an effect operation from (op-name (-> ParamTypes... ResultType))
+// or with constraints: (op-name (=> (Show a) (-> a Unit)))
 const parseEffectOp = (
   expr: Expr,
   env: TypeEnv
-): TypeResult<{ name: string; params: Type[]; result: Type }> => {
+): TypeResult<{ name: string; typeParams: string[]; constraints: Constraint[]; params: Type[]; result: Type }> => {
   if (expr.kind !== 'list') {
     return err({ kind: 'invalid-type-annotation', message: 'Effect operation must be a list' });
   }
 
   const elements = listToArray(expr);
-  // Format: (op-name : Type1 -> Type2)
-  // Elements: [op-name, :, Type1, ->, Type2]
-  if (elements.length < 3) {
-    return err({ kind: 'invalid-type-annotation', message: 'Effect operation must be (name : ParamType -> ResultType)' });
+  // Format: (op-name (-> Type1 Type2)) or (op-name (=> (Constraint a) (-> Type1 Type2)))
+  if (elements.length !== 2) {
+    return err({ kind: 'invalid-type-annotation', message: 'Effect operation must be (name (-> ParamType ResultType))' });
   }
 
   const opName = getSymbol(elements[0]!);
@@ -1340,42 +1349,73 @@ const parseEffectOp = (
     return err({ kind: 'invalid-type-annotation', message: 'Effect operation name must be a symbol' });
   }
 
-  // Check for colon
-  if (!isSymbol(elements[1]!, ':')) {
-    return err({ kind: 'invalid-type-annotation', message: 'Effect operation must have : after name' });
-  }
+  const typeExpr = elements[1]!;
+  let constraints: Constraint[] = [];
+  let arrowExpr: Expr = typeExpr;
 
-  // Parse the type signature (Type1 -> Type2)
-  // Find the -> to split params from result
-  let arrowIndex = -1;
-  for (let i = 2; i < elements.length; i++) {
-    if (isSymbol(elements[i]!, '->')) {
-      arrowIndex = i;
-      break;
+  // Check if this is a constrained type: (=> constraints... arrow-type)
+  if (typeExpr.kind === 'list') {
+    const typeElements = listToArray(typeExpr);
+    if (typeElements.length > 0 && isSymbol(typeElements[0]!, '=>')) {
+      // Parse constraints
+      if (typeElements.length < 3) {
+        return err({ kind: 'invalid-type-annotation', message: 'Constrained type needs constraints and a body' });
+      }
+
+      const constraintExprs = typeElements.slice(1, -1);
+      arrowExpr = typeElements[typeElements.length - 1]!;
+
+      for (const cExpr of constraintExprs) {
+        const constraintResult = parseConstraint(cExpr, env);
+        if (!constraintResult.ok) return constraintResult;
+        constraints.push(constraintResult.value);
+      }
     }
   }
 
-  if (arrowIndex === -1) {
-    return err({ kind: 'invalid-type-annotation', message: 'Effect operation must have -> in signature' });
+  // Parse the arrow type
+  const typeResult = parseTypeExpr(arrowExpr, env);
+  if (!typeResult.ok) return typeResult;
+
+  const fnType = typeResult.value;
+  if (fnType.kind !== 'type-arrow') {
+    return err({ kind: 'invalid-type-annotation', message: 'Effect operation type must be a function type (-> ...)' });
   }
 
-  // Parse parameter types
-  const paramTypes: Type[] = [];
-  for (let i = 2; i < arrowIndex; i++) {
-    const paramResult = parseTypeExpr(elements[i]!, env);
-    if (!paramResult.ok) return paramResult;
-    paramTypes.push(paramResult.value);
+  // Collect type parameters from the constraints and arrow type
+  const typeParams: string[] = [];
+  const seenParams = new Set<string>();
+
+  // Collect from constraints
+  for (const c of constraints) {
+    const freeVars = freeTypeVars(c.typeArg);
+    for (const v of freeVars) {
+      if (!seenParams.has(v)) {
+        seenParams.add(v);
+        typeParams.push(v);
+      }
+    }
   }
 
-  // Parse result type
-  if (arrowIndex >= elements.length - 1) {
-    return err({ kind: 'invalid-type-annotation', message: 'Effect operation must have result type after ->' });
+  // Collect from function type
+  for (const param of fnType.params) {
+    const freeVars = freeTypeVars(param);
+    for (const v of freeVars) {
+      if (!seenParams.has(v)) {
+        seenParams.add(v);
+        typeParams.push(v);
+      }
+    }
+  }
+  const resultFreeVars = freeTypeVars(fnType.result);
+  for (const v of resultFreeVars) {
+    if (!seenParams.has(v)) {
+      seenParams.add(v);
+      typeParams.push(v);
+    }
   }
 
-  const resultResult = parseTypeExpr(elements[arrowIndex + 1]!, env);
-  if (!resultResult.ok) return resultResult;
-
-  return ok({ name: opName, params: paramTypes, result: resultResult.value });
+  return ok({ name: opName, typeParams, constraints, params: fnType.params, result: fnType.result });
 };
 
 // Infer effect definition
@@ -1454,16 +1494,34 @@ const inferPerform = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> =
       });
     }
 
-    // Unify argument types with parameter types
+    // Instantiate operation's type parameters with fresh type variables
+    const typeParamSubst = new Map<string, Type>();
+    for (const tv of op.typeParams) {
+      typeParamSubst.set(tv, freshTypeVar());
+    }
+
+    // Apply substitution to get instantiated param types and result type
+    const instantiatedParams = op.params.map(p => applySubst(typeParamSubst, p));
+    const instantiatedResult = applySubst(typeParamSubst, op.result);
+
+    // Instantiate and add constraints from the operation
+    for (const c of op.constraints) {
+      allConstraints.push({
+        class: c.class,
+        typeArg: applySubst(typeParamSubst, c.typeArg),
+      });
+    }
+
+    // Unify argument types with instantiated parameter types
     for (let i = 0; i < argTypes.length; i++) {
       const argType = applySubst(subst, argTypes[i]!);
-      const paramType = op.params[i]!;
+      const paramType = instantiatedParams[i]!;
       const unifyResult = unifyWithContext(argType, paramType, `argument ${i + 1} of ${opName}`);
       if (!unifyResult.ok) return unifyResult;
       subst = composeSubst(unifyResult.value, subst);
     }
 
-    resultType = applySubst(subst, op.result);
+    resultType = applySubst(subst, instantiatedResult);
 
     // Add this effect to the performed effects
     allEffects = combineEffectRows(allEffects, effectRowClosed([effect.name]));
@@ -1699,10 +1757,124 @@ const inferResume = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> =>
 
 // ===== Main Entry Point =====
 
-// Infer types for a list of expressions
-export const inferProgram = (
+// Type module cache - stores TypeEnv for loaded modules
+type TypeModuleState =
+  | { status: 'loading' }
+  | { status: 'loaded'; typeEnv: TypeEnv };
+type TypeModuleCache = Map<string, TypeModuleState>;
+
+// Module context for type checking
+type TypeModuleContext = {
+  filePath: string | null;
+  cache: TypeModuleCache;
+};
+
+const emptyTypeModuleContext = (): TypeModuleContext => ({
+  filePath: null,
+  cache: new Map(),
+});
+
+const fileTypeModuleContext = (filePath: string): TypeModuleContext => ({
+  filePath,
+  cache: new Map(),
+});
+
+// Process an import statement during type checking
+const processImport = (
   env: TypeEnv,
-  exprs: Expr[]
+  elements: Expr[],
+  moduleContext: TypeModuleContext
+): TypeResult<TypeEnv> => {
+  if (elements.length < 2) {
+    return err({ kind: 'invalid-type-annotation', message: 'import expects at least a path' });
+  }
+
+  // Get import path
+  const pathExpr = elements[1];
+  if (pathExpr?.kind !== 'atom' || pathExpr.value.kind !== 'string') {
+    return err({ kind: 'invalid-type-annotation', message: 'import path must be a string literal' });
+  }
+  const importPath = pathExpr.value.value;
+
+  // Determine import form
+  let mode: 'all' | 'selective' | 'qualified' = 'all';
+  let selectedNames: string[] = [];
+  let qualifier = '';
+
+  if (elements.length >= 3) {
+    const second = elements[2];
+    if (second?.kind === 'atom' && second.value.kind === 'symbol' && second.value.value === 'as') {
+      if (elements.length !== 4) {
+        return err({ kind: 'invalid-type-annotation', message: 'import as expects a qualifier name' });
+      }
+      const qualExpr = elements[3];
+      if (qualExpr?.kind !== 'atom' || qualExpr.value.kind !== 'symbol') {
+        return err({ kind: 'invalid-type-annotation', message: 'import qualifier must be a symbol' });
+      }
+      mode = 'qualified';
+      qualifier = qualExpr.value.value;
+    } else if (second?.kind === 'list') {
+      mode = 'selective';
+      const names = listToArray(second);
+      for (const n of names) {
+        if (n.kind !== 'atom' || n.value.kind !== 'symbol') {
+          return err({ kind: 'invalid-type-annotation', message: 'import names must be symbols' });
+        }
+        selectedNames.push(n.value.value);
+      }
+    } else {
+      return err({ kind: 'invalid-type-annotation', message: 'Invalid import syntax' });
+    }
+  }
+
+  // Resolve module path
+  if (!moduleContext.filePath) {
+    return err({ kind: 'invalid-type-annotation', message: 'Cannot use import without a file context' });
+  }
+  const absolutePath = resolveModulePath(importPath, moduleContext.filePath);
+
+  // Check cache
+  const cached = moduleContext.cache.get(absolutePath);
+  if (cached) {
+    if (cached.status === 'loading') {
+      return err({ kind: 'invalid-type-annotation', message: `Circular dependency detected: ${absolutePath}` });
+    }
+    // Module already type-checked - merge TypeEnv
+    return ok(mergeEnv(env, cached.typeEnv, { mode, selectedNames, qualifier }));
+  }
+
+  // Mark as loading
+  moduleContext.cache.set(absolutePath, { status: 'loading' });
+
+  // Load and parse
+  let moduleExprs: Expr[];
+  try {
+    moduleExprs = loadAndParseModule(absolutePath);
+  } catch (e) {
+    return err({ kind: 'invalid-type-annotation', message: `Failed to load module: ${e instanceof Error ? e.message : String(e)}` });
+  }
+
+  // Type check the module recursively
+  const moduleResult = inferProgramWithContext(
+    env, // Start with same base env (builtins)
+    moduleExprs,
+    { filePath: absolutePath, cache: moduleContext.cache }
+  );
+
+  if (!moduleResult.ok) return moduleResult;
+
+  // Cache the result
+  moduleContext.cache.set(absolutePath, { status: 'loaded', typeEnv: moduleResult.value.env });
+
+  // Merge into current env
+  return ok(mergeEnv(env, moduleResult.value.env, { mode, selectedNames, qualifier }));
+};
+
+// Infer types for a list of expressions with module context
+export const inferProgramWithContext = (
+  env: TypeEnv,
+  exprs: Expr[],
+  moduleContext: TypeModuleContext
 ): TypeResult<{ env: TypeEnv; types: Type[] }> => {
   let currentEnv = env;
   const types: Type[] = [];
@@ -1738,6 +1910,15 @@ export const inferProgram = (
         types.push(tUnit);
         continue;
       }
+
+      // Handle import statements - they extend the environment with imported bindings
+      if (elements.length >= 2 && isSymbol(elements[0]!, 'import')) {
+        const importResult = processImport(currentEnv, elements, moduleContext);
+        if (!importResult.ok) return importResult;
+        currentEnv = importResult.value;
+        types.push(tUnit);
+        continue;
+      }
     }
 
     // Regular expression inference
@@ -1747,8 +1928,14 @@ export const inferProgram = (
     globalSubst = composeSubst(result.value.subst, globalSubst);
     types.push(applySubst(globalSubst, result.value.type));
 
+    // Apply substitution to constraints before checking
+    const substitutedConstraints = result.value.constraints.map(c => ({
+      class: c.class,
+      typeArg: applySubst(globalSubst, c.typeArg),
+    }));
+
     // Check constraints
-    const resolvedConstraints = resolveConstraints(result.value.constraints);
+    const resolvedConstraints = resolveConstraints(substitutedConstraints);
     for (const c of resolvedConstraints) {
       // If constraint is on a concrete type with no instance, error
       if (c.typeArg.kind !== 'type-var') {
@@ -1758,6 +1945,23 @@ export const inferProgram = (
   }
 
   return ok({ env: currentEnv, types });
+};
+
+// Infer types for a list of expressions (backwards-compatible version without module context)
+export const inferProgram = (
+  env: TypeEnv,
+  exprs: Expr[],
+  filePath?: string
+): TypeResult<{ env: TypeEnv; types: Type[] }> => {
+  // For browser compatibility, only use path.resolve for non-absolute paths
+  // Absolute paths (starting with /) are used as-is
+  const resolvedPath = filePath
+    ? (filePath.startsWith('/') ? filePath : path.resolve(filePath))
+    : null;
+  const moduleContext = resolvedPath
+    ? fileTypeModuleContext(resolvedPath)
+    : emptyTypeModuleContext();
+  return inferProgramWithContext(env, exprs, moduleContext);
 };
 
 // Process data definition and update environment
@@ -1934,8 +2138,8 @@ const processEffectDef = (env: TypeEnv, elements: Expr[]): TypeResult<TypeEnv> =
   }
   const effectName = nameExpr.value.value;
 
-  // Parse operations
-  const operations: { name: string; params: Type[]; result: Type }[] = [];
+  // Parse operations (now includes typeParams and constraints)
+  const operations: { name: string; typeParams: string[]; constraints: Constraint[]; params: Type[]; result: Type }[] = [];
   for (let i = 2; i < elements.length; i++) {
     const opResult = parseEffectOp(elements[i]!, env);
     if (!opResult.ok) return opResult;

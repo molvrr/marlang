@@ -1,9 +1,9 @@
 import { test, expect, describe } from 'bun:test';
-import * as Lexer from '../lexer';
-import * as Parser from '../parser';
-import * as Interpreter from '../interpreter';
-import { typeCheck, formatError, formatType } from '../type-checker';
-import type { Type } from '../type-ast';
+import * as Lexer from '../src/core/lexer';
+import * as Parser from '../src/core/parser';
+import * as Interpreter from '../src/core/interpreter';
+import { typeCheck, formatError, formatType } from '../src/types/type-checker';
+import type { Type } from '../src/types/type-ast';
 
 // Helper to parse and type check code
 const check = (code: string): { ok: boolean; types?: Type[]; error?: string } => {

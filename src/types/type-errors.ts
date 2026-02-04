@@ -2,7 +2,7 @@
 
 import type { Type, Constraint, Pattern } from './type-ast';
 import { formatType, formatConstraint, formatPattern } from './type-ast';
-import type { SourceLocation } from './types';
+import type { SourceLocation } from '../core/types';
 
 // Base type for errors with optional location
 type WithLocation = { loc?: SourceLocation };

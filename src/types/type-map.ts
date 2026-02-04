@@ -1,7 +1,7 @@
 // Type mapping for AST nodes
 // Provides type information for every sub-expression in the AST
 
-import type { Expr, LispValue } from './types';
+import type { Expr, LispValue } from '../core/types';
 import type { Type, Constraint, TypeScheme } from './type-ast';
 import {
   typeVar,
@@ -40,6 +40,8 @@ import { resolveConstraints } from './type-builtins';
 import { createBuiltinEnv } from './type-builtins';
 import { resetTypeVarCounter } from './type-env';
 import { parseTypeExpr, parseTypeAnnotation, parsePattern, VARIADIC_ARITH_OPS } from './type-infer';
+import { resolveModulePath, loadAndParseModule } from '../modules/module-loader';
+import { mergeEnv } from './type-env';
 
 // Path identifies a node in the AST (e.g., [0, 1, 2] = first expr, second child, third child)
 export type NodePath = number[];
@@ -95,12 +97,22 @@ const isSymbol = (expr: Expr, name: string): boolean => {
   return getSymbol(expr) === name;
 };
 
+// Module cache for type checking (prevents circular dependencies)
+type TypeModuleCache = Map<string, { status: 'loading' } | { status: 'loaded'; typeEnv: TypeEnv }>;
+
+// Module context for import resolution
+type TypeMapModuleContext = {
+  filePath: string | null;
+  cache: TypeModuleCache;
+};
+
 // Inference context that accumulates type info
 type InferContext = {
   env: TypeEnv;
   subst: Substitution;
   types: Map<string, NodeTypeInfo>;
   constraints: Constraint[];
+  moduleContext: TypeMapModuleContext;
 };
 
 // Record a type for a path
@@ -184,6 +196,10 @@ const inferExprWithMap = (
       case 'instance':
       case 'type':
       case 'effect':
+        // These are processed at the program level or are no-ops for live type checking
+        return ok(tUnit);
+      case 'import':
+        // Import is handled specially in buildTypeMap's main loop
         return ok(tUnit);
       case 'perform': {
         // Perform returns fresh type var for now
@@ -1007,15 +1023,132 @@ const inferDataDefWithMap = (
   return ok(tUnit);
 };
 
+// Process an import statement and update the context
+const processImportWithMap = (
+  ctx: InferContext,
+  elements: Expr[]
+): TypeResult<void> => {
+  if (elements.length < 2) {
+    return err({ kind: 'invalid-type-annotation', message: 'import expects at least a path' });
+  }
+
+  // Get import path
+  const pathExpr = elements[1];
+  if (pathExpr?.kind !== 'atom' || pathExpr.value.kind !== 'string') {
+    return err({ kind: 'invalid-type-annotation', message: 'import path must be a string literal' });
+  }
+  const importPath = pathExpr.value.value;
+
+  // Determine import form
+  let mode: 'all' | 'selective' | 'qualified' = 'all';
+  let selectedNames: string[] = [];
+  let qualifier = '';
+
+  if (elements.length >= 3) {
+    const second = elements[2];
+    if (second?.kind === 'atom' && second.value.kind === 'symbol' && second.value.value === 'as') {
+      if (elements.length !== 4) {
+        return err({ kind: 'invalid-type-annotation', message: 'import as expects a qualifier name' });
+      }
+      const qualExpr = elements[3];
+      if (qualExpr?.kind !== 'atom' || qualExpr.value.kind !== 'symbol') {
+        return err({ kind: 'invalid-type-annotation', message: 'import qualifier must be a symbol' });
+      }
+      mode = 'qualified';
+      qualifier = qualExpr.value.value;
+    } else if (second?.kind === 'list') {
+      mode = 'selective';
+      const names = listToArray(second);
+      for (const n of names) {
+        if (n.kind !== 'atom' || n.value.kind !== 'symbol') {
+          return err({ kind: 'invalid-type-annotation', message: 'import names must be symbols' });
+        }
+        selectedNames.push(n.value.value);
+      }
+    } else {
+      return err({ kind: 'invalid-type-annotation', message: 'Invalid import syntax' });
+    }
+  }
+
+  // Resolve module path
+  if (!ctx.moduleContext.filePath) {
+    return err({ kind: 'invalid-type-annotation', message: 'Cannot use import without a file context' });
+  }
+  const absolutePath = resolveModulePath(importPath, ctx.moduleContext.filePath);
+
+  // Check cache
+  const cached = ctx.moduleContext.cache.get(absolutePath);
+  if (cached) {
+    if (cached.status === 'loading') {
+      return err({ kind: 'invalid-type-annotation', message: `Circular dependency detected: ${absolutePath}` });
+    }
+    // Module already type-checked - merge TypeEnv
+    ctx.env = mergeEnv(ctx.env, cached.typeEnv, { mode, selectedNames, qualifier });
+    return ok(undefined);
+  }
+
+  // Mark as loading
+  ctx.moduleContext.cache.set(absolutePath, { status: 'loading' });
+
+  // Load and parse
+  let moduleExprs: Expr[];
+  try {
+    moduleExprs = loadAndParseModule(absolutePath);
+  } catch (e) {
+    return err({ kind: 'invalid-type-annotation', message: `Failed to load module: ${e instanceof Error ? e.message : String(e)}` });
+  }
+
+  // Type check the module recursively using buildTypeMapWithContext
+  const moduleCtx: InferContext = {
+    env: createBuiltinEnv(),
+    subst: emptySubst(),
+    types: new Map(),
+    constraints: [],
+    moduleContext: { filePath: absolutePath, cache: ctx.moduleContext.cache },
+  };
+
+  for (const expr of moduleExprs) {
+    // Handle imports in the module
+    if (expr.kind === 'list') {
+      const elems = listToArray(expr);
+      if (elems.length > 0 && isSymbol(elems[0]!, 'import')) {
+        const importResult = processImportWithMap(moduleCtx, elems);
+        if (!importResult.ok) return importResult;
+        continue;
+      }
+    }
+
+    // Use inferExprWithMap for the module expressions
+    const result = inferExprWithMap(moduleCtx, expr, []);
+    if (!result.ok) return result;
+  }
+
+  // Cache the result
+  ctx.moduleContext.cache.set(absolutePath, { status: 'loaded', typeEnv: moduleCtx.env });
+
+  // Merge into current env
+  ctx.env = mergeEnv(ctx.env, moduleCtx.env, { mode, selectedNames, qualifier });
+  return ok(undefined);
+};
+
 // Main entry point: build type map for a program
-export const buildTypeMap = (exprs: Expr[]): TypeMapResult => {
+export const buildTypeMap = (exprs: Expr[], filePath?: string): TypeMapResult => {
   resetTypeVarCounter();
+
+  // Create module context with file path (supports browser with absolute paths)
+  const resolvedPath = filePath
+    ? (filePath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(filePath) ? filePath : null)
+    : null;
 
   const ctx: InferContext = {
     env: createBuiltinEnv(),
     subst: emptySubst(),
     types: new Map(),
     constraints: [],
+    moduleContext: {
+      filePath: resolvedPath,
+      cache: new Map(),
+    },
   };
 
   const topLevelTypes: Type[] = [];
@@ -1023,6 +1156,25 @@ export const buildTypeMap = (exprs: Expr[]): TypeMapResult => {
   for (let i = 0; i < exprs.length; i++) {
     const expr = exprs[i]!;
     const path = [i];
+
+    // Handle imports at the program level to extend environment
+    if (expr.kind === 'list') {
+      const elements = listToArray(expr);
+      if (elements.length > 0 && isSymbol(elements[0]!, 'import')) {
+        const importResult = processImportWithMap(ctx, elements);
+        if (!importResult.ok) {
+          finalizeTypes(ctx);
+          return {
+            ok: false,
+            error: importResult.error,
+            errorPath: path,
+            types: ctx.types,
+          };
+        }
+        topLevelTypes.push(tUnit);
+        continue;
+      }
+    }
 
     const result = inferAndRecord(ctx, expr, path);
     if (!result.ok) {

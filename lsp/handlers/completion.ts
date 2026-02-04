@@ -3,7 +3,7 @@
 import type { CompletionItem, CompletionList, Position } from '../protocol';
 import { CompletionItemKind } from '../protocol';
 import type { AnalysisResult } from '../analyzer';
-import { formatScheme } from '../../type-ast';
+import { formatScheme } from '../../src/types/type-ast';
 
 // Completion request params
 export type CompletionParams = {

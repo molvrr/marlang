@@ -1,17 +1,17 @@
 // LSP analyzer - runs the full compilation pipeline and collects information
 
-import * as Lexer from '../lexer';
-import * as Parser from '../parser';
-import type { Expr, SourceLocation } from '../types';
-import type { Type, TypeScheme } from '../type-ast';
-import { formatScheme } from '../type-ast';
-import { typeCheck } from '../type-checker';
-import type { TypeError } from '../type-errors';
-import { formatError } from '../type-errors';
+import * as Lexer from '../src/core/lexer';
+import * as Parser from '../src/core/parser';
+import type { Expr, SourceLocation } from '../src/core/types';
+import type { Type, TypeScheme } from '../src/types/type-ast';
+import { formatScheme } from '../src/types/type-ast';
+import { typeCheck } from '../src/types/type-checker';
+import type { TypeError } from '../src/types/type-errors';
+import { formatError } from '../src/types/type-errors';
 import type { Diagnostic, Range, Position } from './protocol';
 import { DiagnosticSeverity } from './protocol';
-import type { TypeEnv } from '../type-env';
-import { createBuiltinEnv } from '../type-builtins';
+import type { TypeEnv } from '../src/types/type-env';
+import { createBuiltinEnv } from '../src/types/type-builtins';
 
 // Symbol information for hover and go-to-definition
 export type SymbolInfo = {
@@ -248,8 +248,22 @@ const collectSymbolsFromExpr = (
   }
 };
 
+// Convert file:// URI to file path
+const uriToPath = (uri: string): string | undefined => {
+  if (uri.startsWith('file://')) {
+    // Handle file:// URIs
+    const path = uri.slice(7);
+    // On Windows, file:///C:/... needs special handling
+    if (path.match(/^\/[a-zA-Z]:\//)) {
+      return path.slice(1);
+    }
+    return path;
+  }
+  return undefined;
+};
+
 // Analyze source code
-export const analyze = (source: string): AnalysisResult => {
+export const analyze = (source: string, uri?: string): AnalysisResult => {
   const result: AnalysisResult = {
     typeErrors: [],
     diagnostics: [],
@@ -295,7 +309,8 @@ export const analyze = (source: string): AnalysisResult => {
   }
 
   // Type check
-  const typeResult = typeCheck(parsed.exprs);
+  const filePath = uri ? uriToPath(uri) : undefined;
+  const typeResult = typeCheck(parsed.exprs, filePath);
 
   if (!typeResult.ok) {
     result.typeErrors.push(typeResult.error);

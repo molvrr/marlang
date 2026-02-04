@@ -7,6 +7,9 @@ A Lisp-like interpreter written in TypeScript, running on Bun. Features include 
 - **Type System**: Static type checking with local inference, parametric polymorphism, and typeclasses
 - **Algebraic Data Types**: Define sum types with constructors
 - **Pattern Matching**: Destructure values with `match` expressions
+- **Algebraic Effects**: Delimited continuations with `effect`, `perform`, and `handle`
+- **Module System**: Import code with `std:` prefix for stdlib or relative paths
+- **Standard Library**: Option and Result utilities out of the box
 - **Tail Call Optimization**: Efficient recursion without stack overflow
 - **LSP Server**: Language Server Protocol support for IDE integration
 - First-class functions with lexical closures
@@ -468,6 +471,83 @@ Marlang supports C struct definitions for passing structured data to native libr
 (struct-get red "g")    ; => 128
 ```
 
+## Module System
+
+Marlang supports importing code from other files using the `import` form.
+
+### Import Syntax
+
+```lisp
+; Import all bindings
+(import "path/to/module.mar")
+
+; Import with qualifier (recommended)
+(import "path/to/module.mar" as m)
+(m/function-name arg)  ; Use with prefix
+
+; Import specific bindings
+(import "path/to/module.mar" (foo bar baz))
+```
+
+### Standard Library
+
+Use the `std:` prefix to import from the standard library:
+
+```lisp
+; Option utilities (map, flat-map, unwrap-or, filter, etc.)
+(import "std:option" as opt)
+
+; Result type and utilities (map, flat-map, unwrap-or, ok, err, etc.)
+(import "std:result" as res)
+```
+
+### Example: Using stdlib
+
+```lisp
+(import "std:option" as opt)
+(import "std:result" as res)
+
+; Option utilities
+(opt/map (lambda (x) (+ x 1)) (Some 5))  ; => (Some 6)
+(opt/unwrap-or 0 None)                    ; => 0
+(opt/filter (lambda (x) (> x 10)) (Some 5)) ; => None
+
+; Result type for error handling
+(define safe-div
+  (lambda (a b)
+    (if (= b 0)
+        (res/Err "division by zero")
+        (res/Ok (/ a b)))))
+
+(safe-div 10 2)   ; => (Ok 5)
+(safe-div 10 0)   ; => (Err "division by zero")
+
+; Convert Result to Option
+(res/ok (safe-div 10 2))  ; => (Some 5)
+(res/ok (safe-div 10 0))  ; => None
+
+; IO operations (built-in handlers work automatically)
+(import "std:io" as io)
+
+(io/println "Hello, world!")
+(io/print "Enter name: ")
+(let ((name (io/read-line)))
+  (io/println name))
+
+; Custom handlers can override defaults if needed
+(handle
+  (io/println "This will be intercepted")
+  ((println msg k) -> (begin (io/print "LOG: ") (io/println msg) (resume k nil))))
+```
+
+### Available stdlib modules
+
+| Module | Description |
+|--------|-------------|
+| `std:option` | Utilities for the built-in `Option` type: `map`, `flat-map`, `unwrap-or`, `unwrap-or-else`, `is-some`, `is-none`, `filter`, `and-then`, `or-else` |
+| `std:result` | `Result` type and utilities: `Ok`, `Err`, `map`, `map-err`, `flat-map`, `unwrap-or`, `unwrap-or-else`, `is-ok`, `is-err`, `ok`, `err`, `and-then`, `or-else` |
+| `std:io` | IO effect with **built-in handlers**: `print`, `println`, `read-line`, `read-file`, `write-file`. Handlers work automatically without explicit `handle` blocks. Custom handlers can override defaults. |
+
 ## Environment Introspection
 
 Marlang provides first-class access to lexical environments for metaprogramming and debugging.
@@ -568,7 +648,13 @@ marlang/
 ├── parser.ts          # S-expression parser
 ├── types.ts           # AST and runtime value types
 ├── interpreter.ts     # Tree-walking interpreter with TCO
+├── module-loader.ts   # Module path resolution and loading
+├── module-types.ts    # Module system types
 ├── type-*.ts          # Type system modules
+├── stdlib/            # Standard library
+│   ├── option.mar     # Option type utilities
+│   ├── result.mar     # Result type and utilities
+│   └── io.mar         # IO effect and operations
 ├── lsp/               # Language Server Protocol
 │   ├── server.ts      # LSP server entry point
 │   ├── protocol.ts    # JSON-RPC message handling
@@ -585,8 +671,10 @@ marlang/
 │   ├── interpreter.test.ts
 │   ├── tco.test.ts
 │   ├── type-system.test.ts
+│   ├── stdlib.test.ts
 │   └── lsp.test.ts
 └── examples/
     ├── types.mar      # Type system demo
+    ├── effects.mar    # Algebraic effects demo
     └── raylib.mar     # Raylib graphics bindings
 ```

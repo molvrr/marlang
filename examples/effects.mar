@@ -9,7 +9,7 @@
 ; The simplest use case: perform an effect and handle it
 
 (effect Ask
-  (ask : Unit -> Int))
+  (ask (-> Unit Int)))
 
 ; Use the effect in a computation
 (handle
@@ -23,8 +23,8 @@
 ; A counter that reads and writes state
 
 (effect State
-  (get : Unit -> Int)
-  (put : Int -> Unit))
+  (get (-> Unit Int))
+  (put (-> Int Unit)))
 
 (define counter (lambda ()
   (let ((x (perform get ())))
@@ -44,7 +44,7 @@
 ; Handlers can choose NOT to resume, discarding the continuation
 
 (effect Abort
-  (abort : Int -> Int))
+  (abort (-> Int Int)))
 
 (define maybe-double (lambda (x)
   (if (< x 0)
@@ -69,7 +69,7 @@
 ; Different handlers can handle different effects
 
 (effect Log
-  (log : String -> Unit))
+  (log (-> String Unit)))
 
 (handle
   (handle
@@ -86,7 +86,7 @@
 ; Handlers can transform results using the return clause
 
 (effect Emit
-  (emit : Int -> Unit))
+  (emit (-> Int Unit)))
 
 (handle
   (begin

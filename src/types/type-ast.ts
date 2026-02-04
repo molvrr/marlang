@@ -1,6 +1,6 @@
 // Type system AST definitions
 
-import type { Expr } from './types';
+import type { Expr } from '../core/types';
 
 // ===== Effect System Types =====
 
@@ -14,8 +14,10 @@ export type EffectRow =
 // Effect operation (single operation in an effect declaration)
 export type EffectOp = {
   name: string;
-  params: Type[];    // Parameter types
-  result: Type;      // Return type
+  typeParams: string[];       // Quantified type variables (e.g., ['a'])
+  constraints: Constraint[];  // Typeclass constraints (e.g., [{class:'Show', typeArg:a}])
+  params: Type[];             // Parameter types
+  result: Type;               // Return type
 };
 
 // Effect declaration (defines an effect with its operations)

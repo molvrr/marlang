@@ -1,9 +1,9 @@
 import { test, expect, describe } from 'bun:test';
-import * as Lexer from '../lexer';
-import * as Parser from '../parser';
-import * as Interpreter from '../interpreter';
-import { typeCheck, formatType } from '../type-checker';
-import type { Expr } from '../types';
+import * as Lexer from '../src/core/lexer';
+import * as Parser from '../src/core/parser';
+import * as Interpreter from '../src/core/interpreter';
+import { typeCheck, formatType } from '../src/types/type-checker';
+import type { Expr } from '../src/core/types';
 
 // Helper to parse code
 const parse = (code: string): Expr[] => {
@@ -38,7 +38,7 @@ describe('Effect System - Parsing', () => {
     test('simple effect with one operation', () => {
       const exprs = parse(`
         (effect Console
-          (print : String -> Unit))
+          (print (-> String Unit)))
       `);
       expect(exprs.length).toBe(1);
       const elements = listToArray(exprs[0]!);
@@ -50,8 +50,8 @@ describe('Effect System - Parsing', () => {
     test('effect with multiple operations', () => {
       const exprs = parse(`
         (effect Console
-          (print : String -> Unit)
-          (read : Unit -> String))
+          (print (-> String Unit))
+          (read (-> Unit String)))
       `);
       expect(exprs.length).toBe(1);
       const elements = listToArray(exprs[0]!);
@@ -63,8 +63,8 @@ describe('Effect System - Parsing', () => {
     test('effect with higher-order operation', () => {
       const exprs = parse(`
         (effect State
-          (get : Unit -> a)
-          (put : a -> Unit))
+          (get (-> Unit a))
+          (put (-> a Unit)))
       `);
       expect(exprs.length).toBe(1);
       const elements = listToArray(exprs[0]!);
@@ -139,8 +139,8 @@ describe('Effect System - Parsing', () => {
     test('complete example from spec', () => {
       const exprs = parse(`
         (effect Console
-          (print : String -> Unit)
-          (read : Unit -> String))
+          (print (-> String Unit))
+          (read (-> Unit String)))
 
         (define greet ()
           (perform print "Hello, ")
@@ -180,7 +180,7 @@ describe('Effect System - Type Checking', () => {
   test('effect declaration type checks to Unit', () => {
     const result = check(`
       (effect Console
-        (print : String -> Unit))
+        (print (-> String Unit)))
     `);
     expect(result.ok).toBe(true);
     expect(formatType(result.types![0]!)).toBe('Unit');
@@ -189,8 +189,8 @@ describe('Effect System - Type Checking', () => {
   test('effect with multiple operations type checks', () => {
     const result = check(`
       (effect State
-        (get : Unit -> Int)
-        (put : Int -> Unit))
+        (get (-> Unit Int))
+        (put (-> Int Unit)))
     `);
     expect(result.ok).toBe(true);
   });
@@ -212,7 +212,7 @@ describe('Effect System - Type Checking', () => {
 
   test('handle type checks to its body type with declared effect', () => {
     const result = check(`
-      (effect Test (op : Unit -> Int))
+      (effect Test (op (-> Unit Int)))
       (handle 42 ((op k) -> 0))
     `);
     expect(result.ok).toBe(true);
@@ -224,7 +224,7 @@ describe('Effect System - Effect Inference', () => {
   test('perform infers effect operation return type', () => {
     const result = check(`
       (effect Console
-        (print : String -> Unit))
+        (print (-> String Unit)))
       (perform print "hello")
     `);
     expect(result.ok).toBe(true);
@@ -234,8 +234,8 @@ describe('Effect System - Effect Inference', () => {
   test('perform infers type from effect op with unit param', () => {
     const result = check(`
       (effect State
-        (get : Unit -> Int)
-        (put : Int -> Unit))
+        (get (-> Unit Int))
+        (put (-> Int Unit)))
       (perform get ())
     `);
     expect(result.ok).toBe(true);
@@ -245,8 +245,65 @@ describe('Effect System - Effect Inference', () => {
   test('perform with wrong argument type fails', () => {
     const result = check(`
       (effect Console
-        (print : String -> Unit))
+        (print (-> String Unit)))
       (perform print 42)
+    `);
+    expect(result.ok).toBe(false);
+  });
+
+  test('effect operation with Show constraint accepts any Show-able type', () => {
+    const result = check(`
+      (effect Output
+        (output (=> (Show a) (-> a Unit))))
+      (perform output 42)
+    `);
+    expect(result.ok).toBe(true);
+    expect(formatType(result.types![1]!)).toBe('Unit');
+  });
+
+  test('effect operation with Show constraint accepts strings', () => {
+    const result = check(`
+      (effect Output
+        (output (=> (Show a) (-> a Unit))))
+      (perform output "hello")
+    `);
+    expect(result.ok).toBe(true);
+    expect(formatType(result.types![1]!)).toBe('Unit');
+  });
+
+  test('effect operation with Show constraint accepts booleans', () => {
+    const result = check(`
+      (effect Output
+        (output (=> (Show a) (-> a Unit))))
+      (perform output #t)
+    `);
+    expect(result.ok).toBe(true);
+  });
+
+  test('effect operation with Show constraint accepts ADTs', () => {
+    const result = check(`
+      (effect Output
+        (output (=> (Show a) (-> a Unit))))
+      (perform output (Some 5))
+    `);
+    expect(result.ok).toBe(true);
+  });
+
+  test('effect operation with Num constraint requires numeric type', () => {
+    const result = check(`
+      (effect Math
+        (square (=> (Num a) (-> a a))))
+      (perform square 5)
+    `);
+    expect(result.ok).toBe(true);
+    expect(formatType(result.types![1]!)).toBe('Int');
+  });
+
+  test('effect operation with Num constraint fails for non-numeric types', () => {
+    const result = check(`
+      (effect Math
+        (square (=> (Num a) (-> a a))))
+      (perform square "hello")
     `);
     expect(result.ok).toBe(false);
   });
@@ -254,7 +311,7 @@ describe('Effect System - Effect Inference', () => {
   test('perform with wrong arity fails', () => {
     const result = check(`
       (effect Console
-        (print : String -> Unit))
+        (print (-> String Unit)))
       (perform print)
     `);
     expect(result.ok).toBe(false);
@@ -263,7 +320,7 @@ describe('Effect System - Effect Inference', () => {
   test('handle infers handler body types', () => {
     const result = check(`
       (effect Console
-        (print : String -> Unit))
+        (print (-> String Unit)))
       (handle 42
         ((print msg k) -> 0))
     `);
@@ -284,7 +341,7 @@ describe('Effect System - Effect Inference', () => {
   test('lambda with effects has effectful type', () => {
     const result = check(`
       (effect Console
-        (print : String -> Unit))
+        (print (-> String Unit)))
       (define f (lambda (x) (perform print x)))
     `);
     expect(result.ok).toBe(true);
@@ -296,8 +353,8 @@ describe('Effect System - Effect Inference', () => {
   test('nested perform infers correctly', () => {
     const result = check(`
       (effect Console
-        (print : String -> Unit)
-        (read : Unit -> String))
+        (print (-> String Unit))
+        (read (-> Unit String)))
       (perform print (perform read ()))
     `);
     expect(result.ok).toBe(true);
@@ -307,7 +364,7 @@ describe('Effect System - Effect Inference', () => {
   test('resume is recognized in type checker', () => {
     const result = check(`
       (effect State
-        (get : Unit -> Int))
+        (get (-> Unit Int)))
       (handle
         (+ 1 (perform get ()))
         ((get k) -> (resume k 10)))
@@ -324,7 +381,7 @@ describe('Effect System - Effect Inference', () => {
   test('resume infers continuation return type', () => {
     const result = check(`
       (effect State
-        (get : Unit -> Int))
+        (get (-> Unit Int)))
       (handle
         (perform get ())
         ((get k) -> (+ (resume k 5) 1)))
@@ -337,7 +394,7 @@ describe('Effect System - Effect Inference', () => {
   test('resume type mismatch with declared effect fails', () => {
     const result = check(`
       (effect State
-        (get : Unit -> String))
+        (get (-> Unit String)))
       (handle
         (perform get ())
         ((get k) -> (resume k 42)))
@@ -351,13 +408,14 @@ describe('Effect System - Interpreter Recognition', () => {
   test('effect declaration returns nil', () => {
     const result = run(`
       (effect Console
-        (print : String -> Unit))
+        (print (-> String Unit)))
     `);
     expect(result.value.kind).toBe('nil');
   });
 
-  test('perform outside handle throws error', () => {
-    expect(() => run('(perform get)')).toThrow('must be used inside a handle');
+  test('perform outside handle throws error for unregistered effects', () => {
+    // perform outside handle with no default handler throws "Unhandled effect"
+    expect(() => run('(perform get)')).toThrow('Unhandled effect');
   });
 
   test('effect without name throws error', () => {

@@ -1,0 +1,3 @@
+; Circular dependency test - A imports B
+(import "./circular-b.mar")
+(define a-value 1)

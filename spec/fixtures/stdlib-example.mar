@@ -1,0 +1,42 @@
+; Example demonstrating stdlib Option and Result modules
+; Use the "std:" prefix to import from the standard library
+
+(import "std:option" as opt)
+(import "std:result" as res)
+
+; Example: Safe division returning Result
+(define safe-div
+  (lambda (a b)
+    (if (= b 0)
+        (res/Err "division by zero")
+        (res/Ok (/ a b)))))
+
+; Example: Finding an element (returns Option)
+(define find-positive
+  (lambda (n)
+    (if (> n 0)
+        (Some n)
+        None)))
+
+; Chain Option operations
+(define double-if-positive
+  (lambda (n)
+    (opt/map (lambda (x) (* x 2)) (find-positive n))))
+
+; Chain Result operations
+(define safe-double-div
+  (lambda (a b)
+    (res/map (lambda (x) (* x 2)) (safe-div a b))))
+
+; Convert Result to Option
+(define try-div-to-option
+  (lambda (a b)
+    (res/ok (safe-div a b))))
+
+; Examples
+(double-if-positive 5)          ; => (Some 10)
+(double-if-positive (- 0 3))    ; => None
+(safe-double-div 10 2)          ; => (Ok 10)
+(safe-double-div 10 0)          ; => (Err "division by zero")
+(try-div-to-option 20 4)        ; => (Some 5)
+(try-div-to-option 20 0)        ; => None
