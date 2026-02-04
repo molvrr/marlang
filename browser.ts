@@ -90,10 +90,18 @@ export interface TypeClassInfo {
   methods: BuiltinItem[];
 }
 
+export interface EffectSyntaxItem {
+  name: string;
+  syntax: string;
+  description: string;
+  example?: string;
+}
+
 export interface BuiltinReference {
   builtins: BuiltinCategory[];
   dataTypes: DataTypeInfo[];
   typeClasses: TypeClassInfo[];
+  effectSyntax: EffectSyntaxItem[];
 }
 
 export const getBuiltinReference = (): BuiltinReference => ({
@@ -208,6 +216,38 @@ export const getBuiltinReference = (): BuiltinReference => ({
       methods: [
         { name: 'show', type: 'a -> String' },
       ],
+    },
+  ],
+  effectSyntax: [
+    {
+      name: 'effect',
+      syntax: '(effect Name (op : Type -> Type) ...)',
+      description: 'Declare an effect with typed operations',
+      example: '(effect Console\n  (print : String -> Unit)\n  (read : Unit -> String))',
+    },
+    {
+      name: 'perform',
+      syntax: '(perform operation arg)',
+      description: 'Invoke an effect operation',
+      example: '(perform print "hello")',
+    },
+    {
+      name: 'handle',
+      syntax: '(handle expr (op arg k) -> body ...)',
+      description: 'Handle effects with pattern-matched handlers',
+      example: '(handle (perform get)\n  (get k) -> (resume k 10))',
+    },
+    {
+      name: 'resume',
+      syntax: '(resume k value)',
+      description: 'Resume the continuation with a value',
+      example: '(get k) -> (resume k 42)',
+    },
+    {
+      name: 'return',
+      syntax: '(return x) -> body',
+      description: 'Handle the final return value in a handler',
+      example: '(handle 42\n  (return x) -> (+ x 1))',
     },
   ],
 });

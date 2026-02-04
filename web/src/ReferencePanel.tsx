@@ -86,6 +86,24 @@ export default function ReferencePanel(props: ReferencePanelProps) {
           )}
         </For>
       </section>
+
+      <section class="reference-section">
+        <h3>Effect Syntax</h3>
+        <div class="reference-items">
+          <For each={props.reference.effectSyntax}>
+            {(item) => (
+              <div class="reference-item effect-item">
+                <code class="ref-name">{item.name}</code>
+                <code class="ref-type">{item.syntax}</code>
+                <span class="ref-desc">{item.description}</span>
+                {item.example && (
+                  <pre class="ref-example"><code>{item.example}</code></pre>
+                )}
+              </div>
+            )}
+          </For>
+        </div>
+      </section>
     </div>
   );
 }

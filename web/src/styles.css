@@ -729,3 +729,33 @@ textarea::-webkit-scrollbar-thumb:hover {
   font-size: 0.8rem;
   font-style: italic;
 }
+
+.reference-item.effect-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  align-items: flex-start;
+}
+
+.reference-item.effect-item .ref-name {
+  font-size: 0.85rem;
+}
+
+.reference-item.effect-item .ref-type {
+  color: var(--syn-number);
+}
+
+.reference-item .ref-example {
+  margin: 0.25rem 0 0 0;
+  padding: 0.4rem 0.6rem;
+  background: var(--bg-alt);
+  border-radius: 4px;
+  width: 100%;
+  overflow-x: auto;
+}
+
+.reference-item .ref-example code {
+  font-size: 0.75rem;
+  color: var(--text);
+  white-space: pre;
+}
