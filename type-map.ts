@@ -814,7 +814,7 @@ const inferVariadicArithApplicationWithMap = (
   }
 
   // Add Num constraint for the unified type
-  ctx.constraints.push({ kind: 'typeclass', className: 'Num', type: unifiedType });
+  ctx.constraints.push({ class: 'Num', typeArg: unifiedType });
 
   return ok(unifiedType);
 };
