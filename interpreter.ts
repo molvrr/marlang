@@ -107,6 +107,12 @@ const builtins: [string, (args: RuntimeValue[]) => RuntimeValue][] = [
     return { kind: 'boolean', value: a.value >= b.value };
   }],
   ['list', (args) => ({ kind: 'list', elements: args })],
+  ['show', (args) => {
+    if (args.length !== 1) throw new Error('show expects exactly 1 argument');
+    const value = args[0];
+    if (value === undefined) throw new Error('show expects exactly 1 argument');
+    return { kind: 'string', value: formatValue(value) };
+  }],
   ['ffi-open', (args) => {
     if (args.length !== 2) throw new Error('ffi-open expects 2 arguments: path and signatures');
     const pathArg = args[0];

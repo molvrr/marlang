@@ -425,6 +425,54 @@ describe('Exhaustiveness Checking', () => {
   });
 });
 
+describe('Show Typeclass', () => {
+  test('show on Int', () => {
+    const result = check('(show 42)');
+    expect(result.ok).toBe(true);
+    expect(formatType(result.types![0]!)).toBe('String');
+  });
+
+  test('show on Float', () => {
+    const result = check('(show 3.14)');
+    expect(result.ok).toBe(true);
+    expect(formatType(result.types![0]!)).toBe('String');
+  });
+
+  test('show on String', () => {
+    const result = check('(show "hello")');
+    expect(result.ok).toBe(true);
+    expect(formatType(result.types![0]!)).toBe('String');
+  });
+
+  test('show on Bool', () => {
+    const result = check('(show #t)');
+    expect(result.ok).toBe(true);
+    expect(formatType(result.types![0]!)).toBe('String');
+  });
+
+  test('show on ADT', () => {
+    const result = check('(data (Option a) None (Some a)) (show (Some 42))');
+    expect(result.ok).toBe(true);
+    expect(formatType(result.types![result.types!.length - 1]!)).toBe('String');
+  });
+
+  test('show on List', () => {
+    const result = check('(show (list 1 2 3))');
+    expect(result.ok).toBe(true);
+    expect(formatType(result.types![0]!)).toBe('String');
+  });
+
+  test('show in function', () => {
+    const code = `
+      (define stringify (lambda (x) (show x)))
+      (stringify 42)
+    `;
+    const result = check(code);
+    expect(result.ok).toBe(true);
+    expect(formatType(result.types![result.types!.length - 1]!)).toBe('String');
+  });
+});
+
 describe('Integration Tests', () => {
   test('factorial with type annotation', () => {
     const code = `

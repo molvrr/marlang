@@ -228,6 +228,13 @@ export const createBuiltinEnv = (): TypeEnv => {
   // Add boolean literals (these are typically keywords but we add them here)
   // In practice, #t and #f would be handled as literals, not variables
 
+  // show : forall a. (Show a) => a -> String
+  env = extendEnv(env, 'show', constrainedType(
+    ['a'],
+    [{ class: 'Show', typeArg: typeVar('a') }],
+    typeArrow([typeVar('a')], tString)
+  ));
+
   // FFI Library functions
   // ffi-open : forall a. String -> (List a) -> FFILibrary
   env = extendEnv(env, 'ffi-open', polytype(
@@ -334,9 +341,21 @@ export const hasInstance = (
       if (['Int', 'Float', 'Bool', 'String', 'Unit'].includes(type.name)) {
         return { has: true, neededConstraints: [] };
       }
+      // User-defined ADTs automatically have Show
+      return { has: true, neededConstraints: [] };
     }
     if (type.kind === 'type-var') {
       return { has: true, neededConstraints: [{ class: 'Show', typeArg: type }] };
+    }
+    // Parameterized types (List a, Option a) have Show if args have Show
+    if (type.kind === 'type-app') {
+      const neededConstraints: Constraint[] = [];
+      for (const arg of type.args) {
+        const argCheck = hasInstance('Show', arg);
+        if (!argCheck.has) return { has: false, neededConstraints: [] };
+        neededConstraints.push(...argCheck.neededConstraints);
+      }
+      return { has: true, neededConstraints };
     }
     return { has: false, neededConstraints: [] };
   }

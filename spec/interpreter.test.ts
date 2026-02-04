@@ -343,6 +343,40 @@ describe('Error Handling', () => {
   });
 });
 
+describe('Show Function', () => {
+  test('show integer', () => {
+    expect(eval_('(show 42)')).toBe('"42"');
+  });
+
+  test('show boolean true', () => {
+    expect(eval_('(show (< 1 2))')).toBe('"#t"');
+  });
+
+  test('show boolean false', () => {
+    expect(eval_('(show (> 1 2))')).toBe('"#f"');
+  });
+
+  test('show string', () => {
+    expect(eval_('(show "hello")')).toBe('""hello""');
+  });
+
+  test('show list', () => {
+    expect(eval_('(show (list 1 2 3))')).toBe('"(1 2 3)"');
+  });
+
+  test('show ADT', () => {
+    expect(eval_('(data (Option a) None (Some a)) (show (Some 42))')).toBe('"(Some 42)"');
+  });
+
+  test('show ADT nullary constructor', () => {
+    expect(eval_('(data (Option a) None (Some a)) (show None)')).toBe('"None"');
+  });
+
+  test('show nil', () => {
+    expect(eval_('(show nil)')).toBe('"nil"');
+  });
+});
+
 describe('FFI', () => {
   test('libm math functions', () => {
     let interp = Interpreter.empty();
