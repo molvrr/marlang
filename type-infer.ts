@@ -981,7 +981,7 @@ const inferPattern = (
 const FFI_VARIADIC_FUNCTIONS = new Set(['ffi-call', 'struct-new', 'struct-get', 'struct-set', 'list']);
 
 // Variadic arithmetic operators with their minimum argument requirements
-const VARIADIC_ARITH_OPS = new Map<string, { minArgs: number }>([
+export const VARIADIC_ARITH_OPS = new Map<string, { minArgs: number }>([
   ['+', { minArgs: 0 }],  // (+) returns 0
   ['*', { minArgs: 0 }],  // (*) returns 1
   ['-', { minArgs: 1 }],  // (- x) = -x, requires at least 1 arg

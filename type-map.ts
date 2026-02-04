@@ -39,7 +39,7 @@ import { ok, err, flatMap, sequence } from './type-errors';
 import { resolveConstraints } from './type-builtins';
 import { createBuiltinEnv } from './type-builtins';
 import { resetTypeVarCounter } from './type-env';
-import { parseTypeExpr, parseTypeAnnotation, parsePattern } from './type-infer';
+import { parseTypeExpr, parseTypeAnnotation, parsePattern, VARIADIC_ARITH_OPS } from './type-infer';
 
 // Path identifies a node in the AST (e.g., [0, 1, 2] = first expr, second child, third child)
 export type NodePath = number[];
@@ -768,6 +768,57 @@ const inferPatternWithMap = (
 // FFI variadic functions
 const FFI_VARIADIC_FUNCTIONS = new Set(['ffi-call', 'struct-new', 'struct-get', 'struct-set', 'list']);
 
+// Infer variadic arithmetic operators (+, -, *, /)
+const inferVariadicArithApplicationWithMap = (
+  ctx: InferContext,
+  opName: string,
+  argExprs: Expr[],
+  path: NodePath
+): TypeResult<Type> => {
+  const opInfo = VARIADIC_ARITH_OPS.get(opName)!;
+
+  // Check minimum arity
+  if (argExprs.length < opInfo.minArgs) {
+    return err({
+      kind: 'arity-mismatch',
+      expected: opInfo.minArgs,
+      got: argExprs.length,
+      context: opName,
+    });
+  }
+
+  // Handle 0-arg case for + and *
+  if (argExprs.length === 0) {
+    return ok(tInt);
+  }
+
+  const argTypes: Type[] = [];
+
+  // Infer all argument types with path tracking
+  for (let i = 0; i < argExprs.length; i++) {
+    const argExpr = argExprs[i]!;
+    const argPath = [...path, 1 + i];
+    const argResult = inferAndRecord(ctx, argExpr, argPath);
+    if (!argResult.ok) return argResult;
+    argTypes.push(argResult.value);
+  }
+
+  // Unify all argument types together
+  let unifiedType = applySubst(ctx.subst, argTypes[0]!);
+  for (let i = 1; i < argTypes.length; i++) {
+    const argType = applySubst(ctx.subst, argTypes[i]!);
+    const unifyResult = unify(unifiedType, argType);
+    if (!unifyResult.ok) return unifyResult;
+    ctx.subst = composeSubst(unifyResult.value, ctx.subst);
+    unifiedType = applySubst(ctx.subst, unifiedType);
+  }
+
+  // Add Num constraint for the unified type
+  ctx.constraints.push({ kind: 'typeclass', className: 'Num', type: unifiedType });
+
+  return ok(unifiedType);
+};
+
 // Infer application
 const inferApplicationWithMap = (
   ctx: InferContext,
@@ -780,6 +831,10 @@ const inferApplicationWithMap = (
   const fnName = getSymbol(fnExpr);
   if (fnName && FFI_VARIADIC_FUNCTIONS.has(fnName)) {
     return inferFFIApplicationWithMap(ctx, fnName, argExprs, path);
+  }
+
+  if (fnName && VARIADIC_ARITH_OPS.has(fnName)) {
+    return inferVariadicArithApplicationWithMap(ctx, fnName, argExprs, path);
   }
 
   // Infer function type

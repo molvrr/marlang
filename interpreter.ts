@@ -76,6 +76,12 @@ const builtins: [string, (args: RuntimeValue[]) => RuntimeValue][] = [
     if (first === undefined) throw new Error('/ expects at least two arguments');
     return { kind: 'number', value: nums.slice(1).reduce((a, b) => a / b, first) };
   }],
+  ['negate', (args) => {
+    if (args.length !== 1) throw new Error('negate expects one argument');
+    const a = args[0];
+    if (a?.kind !== 'number') throw new Error('negate expects a number');
+    return { kind: 'number', value: -a.value };
+  }],
   ['<', (args) => {
     if (args.length !== 2) throw new Error('< expects two arguments');
     const a = args[0], b = args[1];

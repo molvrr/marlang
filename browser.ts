@@ -105,6 +105,7 @@ export const getBuiltinReference = (): BuiltinReference => ({
         { name: '-', type: 'Num a => a -> a -> a', description: 'Subtraction' },
         { name: '*', type: 'Num a => a -> a -> a', description: 'Multiplication' },
         { name: '/', type: 'Num a => a -> a -> a', description: 'Division' },
+        { name: 'negate', type: 'Num a => a -> a', description: 'Negation' },
       ],
     },
     {
@@ -178,6 +179,7 @@ export const getBuiltinReference = (): BuiltinReference => ({
         { name: '-', type: 'a -> a -> a' },
         { name: '*', type: 'a -> a -> a' },
         { name: '/', type: 'a -> a -> a' },
+        { name: 'negate', type: 'a -> a' },
       ],
     },
     {

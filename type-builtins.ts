@@ -89,6 +89,13 @@ const numUnaryOrBinOp = (): TypeScheme => constrainedType(
   typeArrow([typeVar('a'), typeVar('a')], typeVar('a'))
 );
 
+// Helper for Num-constrained unary operation
+const numUnaryOp = (): TypeScheme => constrainedType(
+  ['a'],
+  [{ class: 'Num', typeArg: typeVar('a') }],
+  typeArrow([typeVar('a')], typeVar('a'))
+);
+
 // Helper for Eq comparison
 const eqCompare = (): TypeScheme => constrainedType(
   ['a'],
@@ -206,6 +213,7 @@ export const createBuiltinEnv = (): TypeEnv => {
   env = extendEnv(env, '-', numBinOp());
   env = extendEnv(env, '*', numBinOp());
   env = extendEnv(env, '/', numBinOp());
+  env = extendEnv(env, 'negate', numUnaryOp());
 
   // Add comparison operators
   env = extendEnv(env, '=', eqCompare());
