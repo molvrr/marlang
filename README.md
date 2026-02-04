@@ -580,6 +580,8 @@ marlang/
 │       ├── definition.ts
 │       └── completion.ts
 ├── spec/              # Test suite
+│   ├── lexer.test.ts
+│   ├── parser.test.ts
 │   ├── interpreter.test.ts
 │   ├── tco.test.ts
 │   ├── type-system.test.ts
