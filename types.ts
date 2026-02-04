@@ -26,6 +26,7 @@ export type RuntimeValue =
   | { kind: 'builtin', name: string, fn: (args: RuntimeValue[]) => RuntimeValue }
   | { kind: 'ffi-library', path: string, lib: any, signatures: Map<string, FFISignature> }
   | { kind: 'ffi-pointer', ptr: number }
+  | { kind: 'environment', env: Env }
 
 export type Env = {
   bindings: Map<string, RuntimeValue>;

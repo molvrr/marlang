@@ -7,6 +7,7 @@ A Lisp-like interpreter written in TypeScript, running on Bun. Features include 
 - Lexer, parser, and tree-walking interpreter
 - First-class functions with lexical closures
 - Recursive function support
+- First-class environments for introspection
 - FFI for calling native libraries (via Bun's FFI)
 - Interactive REPL
 
@@ -63,6 +64,12 @@ bun run repl.ts
 
 ```lisp
 (lambda (x) (* x x))
+```
+
+**Environments** - captured with `current-env`:
+
+```lisp
+(current-env)   ; => #<environment [+, -, *, /, ...] +parent>
 ```
 
 ### Arithmetic Operations
@@ -222,3 +229,39 @@ Variables are stored in environments with lexical scoping:
 - Closures capture their defining environment
 - `define` mutates the current environment (enabling recursion)
 - `let` creates a child environment for local bindings
+
+## Environment Introspection
+
+Marlang provides first-class access to lexical environments for metaprogramming and debugging.
+
+### Functions
+
+- **`current-env`** - returns the current lexical environment as a value
+- **`env-bindings`** - returns a list of `(name value)` pairs for immediate scope
+- **`env-get`** - looks up a binding by name string (returns `nil` if not found)
+- **`env-parent`** - returns the parent environment or `nil`
+
+### Examples
+
+```lisp
+; Capture current environment
+(define x 10)
+(define my-env (current-env))
+(env-get my-env "x")           ; => 10
+
+; Inspect bindings in a let scope
+(let ((a 1) (b 2))
+  (env-bindings (current-env))) ; => (("a" 1) ("b" 2))
+
+; Navigate the scope chain
+(let ((outer 100))
+  (let ((inner 200))
+    (env-get (env-parent (current-env)) "outer"))) ; => 100
+
+; Function parameters are visible
+(define show-env (lambda (x y) (current-env)))
+(env-bindings (show-env 1 2))  ; => (("x" 1) ("y" 2))
+
+; Top-level environment has no parent
+(env-parent (current-env))     ; => nil
+```

@@ -190,6 +190,35 @@ const builtins: [string, (args: RuntimeValue[]) => RuntimeValue][] = [
     libArg.lib.close();
     return { kind: 'nil' };
   }],
+  ['env-bindings', (args) => {
+    if (args.length !== 1) throw new Error('env-bindings expects 1 argument');
+    const envArg = args[0];
+    if (envArg?.kind !== 'environment') throw new Error('env-bindings: argument must be an environment');
+    const pairs: RuntimeValue[] = [];
+    for (const [name, value] of envArg.env.bindings) {
+      pairs.push({ kind: 'list', elements: [{ kind: 'string', value: name }, value] });
+    }
+    return { kind: 'list', elements: pairs };
+  }],
+  ['env-get', (args) => {
+    if (args.length !== 2) throw new Error('env-get expects 2 arguments');
+    const envArg = args[0];
+    const nameArg = args[1];
+    if (envArg?.kind !== 'environment') throw new Error('env-get: first argument must be an environment');
+    if (nameArg?.kind !== 'string') throw new Error('env-get: second argument must be a string');
+    try {
+      return Environment.lookup(envArg.env, nameArg.value);
+    } catch {
+      return { kind: 'nil' };
+    }
+  }],
+  ['env-parent', (args) => {
+    if (args.length !== 1) throw new Error('env-parent expects 1 argument');
+    const envArg = args[0];
+    if (envArg?.kind !== 'environment') throw new Error('env-parent: argument must be an environment');
+    if (envArg.env.parent === null) return { kind: 'nil' };
+    return { kind: 'environment', env: envArg.env.parent };
+  }],
 ];
 
 // Map type string to FFIType
@@ -462,6 +491,15 @@ export const evalExpr = (interp: T, expr: Expr): EvalResult => {
       }
       return { value: { kind: 'nil' }, interp };
     }
+
+    // current-env
+    if (sym === 'current-env') {
+      if (elements.length !== 1) throw new Error('current-env takes no arguments');
+      return {
+        value: { kind: 'environment', env: interp.env },
+        interp
+      };
+    }
   }
 
   // Function application
@@ -501,5 +539,10 @@ export const formatValue = (value: RuntimeValue): string => {
     case 'builtin': return `#<builtin ${value.name}>`;
     case 'ffi-library': return `#<ffi-library ${value.path}>`;
     case 'ffi-pointer': return `#<ffi-pointer 0x${value.ptr.toString(16)}>`;
+    case 'environment': {
+      const names = Array.from(value.env.bindings.keys());
+      const hasParent = value.env.parent !== null;
+      return `#<environment [${names.join(', ')}]${hasParent ? ' +parent' : ''}>`;
+    }
   }
 };
