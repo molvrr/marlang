@@ -1,4 +1,4 @@
-import type { Expr, RuntimeValue, Env, FFISignature, TailCall, EvalOutcome, StructField, StructDef } from './types';
+import type { Expr, RuntimeValue, Env, FFISignature, TailCall, EvalOutcome, StructField, StructDef, EffectSuspension, Continuation } from './types';
 import { dlopen, FFIType, suffix, ptr, CString, toArrayBuffer, read } from 'bun:ffi';
 
 // Environment operations
@@ -598,6 +598,25 @@ const isTruthy = (value: RuntimeValue): boolean => {
 // Set of known constructor names (populated by data definitions)
 const knownConstructors = new Set<string>();
 
+// Effect handler types
+type EffectHandler = {
+  effectName: string;
+  handlers: Map<string, { params: string[]; continuationParam: string; body: Expr }>;
+  env: Env;
+};
+
+// Handler stack for effect handling
+// Each element represents an installed handler scope
+type HandlerFrame = {
+  handlers: EffectHandler[];
+  // Return handler for when the computation completes normally
+  returnHandler?: { param: string; body: Expr; env: Env };
+};
+
+// Global handler stack (thread-local in a real implementation)
+let handlerStack: HandlerFrame[] = [];
+
+
 // Pattern matching helper
 // Returns null if pattern doesn't match, otherwise returns bindings
 const matchPattern = (pattern: Expr, value: RuntimeValue, env: Env): Map<string, RuntimeValue> | null => {
@@ -751,6 +770,522 @@ const trampoline = (outcome: EvalOutcome): RuntimeValue => {
   }
   return outcome;
 };
+
+// =============================================================================
+// Generator-based evaluation for effect handling
+// =============================================================================
+
+type EvalGen = Generator<EffectSuspension, RuntimeValue, RuntimeValue>;
+
+// Generator version of evalExprTail for effectful computation
+function* evalExprGen(interp: T, expr: Expr): EvalGen {
+  // Nil
+  if (expr.kind === 'nil') {
+    return { kind: 'nil' };
+  }
+
+  // Atom
+  if (expr.kind === 'atom') {
+    if (expr.value.kind === 'number') {
+      return { kind: 'number', value: expr.value.value };
+    }
+    if (expr.value.kind === 'string') {
+      return { kind: 'string', value: expr.value.value };
+    }
+    // Boolean literals
+    if (expr.value.value === '#t') {
+      return { kind: 'boolean', value: true };
+    }
+    if (expr.value.value === '#f') {
+      return { kind: 'boolean', value: false };
+    }
+    // Symbol lookup
+    return Environment.lookup(interp.env, expr.value.value);
+  }
+
+  // List - check for special forms
+  const elements = listToArray(expr);
+  const first = elements[0];
+  if (first === undefined) {
+    return { kind: 'nil' };
+  }
+
+  // Special forms
+  if (first.kind === 'atom' && first.value.kind === 'symbol') {
+    const sym = first.value.value;
+
+    // perform - yield an effect suspension
+    if (sym === 'perform') {
+      if (elements.length < 2) throw new Error('perform expects an operation name');
+      const opExpr = elements[1];
+      if (opExpr?.kind !== 'atom' || opExpr.value.kind !== 'symbol') {
+        throw new Error('perform expects an operation name symbol');
+      }
+      const opName = opExpr.value.value;
+
+      // Evaluate argument if present
+      const argExprs = elements.slice(2);
+      const args: RuntimeValue[] = [];
+      for (const argExpr of argExprs) {
+        args.push(yield* evalExprGen(interp, argExpr));
+      }
+
+      // Yield the effect suspension - the handler will provide the result
+      const suspension: EffectSuspension = {
+        kind: 'effect-suspension',
+        effectName: 'anonymous',
+        opName,
+        args,
+        continuation: null as any // Will be filled by handler
+      };
+
+      // Yield and wait for handler to provide resume value
+      const resumeValue: RuntimeValue = yield suspension;
+      return resumeValue;
+    }
+
+    // begin - sequence of expressions
+    if (sym === 'begin') {
+      const bodyExprs = elements.slice(1);
+      return yield* evalSequenceGen(interp, bodyExprs);
+    }
+
+    // if
+    if (sym === 'if') {
+      if (elements.length < 3 || elements.length > 4) {
+        throw new Error('if expects 2 or 3 arguments');
+      }
+      const condExpr = elements[1]!;
+      const thenExpr = elements[2]!;
+      const elseExpr = elements[3];
+      const cond = yield* evalExprGen(interp, condExpr);
+      if (isTruthy(cond)) {
+        return yield* evalExprGen(interp, thenExpr);
+      } else if (elseExpr !== undefined) {
+        return yield* evalExprGen(interp, elseExpr);
+      }
+      return { kind: 'nil' };
+    }
+
+    // let
+    if (sym === 'let') {
+      if (elements.length < 3) throw new Error('let expects at least 2 arguments');
+      const bindingsExpr = elements[1]!;
+      let letEnv = Environment.child(interp.env);
+      const bindingsList = listToArray(bindingsExpr);
+      for (const binding of bindingsList) {
+        const pair = listToArray(binding);
+        if (pair.length !== 2) throw new Error('let binding must be (name value)');
+        const nameExpr = pair[0];
+        const valExpr = pair[1]!;
+        let name: string;
+        if (nameExpr?.kind === 'list') {
+          const nameParts = listToArray(nameExpr);
+          if (nameParts.length === 3) {
+            const first = nameParts[0];
+            const colon = nameParts[1];
+            if (first?.kind === 'atom' && first.value.kind === 'symbol' &&
+                colon?.kind === 'atom' && colon.value.kind === 'symbol' && colon.value.value === ':') {
+              name = first.value.value;
+            } else {
+              throw new Error('let binding name must be a symbol or (symbol : Type)');
+            }
+          } else {
+            throw new Error('let binding name must be a symbol or (symbol : Type)');
+          }
+        } else if (nameExpr?.kind === 'atom' && nameExpr.value.kind === 'symbol') {
+          name = nameExpr.value.value;
+        } else {
+          throw new Error('let binding name must be a symbol');
+        }
+        const value = yield* evalExprGen({ env: letEnv }, valExpr);
+        letEnv = Environment.define(letEnv, name, value);
+      }
+      const bodyExprs = elements.slice(2);
+      return yield* evalSequenceGen({ env: letEnv }, bodyExprs);
+    }
+
+    // lambda
+    if (sym === 'lambda') {
+      if (elements.length < 3) throw new Error('lambda expects at least 2 arguments');
+      const paramsExpr = elements[1]!;
+      const paramExprs = listToArray(paramsExpr);
+      const params: string[] = [];
+      for (const p of paramExprs) {
+        if (p.kind === 'list') {
+          const parts = listToArray(p);
+          if (parts.length === 3) {
+            const first = parts[0];
+            const colon = parts[1];
+            if (first?.kind === 'atom' && first.value.kind === 'symbol' &&
+                colon?.kind === 'atom' && colon.value.kind === 'symbol' && colon.value.value === ':') {
+              params.push(first.value.value);
+              continue;
+            }
+          }
+          throw new Error('lambda parameters must be symbols or (symbol : Type)');
+        }
+        if (p.kind !== 'atom' || p.value.kind !== 'symbol') {
+          throw new Error('lambda parameters must be symbols');
+        }
+        params.push(p.value.value);
+      }
+      const bodyExprs = elements.slice(2);
+      return { kind: 'function', params, body: bodyExprs, closure: interp.env };
+    }
+
+    // match
+    if (sym === 'match') {
+      if (elements.length < 3) throw new Error('match expects scrutinee and at least one branch');
+      const scrutineeExpr = elements[1]!;
+      const branches = elements.slice(2);
+      const scrutinee = yield* evalExprGen(interp, scrutineeExpr);
+      for (const branchExpr of branches) {
+        const branchElements = listToArray(branchExpr);
+        if (branchElements.length !== 2) {
+          throw new Error('match branch must be (pattern body)');
+        }
+        const patternExpr = branchElements[0]!;
+        const bodyExpr = branchElements[1]!;
+        const matchResult = matchPattern(patternExpr, scrutinee, interp.env);
+        if (matchResult !== null) {
+          let matchEnv = Environment.child(interp.env);
+          for (const [name, value] of matchResult) {
+            matchEnv = Environment.define(matchEnv, name, value);
+          }
+          return yield* evalExprGen({ env: matchEnv }, bodyExpr);
+        }
+      }
+      throw new Error('No pattern matched in match expression');
+    }
+
+    // cond
+    if (sym === 'cond') {
+      for (let i = 1; i < elements.length; i++) {
+        const clauseExpr = elements[i]!;
+        const clause = listToArray(clauseExpr);
+        if (clause.length !== 2) throw new Error('cond clause must be (test expr)');
+        const testExpr = clause[0]!;
+        const resultExpr = clause[1]!;
+        if (testExpr.kind === 'atom' && testExpr.value.kind === 'symbol' && testExpr.value.value === 'else') {
+          return yield* evalExprGen(interp, resultExpr);
+        }
+        const test = yield* evalExprGen(interp, testExpr);
+        if (isTruthy(test)) {
+          return yield* evalExprGen(interp, resultExpr);
+        }
+      }
+      return { kind: 'nil' };
+    }
+
+    // define - not allowed in effectful context (for now)
+    if (sym === 'define') {
+      throw new Error('define not supported inside effectful computations');
+    }
+
+    // resume - resume a continuation (this is within generator context)
+    if (sym === 'resume') {
+      if (elements.length !== 3) throw new Error('resume expects 2 arguments: continuation and value');
+      const contExpr = elements[1]!;
+      const valueExpr = elements[2]!;
+
+      const cont = yield* evalExprGen(interp, contExpr);
+      const value = yield* evalExprGen(interp, valueExpr);
+
+      if (cont.kind !== 'continuation') {
+        throw new Error('resume expects a continuation as first argument');
+      }
+
+      // Resume the continuation - this returns a generator we need to run
+      const resumeGen = cont.cont.resume(value);
+      let result = resumeGen.next();
+      while (!result.done) {
+        // Re-yield any effects from the resumed continuation
+        const resumeValue: RuntimeValue = yield result.value;
+        result = resumeGen.next(resumeValue);
+      }
+      return result.value;
+    }
+
+    // handle - nested handle within effectful computation
+    if (sym === 'handle') {
+      if (elements.length < 3) throw new Error('handle expects an expression and handler clauses');
+      const bodyExpr = elements[1]!;
+      const handlerElements = elements.slice(2);
+
+      // Parse handler clauses (same logic as in evalExprTail)
+      const handlers = new Map<string, { params: string[]; continuationParam: string; body: Expr }>();
+      let returnHandler: { param: string; body: Expr; env: Env } | undefined;
+
+      const processHandler = (patternExpr: Expr, handlerBody: Expr) => {
+        const patternElements = listToArray(patternExpr);
+        if (patternElements.length === 0) {
+          throw new Error('handle clause pattern cannot be empty');
+        }
+        const first = patternElements[0]!;
+        if (first.kind !== 'atom' || first.value.kind !== 'symbol') {
+          throw new Error('handle clause pattern must start with operation name');
+        }
+        const opName = first.value.value;
+
+        if (opName === 'return') {
+          if (patternElements.length !== 2) {
+            throw new Error('return handler expects one parameter');
+          }
+          const paramExpr = patternElements[1]!;
+          if (paramExpr.kind !== 'atom' || paramExpr.value.kind !== 'symbol') {
+            throw new Error('return handler parameter must be a symbol');
+          }
+          returnHandler = { param: paramExpr.value.value, body: handlerBody, env: interp.env };
+        } else {
+          const params: string[] = [];
+          let continuationParam = 'k';
+          for (let i = 1; i < patternElements.length; i++) {
+            const p = patternElements[i]!;
+            if (p.kind !== 'atom' || p.value.kind !== 'symbol') {
+              throw new Error('handler parameters must be symbols');
+            }
+            params.push(p.value.value);
+          }
+          if (params.length > 0) {
+            continuationParam = params.pop()!;
+          }
+          handlers.set(opName, { params, continuationParam, body: handlerBody });
+        }
+      };
+
+      let i = 0;
+      while (i < handlerElements.length) {
+        const current = handlerElements[i]!;
+        if (i + 2 < handlerElements.length) {
+          const maybeArrow = handlerElements[i + 1];
+          if (maybeArrow?.kind === 'atom' && maybeArrow.value.kind === 'symbol' && maybeArrow.value.value === '->') {
+            processHandler(current, handlerElements[i + 2]!);
+            i += 3;
+            continue;
+          }
+        }
+        const clauseElements = listToArray(current);
+        if (clauseElements.length === 2) {
+          processHandler(clauseElements[0]!, clauseElements[1]!);
+          i += 1;
+        } else if (clauseElements.length === 3) {
+          const arrow = clauseElements[1];
+          if (arrow?.kind === 'atom' && arrow.value.kind === 'symbol' && arrow.value.value === '->') {
+            processHandler(clauseElements[0]!, clauseElements[2]!);
+            i += 1;
+          } else {
+            throw new Error('handle clause must be (pattern body) or pattern -> body');
+          }
+        } else {
+          throw new Error('handle clause must be (pattern body) or pattern -> body');
+        }
+      }
+
+      // Run the body with local effect handling
+      const bodyGen = evalExprGen(interp, bodyExpr);
+      let genResult = bodyGen.next();
+
+      while (!genResult.done) {
+        const suspension = genResult.value;
+
+        // Check if we handle this effect
+        const opHandler = handlers.get(suspension.opName);
+        if (opHandler) {
+          // We handle this effect - create continuation and run handler
+          const capturedGen = bodyGen;
+          const continuation: RuntimeValue = {
+            kind: 'continuation',
+            cont: {
+              kind: 'continuation',
+              resume: function* (value: RuntimeValue): EvalGen {
+                let r = capturedGen.next(value);
+                while (!r.done) {
+                  const resumeValue: RuntimeValue = yield r.value;
+                  r = capturedGen.next(resumeValue);
+                }
+                return r.value;
+              }
+            }
+          };
+
+          // Build handler environment
+          let hEnv = Environment.child(interp.env);
+          for (let j = 0; j < opHandler.params.length && j < suspension.args.length; j++) {
+            hEnv = Environment.define(hEnv, opHandler.params[j]!, suspension.args[j]!);
+          }
+          hEnv = Environment.define(hEnv, opHandler.continuationParam, continuation);
+
+          // Recursively handle the handler body
+          const handlerResult = yield* evalExprGen({ env: hEnv }, opHandler.body);
+
+          // Apply return handler if present
+          if (returnHandler) {
+            let returnEnv = Environment.child(returnHandler.env);
+            returnEnv = Environment.define(returnEnv, returnHandler.param, handlerResult);
+            return yield* evalExprGen({ env: returnEnv }, returnHandler.body);
+          }
+          return handlerResult;
+        } else {
+          // We don't handle this effect - re-yield it to outer handler
+          const resumeValue: RuntimeValue = yield suspension;
+          genResult = bodyGen.next(resumeValue);
+        }
+      }
+
+      // Body completed normally
+      const result = genResult.value;
+
+      // Apply return handler if present
+      if (returnHandler) {
+        let returnEnv = Environment.child(returnHandler.env);
+        returnEnv = Environment.define(returnEnv, returnHandler.param, result);
+        return yield* evalExprGen({ env: returnEnv }, returnHandler.body);
+      }
+      return result;
+    }
+
+    // No-op forms
+    if (sym === 'class' || sym === 'instance' || sym === 'type' || sym === 'effect' || sym === 'data') {
+      return { kind: 'nil' };
+    }
+  }
+
+  // Function application
+  const fn = yield* evalExprGen(interp, first);
+  const args: RuntimeValue[] = [];
+  for (let i = 1; i < elements.length; i++) {
+    const argExpr = elements[i]!;
+    args.push(yield* evalExprGen(interp, argExpr));
+  }
+
+  return yield* applyGen(fn, args);
+}
+
+// Generator version of sequence evaluation
+function* evalSequenceGen(interp: T, exprs: Expr[]): EvalGen {
+  if (exprs.length === 0) {
+    return { kind: 'nil' };
+  }
+  for (let i = 0; i < exprs.length - 1; i++) {
+    yield* evalExprGen(interp, exprs[i]!);
+  }
+  return yield* evalExprGen(interp, exprs[exprs.length - 1]!);
+}
+
+// Generator version of function application
+function* applyGen(fn: RuntimeValue, args: RuntimeValue[]): EvalGen {
+  if (fn.kind === 'builtin') {
+    return fn.fn(args);
+  }
+  if (fn.kind === 'function') {
+    if (args.length !== fn.params.length) {
+      throw new Error(`Expected ${fn.params.length} arguments, got ${args.length}`);
+    }
+    let fnEnv = Environment.child(fn.closure);
+    for (let i = 0; i < fn.params.length; i++) {
+      fnEnv = Environment.define(fnEnv, fn.params[i]!, args[i]!);
+    }
+    return yield* evalSequenceGen({ env: fnEnv }, fn.body);
+  }
+  if (fn.kind === 'adt-constructor') {
+    if (args.length !== fn.arity) {
+      throw new Error(`Constructor ${fn.name} expects ${fn.arity} arguments, got ${args.length}`);
+    }
+    return { kind: 'adt-value', constructor: fn.name, args };
+  }
+  if (fn.kind === 'continuation') {
+    // Resume a continuation
+    if (args.length !== 1) {
+      throw new Error('Continuation expects exactly 1 argument');
+    }
+    const gen = fn.cont.resume(args[0]!);
+    let result = gen.next();
+    while (!result.done) {
+      // Re-yield any effects from the resumed continuation
+      const resumeValue: RuntimeValue = yield result.value;
+      result = gen.next(resumeValue);
+    }
+    return result.value;
+  }
+  throw new Error(`Cannot apply non-function: ${fn.kind}`);
+}
+
+// Run a generator to completion, re-throwing any effect suspensions as errors
+function runGeneratorToCompletion(gen: EvalGen): RuntimeValue {
+  let result = gen.next();
+  while (!result.done) {
+    // If the generator yields, it means an unhandled effect
+    throw new Error(`Unhandled effect: ${result.value.opName}`);
+  }
+  return result.value;
+}
+
+// Run a handled computation - this is the core of effect handling
+// It runs the generator and handles any effect suspensions
+function runHandledComputation(gen: EvalGen, frame: HandlerFrame, outerEnv: Env): RuntimeValue {
+  let result = gen.next();
+
+  while (!result.done) {
+    const suspension = result.value;
+
+    // Look for a handler for this operation
+    let foundHandler: { params: string[]; continuationParam: string; body: Expr } | null = null;
+    let handlerEnv: Env | null = null;
+
+    for (const handler of frame.handlers) {
+      const opHandler = handler.handlers.get(suspension.opName);
+      if (opHandler) {
+        foundHandler = opHandler;
+        handlerEnv = handler.env;
+        break;
+      }
+    }
+
+    if (foundHandler === null) {
+      throw new Error(`Unhandled effect: ${suspension.opName}`);
+    }
+
+    // Create continuation that captures the rest of the computation
+    // The captured generator IS the continuation - we just need to wrap it
+    const capturedGen = gen;
+    const capturedFrame = frame;
+
+    const continuation: RuntimeValue = {
+      kind: 'continuation',
+      cont: {
+        kind: 'continuation',
+        resume: function* (value: RuntimeValue): EvalGen {
+          // Continue the captured generator with the provided value
+          let r = capturedGen.next(value);
+          while (!r.done) {
+            // Re-yield any effects to be handled by outer handlers
+            const resumeValue: RuntimeValue = yield r.value;
+            r = capturedGen.next(resumeValue);
+          }
+          return r.value;
+        }
+      }
+    };
+
+    // Build handler environment with params and continuation
+    let hEnv = Environment.child(handlerEnv!);
+    for (let i = 0; i < foundHandler.params.length && i < suspension.args.length; i++) {
+      hEnv = Environment.define(hEnv, foundHandler.params[i]!, suspension.args[i]!);
+    }
+    hEnv = Environment.define(hEnv, foundHandler.continuationParam, continuation);
+
+    // Evaluate handler body using generator-based evaluation
+    // The handler can also perform effects, which will be handled by this same frame
+    // (for deep handlers) or re-thrown (for shallow handlers)
+    const handlerGen = evalExprGen({ env: hEnv }, foundHandler.body);
+
+    // For deep handlers, we handle effects in the handler body with the same frame
+    return runHandledComputation(handlerGen, frame, outerEnv);
+  }
+
+  return result.value;
+}
 
 // Internal apply that may return a TailCall thunk (for user-defined functions)
 const applyInternal = (fn: RuntimeValue, args: RuntimeValue[]): EvalOutcome => {
@@ -1111,18 +1646,152 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
       return { kind: 'nil' };
     }
 
-    // perform - invoke an effect operation (placeholder)
-    // Syntax: (perform op-name arg)
+    // perform - this should only be called in non-generator context
+    // Real performs happen in evalExprGen
     if (sym === 'perform') {
-      if (elements.length < 2) throw new Error('perform expects an operation name');
-      throw new Error('perform requires effect handlers (not yet implemented)');
+      throw new Error('perform must be used inside a handle expression');
     }
 
-    // handle - install effect handlers (placeholder)
-    // Syntax: (handle expr (pattern) -> handler ...)
+    // handle - install effect handlers using generator-based evaluation
+    // Syntax: (handle expr handler-clauses...)
+    // Handler clause: ((op-name params... k) body) or (return (x) body)
     if (sym === 'handle') {
-      if (elements.length < 2) throw new Error('handle expects an expression');
-      throw new Error('handle requires delimited continuations (not yet implemented)');
+      if (elements.length < 3) throw new Error('handle expects an expression and handler clauses');
+      const bodyExpr = elements[1]!;
+      const handlerElements = elements.slice(2);
+
+      // Parse handler clauses
+      // Syntax can be:
+      //   (handle expr (pattern) -> body (pattern2) -> body2 ...)  -- flat arrow syntax
+      //   (handle expr ((pattern) body) ((pattern2) body2) ...)   -- nested tuple syntax
+      const handlers = new Map<string, { params: string[]; continuationParam: string; body: Expr }>();
+      let returnHandler: { param: string; body: Expr; env: Env } | undefined;
+
+      // Helper to process a single handler clause given pattern and body
+      const processHandler = (patternExpr: Expr, handlerBody: Expr) => {
+        const patternElements = listToArray(patternExpr);
+        if (patternElements.length === 0) {
+          throw new Error('handle clause pattern cannot be empty');
+        }
+
+        const first = patternElements[0]!;
+        if (first.kind !== 'atom' || first.value.kind !== 'symbol') {
+          throw new Error('handle clause pattern must start with operation name');
+        }
+        const opName = first.value.value;
+
+        if (opName === 'return') {
+          // Return handler: (return x) -> body
+          if (patternElements.length !== 2) {
+            throw new Error('return handler expects one parameter');
+          }
+          const paramExpr = patternElements[1]!;
+          if (paramExpr.kind !== 'atom' || paramExpr.value.kind !== 'symbol') {
+            throw new Error('return handler parameter must be a symbol');
+          }
+          returnHandler = { param: paramExpr.value.value, body: handlerBody, env: interp.env };
+        } else {
+          // Effect handler: (op-name params... k) -> body
+          const params: string[] = [];
+          let continuationParam = 'k'; // default
+
+          for (let i = 1; i < patternElements.length; i++) {
+            const p = patternElements[i]!;
+            if (p.kind !== 'atom' || p.value.kind !== 'symbol') {
+              throw new Error('handler parameters must be symbols');
+            }
+            params.push(p.value.value);
+          }
+
+          // Last param is the continuation
+          if (params.length > 0) {
+            continuationParam = params.pop()!;
+          }
+
+          handlers.set(opName, { params, continuationParam, body: handlerBody });
+        }
+      };
+
+      // Parse handler elements - can be flat (pattern -> body) or nested ((pattern body))
+      let i = 0;
+      while (i < handlerElements.length) {
+        const current = handlerElements[i]!;
+
+        // Check if next element is an arrow (flat syntax: pattern -> body)
+        if (i + 2 < handlerElements.length) {
+          const maybeArrow = handlerElements[i + 1];
+          if (maybeArrow?.kind === 'atom' && maybeArrow.value.kind === 'symbol' && maybeArrow.value.value === '->') {
+            // Flat arrow syntax: (pattern) -> body
+            const patternExpr = current;
+            const handlerBody = handlerElements[i + 2]!;
+            processHandler(patternExpr, handlerBody);
+            i += 3;
+            continue;
+          }
+        }
+
+        // Otherwise it should be a nested clause: ((pattern) body)
+        const clauseElements = listToArray(current);
+        if (clauseElements.length === 2) {
+          processHandler(clauseElements[0]!, clauseElements[1]!);
+          i += 1;
+        } else if (clauseElements.length === 3) {
+          // Nested with arrow: ((pattern) -> body)
+          const arrow = clauseElements[1];
+          if (arrow?.kind === 'atom' && arrow.value.kind === 'symbol' && arrow.value.value === '->') {
+            processHandler(clauseElements[0]!, clauseElements[2]!);
+            i += 1;
+          } else {
+            throw new Error('handle clause must be (pattern body) or pattern -> body');
+          }
+        } else {
+          throw new Error('handle clause must be (pattern body) or pattern -> body');
+        }
+      }
+
+      // Create handler frame for the generator-based evaluation
+      const effectHandler: EffectHandler = {
+        effectName: 'anonymous',
+        handlers,
+        env: interp.env
+      };
+
+      const frame: HandlerFrame = {
+        handlers: [effectHandler],
+        returnHandler
+      };
+
+      // Use generator-based evaluation for the body
+      const bodyGen = evalExprGen(interp, bodyExpr);
+      const result = runHandledComputation(bodyGen, frame, interp.env);
+
+      // Apply return handler if present
+      if (returnHandler) {
+        let returnEnv = Environment.child(returnHandler.env);
+        returnEnv = Environment.define(returnEnv, returnHandler.param, result);
+        return trampoline(evalExprTail({ env: returnEnv }, returnHandler.body, isTail));
+      }
+
+      return result;
+    }
+
+    // resume - continue a captured continuation
+    // Syntax: (resume k value)
+    if (sym === 'resume') {
+      if (elements.length !== 3) throw new Error('resume expects 2 arguments: continuation and value');
+      const contExpr = elements[1]!;
+      const valueExpr = elements[2]!;
+
+      const cont = trampoline(evalExprTail(interp, contExpr, false));
+      const value = trampoline(evalExprTail(interp, valueExpr, false));
+
+      if (cont.kind !== 'continuation') {
+        throw new Error('resume expects a continuation as first argument');
+      }
+
+      // Resume the continuation with the value
+      const gen = cont.cont.resume(value);
+      return runGeneratorToCompletion(gen);
     }
   }
 
@@ -1190,5 +1859,7 @@ export const formatValue = (value: RuntimeValue): string => {
     }
     case 'adt-constructor':
       return `#<constructor ${value.name}/${value.arity}>`;
+    case 'continuation':
+      return `#<continuation>`;
   }
 };

@@ -53,6 +53,7 @@ export type RuntimeValue =
   | { kind: 'environment', env: Env }
   | { kind: 'adt-value', constructor: string, args: RuntimeValue[] }
   | { kind: 'adt-constructor', name: string, arity: number }
+  | { kind: 'continuation', cont: Continuation }
 
 export type Env = {
   bindings: Map<string, RuntimeValue>;
@@ -68,3 +69,22 @@ export type TailCall = {
 
 // Evaluation can return a value or a tail call thunk
 export type EvalOutcome = RuntimeValue | TailCall;
+
+// Effect system types
+
+// An effect suspension represents a performed effect waiting for a handler
+export type EffectSuspension = {
+  kind: 'effect-suspension';
+  effectName: string;
+  opName: string;
+  args: RuntimeValue[];
+  continuation: Continuation;
+}
+
+// A continuation captures the computation up to a handler prompt
+export type Continuation = {
+  kind: 'continuation';
+  // The continuation is represented as a function that takes a value
+  // and returns an EvalOutcome (possibly suspending again)
+  resume: (value: RuntimeValue) => Generator<EffectSuspension, RuntimeValue, RuntimeValue>;
+}

@@ -1,0 +1,99 @@
+; Algebraic Effects Example
+;
+; Effects provide a way to perform operations that are handled
+; by an enclosing handler. The handler can inspect the operation,
+; provide a value, and optionally resume the computation.
+
+; === Example 1: Simple Effect ===
+;
+; The simplest use case: perform an effect and handle it
+
+(effect Ask
+  (ask : Unit -> Int))
+
+; Use the effect in a computation
+(handle
+  (+ 1 (perform ask ()))
+  (ask k) -> (resume k 10))
+; => 11 (the handler provides 10, computation adds 1)
+
+
+; === Example 2: State Effect ===
+;
+; A counter that reads and writes state
+
+(effect State
+  (get : Unit -> Int)
+  (put : Int -> Unit))
+
+(define counter (lambda ()
+  (let ((x (perform get ())))
+    (perform put (+ x 1))
+    x)))
+
+; This handler always returns 0 for get (no real state)
+(handle
+  (+ (counter) (counter))
+  (get k) -> (resume k 0)
+  (put v k) -> (resume k nil))
+; => 0 (0 + 0, since get always returns 0)
+
+
+; === Example 3: Early Abort ===
+;
+; Handlers can choose NOT to resume, discarding the continuation
+
+(effect Abort
+  (abort : Int -> Int))
+
+(define maybe-double (lambda (x)
+  (if (< x 0)
+    (perform abort x)
+    (* x 2))))
+
+; Normal case - no abort
+(handle
+  (maybe-double 5)
+  (abort code k) -> (- 0 1))
+; => 10
+
+; Abort case - handler returns -1, continuation discarded
+(handle
+  (maybe-double (- 0 5))
+  (abort code k) -> (- 0 1))
+; => -1
+
+
+; === Example 4: Nested Handlers ===
+;
+; Different handlers can handle different effects
+
+(effect Log
+  (log : String -> Unit))
+
+(handle
+  (handle
+    (begin
+      (perform log "hello")
+      (+ 100 (perform get ())))
+    (get k) -> (resume k 42))
+  (log msg k) -> (resume k nil))
+; => 142 (inner handles get, outer handles log)
+
+
+; === Example 5: Accumulating with Return Handler ===
+;
+; Handlers can transform results using the return clause
+
+(effect Emit
+  (emit : Int -> Unit))
+
+(handle
+  (begin
+    (perform emit 1)
+    (perform emit 2)
+    (perform emit 3)
+    0)
+  (emit n k) -> (+ n (resume k nil))
+  (return x) -> x)
+; => 6 (accumulates: 1 + (2 + (3 + 0)))

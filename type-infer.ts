@@ -360,6 +360,8 @@ export const inferExpr = (
         return inferPerform(env, elements);
       case 'handle':
         return inferHandle(env, elements);
+      case 'resume':
+        return inferResume(env, elements);
     }
   }
 
@@ -1466,12 +1468,11 @@ const inferPerform = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> =
     // Add this effect to the performed effects
     allEffects = combineEffectRows(allEffects, effectRowClosed([effect.name]));
   } else {
-    // Effect operation not found - use fresh type variable
-    // This allows perform to work even without effect declarations (for flexibility)
-    resultType = freshTypeVar();
-    // Create an open effect row since we don't know what effect this is
-    const rowVar = freshEffectRowVar();
-    allEffects = combineEffectRows(allEffects, effectRowOpen([], rowVar));
+    // Effect operation not found - require declaration
+    return err({
+      kind: 'undefined-variable',
+      name: `effect operation '${opName}' (declare with (effect EffectName (${opName} : ArgType -> ResultType)))`,
+    });
   }
 
   return ok({
@@ -1599,13 +1600,13 @@ const inferHandle = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> =>
             }
           }
 
-          // Bind continuation: k has type (ResultType -> HandlerResult)
-          // But we don't know HandlerResult yet, so use a fresh var
+          // Bind continuation: k has type (ResultType -> BodyType)
+          // The continuation returns the body's result type when resumed
           if (continuationPattern) {
             const kName = getSymbol(continuationPattern);
             if (kName) {
-              const kResultType = freshTypeVar();
-              const kType = typeArrow([opInfo.op.result], kResultType);
+              // The continuation's return type is the body's type
+              const kType = typeArrow([opInfo.op.result], applySubst(subst, bodyResult.value.type));
               handlerEnv = extendEnv(handlerEnv, kName, {
                 quantifiedVars: [],
                 qualType: { constraints: [], type: kType },
@@ -1613,26 +1614,11 @@ const inferHandle = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> =>
             }
           }
         } else {
-          // Unknown operation - bind everything to fresh type vars
-          for (const argPattern of argPatterns) {
-            const argName = getSymbol(argPattern);
-            if (argName) {
-              handlerEnv = extendEnv(handlerEnv, argName, {
-                quantifiedVars: [],
-                qualType: { constraints: [], type: freshTypeVar() },
-              });
-            }
-          }
-          if (continuationPattern) {
-            const kName = getSymbol(continuationPattern);
-            if (kName) {
-              const kType = typeArrow([freshTypeVar()], freshTypeVar());
-              handlerEnv = extendEnv(handlerEnv, kName, {
-                quantifiedVars: [],
-                qualType: { constraints: [], type: kType },
-              });
-            }
-          }
+          // Unknown operation - require declaration
+          return err({
+            kind: 'undefined-variable',
+            name: `effect operation '${opName}' in handler (declare with (effect EffectName (${opName} : ArgType -> ResultType)))`,
+          });
         }
 
         // Infer handler body
@@ -1677,6 +1663,54 @@ const inferHandle = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> =>
     subst,
     constraints: allConstraints,
     effects: remainingEffects,
+  });
+};
+
+// Infer resume expression
+// Syntax: (resume k value)
+// k is a continuation (function from value type to result type)
+// value is the value to pass to the continuation
+const inferResume = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
+  if (elements.length !== 3) {
+    return err({ kind: 'arity-mismatch', expected: 2, got: elements.length - 1, context: 'resume' });
+  }
+
+  // Infer the continuation type
+  const contExpr = elements[1]!;
+  const contResult = inferExpr(env, contExpr);
+  if (!contResult.ok) return contResult;
+
+  let subst = contResult.value.subst;
+  let allConstraints = contResult.value.constraints;
+  let allEffects = contResult.value.effects;
+
+  // Infer the value type
+  const valueExpr = elements[2]!;
+  const valueResult = inferExpr(applySubstEnv(subst, env), valueExpr);
+  if (!valueResult.ok) return valueResult;
+
+  subst = composeSubst(valueResult.value.subst, subst);
+  allConstraints = [...allConstraints, ...valueResult.value.constraints];
+  allEffects = combineEffectRows(allEffects, valueResult.value.effects);
+
+  // The continuation should be a function type (A -> B)
+  // We create a fresh return type and unify the continuation with (valueType -> returnType)
+  const returnType = freshTypeVar();
+  const valueType = applySubst(subst, valueResult.value.type);
+  const contType = applySubst(subst, contResult.value.type);
+
+  // Expected: k : (valueType -> returnType)
+  const expectedContType = typeArrow([valueType], returnType);
+  const unifyResult = unifyWithContext(contType, expectedContType, 'resume continuation');
+  if (!unifyResult.ok) return unifyResult;
+
+  subst = composeSubst(unifyResult.value, subst);
+
+  return ok({
+    type: applySubst(subst, returnType),
+    subst,
+    constraints: allConstraints,
+    effects: allEffects,
   });
 };
 
