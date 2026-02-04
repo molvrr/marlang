@@ -1,4 +1,0 @@
-(define foo
-  (match (Some 20)
-    ((Some x) x)
-    (None "a")))
