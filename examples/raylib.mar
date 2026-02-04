@@ -1,0 +1,10 @@
+(define rl (ffi-open "/opt/homebrew/Cellar/raylib/5.5/lib/libraylib.dylib"
+  (list
+    (list "InitWindow" (list "u8" "u8" "cstring") "void")
+    (list "WindowShouldClose" (list "void") "bool"))))
+
+(ffi-call rl "InitWindow" 640 480 "Main")
+
+((lambda (f)
+  (if (ffi-call rl "WindowShouldClose") nil (f f)))
+  (lambda (f) (f f)))

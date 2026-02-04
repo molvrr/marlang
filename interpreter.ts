@@ -1,4 +1,4 @@
-import type { Expr, RuntimeValue, Env, FFISignature } from './types';
+import type { Expr, RuntimeValue, Env, FFISignature, TailCall, EvalOutcome } from './types';
 import { dlopen, FFIType, suffix, ptr, CString } from 'bun:ffi';
 
 // Environment operations
@@ -136,6 +136,8 @@ const builtins: [string, (args: RuntimeValue[]) => RuntimeValue][] = [
 
       for (const argType of argsVal.elements) {
         if (argType.kind !== 'string') throw new Error('ffi-open: arg type must be a string');
+        // Skip "void" in argument list - it means "no arguments" (C convention)
+        if (argType.value === 'void') continue;
         argTypes.push(argType.value);
         ffiArgTypes.push(stringToFFIType(argType.value));
       }
@@ -296,6 +298,8 @@ const ffiToLisp = (result: any, typeStr: string): RuntimeValue => {
 
 export const createDefaultEnv = (): Env => {
   let env = Environment.empty();
+  // Add nil as a special value
+  env = Environment.define(env, 'nil', { kind: 'nil' });
   for (const [name, fn] of builtins) {
     env = Environment.define(env, name, { kind: 'builtin', name, fn });
   }
@@ -326,8 +330,26 @@ const isTruthy = (value: RuntimeValue): boolean => {
   return true;
 };
 
-// Apply a function to arguments
-const apply = (fn: RuntimeValue, args: RuntimeValue[]): RuntimeValue => {
+// Check if an outcome is a tail call thunk
+const isTailCall = (outcome: EvalOutcome): outcome is TailCall => {
+  return typeof outcome === 'object' && 'kind' in outcome && outcome.kind === 'tail-call';
+};
+
+// Execute a tail call thunk, returning the next outcome
+const applyTailCall = (tc: TailCall): EvalOutcome => {
+  return applyInternal(tc.fn, tc.args);
+};
+
+// Trampoline: execute thunks until we get a real value
+const trampoline = (outcome: EvalOutcome): RuntimeValue => {
+  while (isTailCall(outcome)) {
+    outcome = applyTailCall(outcome);
+  }
+  return outcome;
+};
+
+// Internal apply that may return a TailCall thunk (for user-defined functions)
+const applyInternal = (fn: RuntimeValue, args: RuntimeValue[]): EvalOutcome => {
   if (fn.kind === 'builtin') {
     return fn.fn(args);
   }
@@ -343,45 +365,49 @@ const apply = (fn: RuntimeValue, args: RuntimeValue[]): RuntimeValue => {
       if (param === undefined || arg === undefined) break;
       fnEnv = Environment.define(fnEnv, param, arg);
     }
-    // Evaluate body in new environment
-    const result = evalExpr({ env: fnEnv }, fn.body);
-    return result.value;
+    // Evaluate body in new environment with tail position enabled
+    return evalExprTail({ env: fnEnv }, fn.body, true);
   }
   throw new Error(`Cannot apply non-function: ${fn.kind}`);
 };
 
-// Evaluate a single expression
-export const evalExpr = (interp: T, expr: Expr): EvalResult => {
+// Apply a function to arguments (public API - trampolines the result)
+const apply = (fn: RuntimeValue, args: RuntimeValue[]): RuntimeValue => {
+  return trampoline(applyInternal(fn, args));
+};
+
+// Tail-position-aware expression evaluation
+// Returns EvalOutcome which may be a TailCall thunk when isTail is true
+const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
   // Nil
   if (expr.kind === 'nil') {
-    return { value: { kind: 'nil' }, interp };
+    return { kind: 'nil' };
   }
 
   // Atom
   if (expr.kind === 'atom') {
     if (expr.value.kind === 'number') {
-      return { value: { kind: 'number', value: expr.value.value }, interp };
+      return { kind: 'number', value: expr.value.value };
     }
     if (expr.value.kind === 'string') {
-      return { value: { kind: 'string', value: expr.value.value }, interp };
+      return { kind: 'string', value: expr.value.value };
     }
     // Symbol lookup
-    const value = Environment.lookup(interp.env, expr.value.value);
-    return { value, interp };
+    return Environment.lookup(interp.env, expr.value.value);
   }
 
   // List - check for special forms
   const elements = listToArray(expr);
   const first = elements[0];
   if (first === undefined) {
-    return { value: { kind: 'nil' }, interp };
+    return { kind: 'nil' };
   }
 
   // Special forms
   if (first.kind === 'atom' && first.value.kind === 'symbol') {
     const sym = first.value.value;
 
-    // define
+    // define - never in tail position (returns nil, side effect)
     if (sym === 'define') {
       if (elements.length !== 3) throw new Error('define expects 2 arguments');
       const nameExpr = elements[1];
@@ -393,12 +419,12 @@ export const evalExpr = (interp: T, expr: Expr): EvalResult => {
       const name = nameExpr.value.value;
       // For recursive functions: mutate the environment in-place so the closure can see itself
       interp.env.bindings.set(name, { kind: 'nil' }); // placeholder
-      const { value } = evalExpr(interp, valueExpr);
+      const value = trampoline(evalExprTail(interp, valueExpr, false));
       interp.env.bindings.set(name, value); // update with actual value
-      return { value: { kind: 'nil' }, interp };
+      return { kind: 'nil' };
     }
 
-    // lambda
+    // lambda - returns function value, not a tail call
     if (sym === 'lambda') {
       if (elements.length !== 3) throw new Error('lambda expects 2 arguments');
       const paramsExpr = elements[1];
@@ -415,13 +441,10 @@ export const evalExpr = (interp: T, expr: Expr): EvalResult => {
         params.push(p.value.value);
       }
 
-      return {
-        value: { kind: 'function', params, body, closure: interp.env },
-        interp
-      };
+      return { kind: 'function', params, body, closure: interp.env };
     }
 
-    // if
+    // if - propagates tail position to branches
     if (sym === 'if') {
       if (elements.length < 3 || elements.length > 4) {
         throw new Error('if expects 2 or 3 arguments');
@@ -430,16 +453,16 @@ export const evalExpr = (interp: T, expr: Expr): EvalResult => {
       const thenExpr = elements[2];
       const elseExpr = elements[3];
       if (condExpr === undefined || thenExpr === undefined) throw new Error('if expects 2 or 3 arguments');
-      const { value: cond } = evalExpr(interp, condExpr);
+      const cond = trampoline(evalExprTail(interp, condExpr, false));
       if (isTruthy(cond)) {
-        return evalExpr(interp, thenExpr);
+        return evalExprTail(interp, thenExpr, isTail);
       } else if (elseExpr !== undefined) {
-        return evalExpr(interp, elseExpr);
+        return evalExprTail(interp, elseExpr, isTail);
       }
-      return { value: { kind: 'nil' }, interp };
+      return { kind: 'nil' };
     }
 
-    // let
+    // let - propagates tail position to body
     if (sym === 'let') {
       if (elements.length !== 3) throw new Error('let expects 2 arguments');
       const bindingsExpr = elements[1];
@@ -462,17 +485,15 @@ export const evalExpr = (interp: T, expr: Expr): EvalResult => {
         if (valExpr === undefined) throw new Error('let binding must have a value');
         const name = nameExpr.value.value;
         // Evaluate value in the let environment (for sequential let)
-        const { value } = evalExpr({ env: letEnv }, valExpr);
+        const value = trampoline(evalExprTail({ env: letEnv }, valExpr, false));
         letEnv = Environment.define(letEnv, name, value);
       }
 
-      // Evaluate body in let environment
-      const result = evalExpr({ env: letEnv }, body);
-      // Return with original environment
-      return { value: result.value, interp };
+      // Evaluate body in let environment - propagate tail position
+      return evalExprTail({ env: letEnv }, body, isTail);
     }
 
-    // cond
+    // cond - propagates tail position to result expressions
     if (sym === 'cond') {
       for (let i = 1; i < elements.length; i++) {
         const clauseExpr = elements[i];
@@ -485,39 +506,48 @@ export const evalExpr = (interp: T, expr: Expr): EvalResult => {
         if (testExpr === undefined || resultExpr === undefined) throw new Error('cond clause must be (test expr)');
         // Check for else clause
         if (testExpr.kind === 'atom' && testExpr.value.kind === 'symbol' && testExpr.value.value === 'else') {
-          return evalExpr(interp, resultExpr);
+          return evalExprTail(interp, resultExpr, isTail);
         }
 
-        const { value: test } = evalExpr(interp, testExpr);
+        const test = trampoline(evalExprTail(interp, testExpr, false));
         if (isTruthy(test)) {
-          return evalExpr(interp, resultExpr);
+          return evalExprTail(interp, resultExpr, isTail);
         }
       }
-      return { value: { kind: 'nil' }, interp };
+      return { kind: 'nil' };
     }
 
     // current-env
     if (sym === 'current-env') {
       if (elements.length !== 1) throw new Error('current-env takes no arguments');
-      return {
-        value: { kind: 'environment', env: interp.env },
-        interp
-      };
+      return { kind: 'environment', env: interp.env };
     }
   }
 
   // Function application
-  const { value: fn } = evalExpr(interp, first);
+  const fn = trampoline(evalExprTail(interp, first, false));
   const args: RuntimeValue[] = [];
   for (let i = 1; i < elements.length; i++) {
     const argExpr = elements[i];
     if (argExpr === undefined) continue;
-    const { value } = evalExpr(interp, argExpr);
+    const value = trampoline(evalExprTail(interp, argExpr, false));
     args.push(value);
   }
 
-  const result = apply(fn, args);
-  return { value: result, interp };
+  // In tail position, return a thunk for user-defined functions
+  if (isTail && fn.kind === 'function') {
+    return { kind: 'tail-call', fn, args };
+  }
+
+  // Not in tail position or builtin: apply immediately
+  return apply(fn, args);
+};
+
+// Evaluate a single expression (public API)
+export const evalExpr = (interp: T, expr: Expr): EvalResult => {
+  const outcome = evalExprTail(interp, expr, false);
+  const value = trampoline(outcome);
+  return { value, interp };
 };
 
 // Evaluate multiple expressions, threading the environment through

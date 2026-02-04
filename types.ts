@@ -32,3 +32,13 @@ export type Env = {
   bindings: Map<string, RuntimeValue>;
   parent: Env | null;
 }
+
+// Tail call thunk for trampolining
+export type TailCall = {
+  kind: 'tail-call';
+  fn: RuntimeValue;
+  args: RuntimeValue[];
+}
+
+// Evaluation can return a value or a tail call thunk
+export type EvalOutcome = RuntimeValue | TailCall;
