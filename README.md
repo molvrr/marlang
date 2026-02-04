@@ -8,6 +8,7 @@ A Lisp-like interpreter written in TypeScript, running on Bun. Features include 
 - **Algebraic Data Types**: Define sum types with constructors
 - **Pattern Matching**: Destructure values with `match` expressions
 - **Tail Call Optimization**: Efficient recursion without stack overflow
+- **LSP Server**: Language Server Protocol support for IDE integration
 - First-class functions with lexical closures
 - First-class environments for introspection
 - FFI for calling native libraries (via Bun's FFI)
@@ -25,25 +26,38 @@ bun install
 Run a Marlang file:
 
 ```bash
-bun run.ts <filename.mar>
+bun index.ts run <filename.mar>
 ```
 
 Run without type checking:
 
 ```bash
-bun run.ts <filename.mar> --no-typecheck
+bun index.ts run <filename.mar> --no-typecheck
+```
+
+Type check without running:
+
+```bash
+bun index.ts typecheck <filename.mar>
+bun index.ts typecheck <filename.mar> --verbose  # Show inferred types
+```
+
+Start the interactive REPL:
+
+```bash
+bun index.ts repl
+```
+
+Start the LSP server:
+
+```bash
+bun index.ts lsp
 ```
 
 Run the test suite:
 
 ```bash
 bun test
-```
-
-Start the interactive REPL:
-
-```bash
-bun repl.ts
 ```
 
 ## Language Reference
@@ -464,6 +478,50 @@ Marlang provides first-class access to lexical environments for metaprogramming 
     (env-get (env-parent (current-env)) "outer"))) ; => 100
 ```
 
+## LSP Server
+
+Marlang includes a Language Server Protocol (LSP) server for IDE integration.
+
+### Features
+
+- **Diagnostics**: Type errors are reported with source locations
+- **Hover**: Shows type information for symbols on hover
+- **Go to Definition**: Navigate to symbol definitions
+- **Completion**: Suggests keywords, built-in functions, and user-defined symbols
+
+### Usage
+
+Start the LSP server:
+
+```bash
+bun index.ts lsp
+```
+
+The server communicates over stdin/stdout using the standard LSP JSON-RPC protocol.
+
+### Editor Integration
+
+To use the LSP with your editor, configure it to run `bun index.ts lsp` as the language server for `.mar` files. For example:
+
+**VS Code**: Create an extension or use a generic LSP client extension, configuring it to run the Marlang LSP for `.mar` files.
+
+**Neovim** (with nvim-lspconfig):
+
+```lua
+local lspconfig = require('lspconfig')
+local configs = require('lspconfig.configs')
+
+configs.marlang = {
+  default_config = {
+    cmd = { 'bun', 'index.ts', 'lsp' },
+    filetypes = { 'marlang' },
+    root_dir = lspconfig.util.find_git_ancestor,
+  },
+}
+
+lspconfig.marlang.setup({})
+```
+
 ## Architecture
 
 The interpreter follows a classic pipeline:
@@ -486,17 +544,27 @@ The interpreter follows a classic pipeline:
 
 ```
 marlang/
-├── lexer.ts           # Tokenizer
+├── index.ts           # CLI entry point
+├── lexer.ts           # Tokenizer with position tracking
 ├── parser.ts          # S-expression parser
 ├── types.ts           # AST and runtime value types
 ├── interpreter.ts     # Tree-walking interpreter with TCO
 ├── type-*.ts          # Type system modules
-├── run.ts             # CLI entry point
-├── repl.ts            # Interactive REPL
+├── lsp/               # Language Server Protocol
+│   ├── server.ts      # LSP server entry point
+│   ├── protocol.ts    # JSON-RPC message handling
+│   ├── document.ts    # Open document management
+│   ├── analyzer.ts    # Analysis pipeline
+│   └── handlers/      # LSP request handlers
+│       ├── diagnostics.ts
+│       ├── hover.ts
+│       ├── definition.ts
+│       └── completion.ts
 ├── spec/              # Test suite
 │   ├── interpreter.test.ts
 │   ├── tco.test.ts
-│   └── type-system.test.ts
+│   ├── type-system.test.ts
+│   └── lsp.test.ts
 └── examples/
     ├── types.mar      # Type system demo
     └── raylib.mar     # Raylib graphics bindings

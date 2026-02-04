@@ -14,13 +14,15 @@ Commands:
   run <file.mar> [--no-typecheck]  Run a Marlang file
   repl                             Start interactive REPL
   typecheck <file.mar> [--verbose] Type check a file without running
+  lsp                              Start the Language Server Protocol server
 
 Examples:
   bun index.ts run examples/factorial.mar
   bun index.ts run examples/factorial.mar --no-typecheck
   bun index.ts repl
   bun index.ts typecheck examples/factorial.mar
-  bun index.ts typecheck examples/factorial.mar --verbose`);
+  bun index.ts typecheck examples/factorial.mar --verbose
+  bun index.ts lsp`);
 };
 
 const runFile = async () => {
@@ -149,6 +151,9 @@ switch (command) {
     break;
   case 'typecheck':
     await typecheckFile();
+    break;
+  case 'lsp':
+    await import('./lsp/server');
     break;
   default:
     printUsage();

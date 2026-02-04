@@ -2,73 +2,84 @@
 
 import type { Type, Constraint, Pattern } from './type-ast';
 import { formatType, formatConstraint, formatPattern } from './type-ast';
+import type { SourceLocation } from './types';
+
+// Base type for errors with optional location
+type WithLocation = { loc?: SourceLocation };
 
 export type TypeError =
-  | { kind: 'unification-error'; t1: Type; t2: Type; context?: string }
-  | { kind: 'occurs-check'; varName: string; type: Type }
-  | { kind: 'undefined-variable'; name: string }
-  | { kind: 'undefined-type'; name: string }
-  | { kind: 'undefined-constructor'; name: string }
-  | { kind: 'undefined-class'; name: string }
-  | { kind: 'no-instance'; constraint: Constraint }
-  | { kind: 'duplicate-definition'; name: string; what: string }
-  | { kind: 'arity-mismatch'; expected: number; got: number; context: string }
-  | { kind: 'not-a-function'; type: Type }
-  | { kind: 'pattern-type-mismatch'; pattern: Pattern; expected: Type; got: Type }
-  | { kind: 'non-exhaustive-patterns'; missing: string[] }
-  | { kind: 'overlapping-instances'; className: string; type: Type }
-  | { kind: 'missing-type-annotation'; name: string }
-  | { kind: 'invalid-type-annotation'; message: string }
-  | { kind: 'ambiguous-type'; varName: string; constraints: Constraint[] }
-  | { kind: 'cyclic-type-alias'; name: string }
-  | { kind: 'kind-error'; message: string }
-  | { kind: 'internal-error'; message: string };
+  | { kind: 'unification-error'; t1: Type; t2: Type; context?: string } & WithLocation
+  | { kind: 'occurs-check'; varName: string; type: Type } & WithLocation
+  | { kind: 'undefined-variable'; name: string } & WithLocation
+  | { kind: 'undefined-type'; name: string } & WithLocation
+  | { kind: 'undefined-constructor'; name: string } & WithLocation
+  | { kind: 'undefined-class'; name: string } & WithLocation
+  | { kind: 'no-instance'; constraint: Constraint } & WithLocation
+  | { kind: 'duplicate-definition'; name: string; what: string } & WithLocation
+  | { kind: 'arity-mismatch'; expected: number; got: number; context: string } & WithLocation
+  | { kind: 'not-a-function'; type: Type } & WithLocation
+  | { kind: 'pattern-type-mismatch'; pattern: Pattern; expected: Type; got: Type } & WithLocation
+  | { kind: 'non-exhaustive-patterns'; missing: string[] } & WithLocation
+  | { kind: 'overlapping-instances'; className: string; type: Type } & WithLocation
+  | { kind: 'missing-type-annotation'; name: string } & WithLocation
+  | { kind: 'invalid-type-annotation'; message: string } & WithLocation
+  | { kind: 'ambiguous-type'; varName: string; constraints: Constraint[] } & WithLocation
+  | { kind: 'cyclic-type-alias'; name: string } & WithLocation
+  | { kind: 'kind-error'; message: string } & WithLocation
+  | { kind: 'internal-error'; message: string } & WithLocation;
+
+// Format location for display
+export const formatLocation = (loc: SourceLocation): string => {
+  return `${loc.start.line}:${loc.start.column}`;
+};
 
 export const formatError = (err: TypeError): string => {
+  const locPrefix = err.loc ? `${formatLocation(err.loc)}: ` : '';
+
   switch (err.kind) {
     case 'unification-error': {
-      let msg = `Type mismatch: cannot unify ${formatType(err.t1)} with ${formatType(err.t2)}`;
+      let msg = `${locPrefix}Type mismatch: cannot unify ${formatType(err.t1)} with ${formatType(err.t2)}`;
       if (err.context) {
         msg += `\n  in ${err.context}`;
       }
       return msg;
     }
     case 'occurs-check':
-      return `Infinite type: ${err.varName} occurs in ${formatType(err.type)}`;
+      return `${locPrefix}Infinite type: ${err.varName} occurs in ${formatType(err.type)}`;
     case 'undefined-variable':
-      return `Undefined variable: ${err.name}`;
+      return `${locPrefix}Undefined variable: ${err.name}`;
     case 'undefined-type':
-      return `Undefined type: ${err.name}`;
+      return `${locPrefix}Undefined type: ${err.name}`;
     case 'undefined-constructor':
-      return `Undefined constructor: ${err.name}`;
+      return `${locPrefix}Undefined constructor: ${err.name}`;
     case 'undefined-class':
-      return `Undefined typeclass: ${err.name}`;
+      return `${locPrefix}Undefined typeclass: ${err.name}`;
     case 'no-instance':
-      return `No instance for ${formatConstraint(err.constraint)}`;
+      return `${locPrefix}No instance for ${formatConstraint(err.constraint)}`;
     case 'duplicate-definition':
-      return `Duplicate ${err.what}: ${err.name}`;
+      return `${locPrefix}Duplicate ${err.what}: ${err.name}`;
     case 'arity-mismatch':
-      return `${err.context}: expected ${err.expected} arguments, got ${err.got}`;
+      return `${locPrefix}${err.context}: expected ${err.expected} arguments, got ${err.got}`;
     case 'not-a-function':
-      return `Cannot apply non-function type: ${formatType(err.type)}`;
+      return `${locPrefix}Cannot apply non-function type: ${formatType(err.type)}`;
     case 'pattern-type-mismatch':
-      return `Pattern ${formatPattern(err.pattern)} has type ${formatType(err.got)}, expected ${formatType(err.expected)}`;
+      return `${locPrefix}Pattern ${formatPattern(err.pattern)} has type ${formatType(err.got)}, expected ${formatType(err.expected)}`;
     case 'non-exhaustive-patterns':
-      return `Non-exhaustive patterns. Missing: ${err.missing.join(', ')}`;
+      return `${locPrefix}Non-exhaustive patterns. Missing: ${err.missing.join(', ')}`;
     case 'overlapping-instances':
-      return `Overlapping instances for ${err.className} ${formatType(err.type)}`;
+      return `${locPrefix}Overlapping instances for ${err.className} ${formatType(err.type)}`;
     case 'missing-type-annotation':
-      return `Missing type annotation for top-level definition: ${err.name}`;
+      return `${locPrefix}Missing type annotation for top-level definition: ${err.name}`;
     case 'invalid-type-annotation':
-      return `Invalid type annotation: ${err.message}`;
+      return `${locPrefix}Invalid type annotation: ${err.message}`;
     case 'ambiguous-type':
-      return `Ambiguous type variable ${err.varName} with constraints: ${err.constraints.map(formatConstraint).join(', ')}`;
+      return `${locPrefix}Ambiguous type variable ${err.varName} with constraints: ${err.constraints.map(formatConstraint).join(', ')}`;
     case 'cyclic-type-alias':
-      return `Cyclic type alias: ${err.name}`;
+      return `${locPrefix}Cyclic type alias: ${err.name}`;
     case 'kind-error':
-      return `Kind error: ${err.message}`;
+      return `${locPrefix}Kind error: ${err.message}`;
     case 'internal-error':
-      return `Internal type error: ${err.message}`;
+      return `${locPrefix}Internal type error: ${err.message}`;
   }
 };
 

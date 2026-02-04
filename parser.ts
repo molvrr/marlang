@@ -1,5 +1,5 @@
 import * as Lexer from './lexer';
-import type { Expr, LispValue } from './types';
+import type { Expr, LispValue, SourceLocation } from './types';
 
 export type T = { tokens: Lexer.Token[], idx: number, exprs: Expr[] }
 
@@ -17,6 +17,12 @@ const skipSpc = (p: T): T => {
   return p;
 };
 
+// Combine two source locations to span from start of first to end of second
+const spanLoc = (start: SourceLocation, end: SourceLocation): SourceLocation => ({
+  start: start.start,
+  end: end.end,
+});
+
 // Parse a single expression
 const parseExpr = (p: T): { parser: T, expr: Expr } => {
   p = skipSpc(p);
@@ -29,33 +35,34 @@ const parseExpr = (p: T): { parser: T, expr: Expr } => {
   if (token.kind === 'number') {
     return {
       parser: advance(p),
-      expr: { kind: 'atom', value: { kind: 'number', value: token.value, isFloat: token.isFloat } }
+      expr: { kind: 'atom', value: { kind: 'number', value: token.value, isFloat: token.isFloat }, loc: token.loc }
     };
   }
 
   if (token.kind === 'identifier') {
     return {
       parser: advance(p),
-      expr: { kind: 'atom', value: { kind: 'symbol', value: token.value } }
+      expr: { kind: 'atom', value: { kind: 'symbol', value: token.value }, loc: token.loc }
     };
   }
 
   if (token.kind === 'string') {
     return {
       parser: advance(p),
-      expr: { kind: 'atom', value: { kind: 'string', value: token.value } }
+      expr: { kind: 'atom', value: { kind: 'string', value: token.value }, loc: token.loc }
     };
   }
 
   if (token.kind === 'lparen') {
-    return parseList(advance(p));
+    return parseList(advance(p), token.loc);
   }
 
   throw new Error(`Unexpected token: ${token.kind}`);
 };
 
 // Parse list contents (after lparen has been consumed)
-const parseList = (p: T): { parser: T, expr: Expr } => {
+// startLoc is the location of the opening paren
+const parseList = (p: T, startLoc: SourceLocation): { parser: T, expr: Expr } => {
   p = skipSpc(p);
   const token = current(p);
 
@@ -64,18 +71,25 @@ const parseList = (p: T): { parser: T, expr: Expr } => {
   }
 
   if (token.kind === 'rparen') {
-    return { parser: advance(p), expr: { kind: 'nil' } };
+    // Empty list - span from ( to )
+    const loc = spanLoc(startLoc, token.loc);
+    return { parser: advance(p), expr: { kind: 'nil', loc } };
   }
 
   // Parse head expression
   const { parser: afterHead, expr: head } = parseExpr(p);
 
   // Parse tail as rest of list
-  const { parser: afterTail, expr: tail } = parseList(afterHead);
+  const { parser: afterTail, expr: tail } = parseList(afterHead, startLoc);
+
+  // List location spans from start of this list to end of tail
+  const headLoc = head.loc || startLoc;
+  const tailLoc = tail.loc || headLoc;
+  const loc = spanLoc(startLoc, tailLoc);
 
   return {
     parser: afterTail,
-    expr: { kind: 'list', head, tail }
+    expr: { kind: 'list', head, tail, loc }
   };
 };
 

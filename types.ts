@@ -1,13 +1,20 @@
 // Shared AST types
+
+// Source location for error reporting and LSP
+export type SourceLocation = {
+  start: { line: number; column: number; offset: number };
+  end: { line: number; column: number; offset: number };
+};
+
 export type LispValue =
   | { kind: 'symbol', value: string }
   | { kind: 'number', value: number, isFloat?: boolean }
   | { kind: 'string', value: string }
 
 export type Expr =
-  | { kind: 'atom', value: LispValue }
-  | { kind: 'list', head: Expr, tail: Expr }
-  | { kind: 'nil' }
+  | { kind: 'atom', value: LispValue, loc?: SourceLocation }
+  | { kind: 'list', head: Expr, tail: Expr, loc?: SourceLocation }
+  | { kind: 'nil', loc?: SourceLocation }
 
 // FFI types
 export type FFISignature = {

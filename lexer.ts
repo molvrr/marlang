@@ -1,14 +1,40 @@
+import type { SourceLocation } from './types';
+
+export type TokenLocation = SourceLocation;
 
 export type Token =
-  { kind: 'lparen' }
-  | { kind: 'rparen' }
-  | { kind: 'identifier', value: string }
-  | { kind: 'number', value: number, isFloat: boolean }
-  | { kind: 'string', value: string }
-  | { kind: 'spc' }
-  | { kind: 'eof' }
-export type T = { code: string, idx: number, tokens: Token[] }
-export const empty = (code: string): T => ({ code, idx: 0, tokens: [] });
+  { kind: 'lparen', loc: TokenLocation }
+  | { kind: 'rparen', loc: TokenLocation }
+  | { kind: 'identifier', value: string, loc: TokenLocation }
+  | { kind: 'number', value: number, isFloat: boolean, loc: TokenLocation }
+  | { kind: 'string', value: string, loc: TokenLocation }
+  | { kind: 'spc', loc: TokenLocation }
+  | { kind: 'eof', loc: TokenLocation }
+
+export type T = {
+  code: string,
+  idx: number,
+  line: number,
+  column: number,
+  tokens: Token[]
+}
+
+export const empty = (code: string): T => ({
+  code,
+  idx: 0,
+  line: 1,
+  column: 1,
+  tokens: []
+});
+
+// Create a source location from start to end positions
+const makeLoc = (
+  startLine: number, startColumn: number, startOffset: number,
+  endLine: number, endColumn: number, endOffset: number
+): TokenLocation => ({
+  start: { line: startLine, column: startColumn, offset: startOffset },
+  end: { line: endLine, column: endColumn, offset: endOffset },
+});
 
 const isChar = (input: string, char: string): boolean => input === char;
 const isWhitespace = (input: string): boolean => input === ' ' || input === '\n' || input === '\r' || input === '\t';
@@ -43,16 +69,52 @@ const parseString = (code: string, startIdx: number): { value: string, endIdx: n
   throw new Error('Unterminated string literal');
 };
 
+// Calculate line and column after advancing through text
+const calculatePosition = (
+  code: string,
+  startIdx: number,
+  endIdx: number,
+  startLine: number,
+  startColumn: number
+): { line: number; column: number } => {
+  let line = startLine;
+  let column = startColumn;
+  for (let i = startIdx; i < endIdx; i++) {
+    if (code[i] === '\n') {
+      line++;
+      column = 1;
+    } else {
+      column++;
+    }
+  }
+  return { line, column };
+};
+
 export const peek = (lexer: T): [T, Token] => {
   const c = lexer.code[lexer.idx];
+  const startLoc = { line: lexer.line, column: lexer.column, offset: lexer.idx };
 
-  if (c === undefined) return [lexer, { kind: 'eof' }];
-  if (isChar(c, '(')) return [lexer, { kind: 'lparen' }];
-  if (isChar(c, ')')) return [lexer, { kind: 'rparen' }];
-  if (isChar(c, ';')) return [lexer, { kind: 'spc' }]; // Comments treated as whitespace
+  if (c === undefined) {
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, startLoc.line, startLoc.column, startLoc.offset);
+    return [lexer, { kind: 'eof', loc }];
+  }
+  if (isChar(c, '(')) {
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, startLoc.line, startLoc.column + 1, lexer.idx + 1);
+    return [lexer, { kind: 'lparen', loc }];
+  }
+  if (isChar(c, ')')) {
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, startLoc.line, startLoc.column + 1, lexer.idx + 1);
+    return [lexer, { kind: 'rparen', loc }];
+  }
+  if (isChar(c, ';')) {
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, startLoc.line, startLoc.column + 1, lexer.idx + 1);
+    return [lexer, { kind: 'spc', loc }];
+  }
   if (isChar(c, '"')) {
-    const { value } = parseString(lexer.code, lexer.idx + 1);
-    return [lexer, { kind: 'string', value }];
+    const { value, endIdx } = parseString(lexer.code, lexer.idx + 1);
+    const endPos = calculatePosition(lexer.code, lexer.idx, endIdx, lexer.line, lexer.column);
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, endPos.line, endPos.column, endIdx);
+    return [lexer, { kind: 'string', value, loc }];
   }
   if (isNumber(c)) {
     let num = c;
@@ -72,12 +134,19 @@ export const peek = (lexer: T): [T, Token] => {
         idx++;
         char = lexer.code[idx];
       }
-      return [lexer, { kind: 'identifier', value: num }];
+      const endPos = calculatePosition(lexer.code, lexer.idx, idx, lexer.line, lexer.column);
+      const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, endPos.line, endPos.column, idx);
+      return [lexer, { kind: 'identifier', value: num, loc }];
     }
 
-    return [lexer, { kind: 'number', value: parseFloat(num), isFloat: num.includes('.') }];
+    const endPos = calculatePosition(lexer.code, lexer.idx, idx, lexer.line, lexer.column);
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, endPos.line, endPos.column, idx);
+    return [lexer, { kind: 'number', value: parseFloat(num), isFloat: num.includes('.'), loc }];
   }
-  if (isWhitespace(c)) return [lexer, { kind: 'spc' }];
+  if (isWhitespace(c)) {
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, startLoc.line, startLoc.column + 1, lexer.idx + 1);
+    return [lexer, { kind: 'spc', loc }];
+  }
   if (isSymbolChar(c)) {
     let value = c;
     let idx = lexer.idx + 1;
@@ -89,13 +158,38 @@ export const peek = (lexer: T): [T, Token] => {
       char = lexer.code[idx];
     }
 
-    return [lexer, { kind: 'identifier', value }];
+    const endPos = calculatePosition(lexer.code, lexer.idx, idx, lexer.line, lexer.column);
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, endPos.line, endPos.column, idx);
+    return [lexer, { kind: 'identifier', value, loc }];
   }
 
   throw new Error('Could not peek');
 }
 
-const incrIdx = (lexer: T): T => ({ ...lexer, idx: lexer.idx + 1 });
+// Increment index and update line/column for a single character
+const incrIdx = (lexer: T): T => {
+  const c = lexer.code[lexer.idx];
+  if (c === '\n') {
+    return { ...lexer, idx: lexer.idx + 1, line: lexer.line + 1, column: 1 };
+  }
+  return { ...lexer, idx: lexer.idx + 1, column: lexer.column + 1 };
+};
+
+// Advance index to a specific position, updating line/column
+const advanceToIdx = (lexer: T, newIdx: number): T => {
+  let line = lexer.line;
+  let column = lexer.column;
+  for (let i = lexer.idx; i < newIdx; i++) {
+    if (lexer.code[i] === '\n') {
+      line++;
+      column = 1;
+    } else {
+      column++;
+    }
+  }
+  return { ...lexer, idx: newIdx, line, column };
+};
+
 const addToken = (lexer: T, token: Token): T => ({ ...lexer, tokens: [...lexer.tokens, token] });
 
 // Skip a comment from current position to end of line
@@ -109,26 +203,36 @@ const skipComment = (code: string, startIdx: number): number => {
 
 export const advance = (lexer: T): [T, Token] => {
   const c = lexer.code[lexer.idx];
+  const startLoc = { line: lexer.line, column: lexer.column, offset: lexer.idx };
 
-  if (c === undefined) return [lexer, { kind: 'eof' }];
+  if (c === undefined) {
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, startLoc.line, startLoc.column, startLoc.offset);
+    return [lexer, { kind: 'eof', loc }];
+  }
   if (isChar(c, '(')) {
-    const token: Token = { kind: 'lparen' };
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, startLoc.line, startLoc.column + 1, lexer.idx + 1);
+    const token: Token = { kind: 'lparen', loc };
     return [addToken(incrIdx(lexer), token), token];
   }
   if (isChar(c, ')')) {
-    const token: Token = { kind: 'rparen' };
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, startLoc.line, startLoc.column + 1, lexer.idx + 1);
+    const token: Token = { kind: 'rparen', loc };
     return [addToken(incrIdx(lexer), token), token];
   }
   if (isChar(c, ';')) {
     // Skip comment until end of line
     const endIdx = skipComment(lexer.code, lexer.idx);
-    // Just return a spc token - let the next advance() handle whatever comes next
-    return [addToken({ ...lexer, idx: endIdx }, { kind: 'spc' }), { kind: 'spc' }];
+    const newLexer = advanceToIdx(lexer, endIdx);
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, newLexer.line, newLexer.column, endIdx);
+    const token: Token = { kind: 'spc', loc };
+    return [addToken(newLexer, token), token];
   }
   if (isChar(c, '"')) {
     const { value, endIdx } = parseString(lexer.code, lexer.idx + 1);
-    const token: Token = { kind: 'string', value };
-    return [addToken({ ...lexer, idx: endIdx }, token), token];
+    const newLexer = advanceToIdx(lexer, endIdx);
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, newLexer.line, newLexer.column, endIdx);
+    const token: Token = { kind: 'string', value, loc };
+    return [addToken(newLexer, token), token];
   }
   if (isNumber(c)) {
     let num = c;
@@ -148,17 +252,23 @@ export const advance = (lexer: T): [T, Token] => {
         idx++;
         char = lexer.code[idx];
       }
-      const token: Token = { kind: 'identifier', value: num };
-      return [addToken({ ...lexer, idx }, token), token];
+      const newLexer = advanceToIdx(lexer, idx);
+      const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, newLexer.line, newLexer.column, idx);
+      const token: Token = { kind: 'identifier', value: num, loc };
+      return [addToken(newLexer, token), token];
     }
 
-    const token: Token = { kind: 'number', value: parseFloat(num), isFloat: num.includes('.') };
-    return [addToken({ ...lexer, idx }, token), token];
+    const newLexer = advanceToIdx(lexer, idx);
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, newLexer.line, newLexer.column, idx);
+    const token: Token = { kind: 'number', value: parseFloat(num), isFloat: num.includes('.'), loc };
+    return [addToken(newLexer, token), token];
   }
 
   if (isWhitespace(c)) {
-    // Just skip one whitespace character - next advance() will handle subsequent whitespace
-    return [addToken(incrIdx(lexer), { kind: 'spc' }), { kind: 'spc' }];
+    const newLexer = incrIdx(lexer);
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, newLexer.line, newLexer.column, newLexer.idx);
+    const token: Token = { kind: 'spc', loc };
+    return [addToken(newLexer, token), token];
   }
 
   if (isSymbolChar(c)) {
@@ -171,9 +281,11 @@ export const advance = (lexer: T): [T, Token] => {
       idx++;
       char = lexer.code[idx];
     }
-    const token: Token = { kind: 'identifier', value };
+    const newLexer = advanceToIdx(lexer, idx);
+    const loc = makeLoc(startLoc.line, startLoc.column, startLoc.offset, newLexer.line, newLexer.column, idx);
+    const token: Token = { kind: 'identifier', value, loc };
 
-    return [addToken({ ...lexer, idx }, token), token];
+    return [addToken(newLexer, token), token];
   }
 
   throw new Error('Could not peek');
