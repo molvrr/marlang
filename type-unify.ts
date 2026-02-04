@@ -1,11 +1,11 @@
 // Unification algorithm for type checking
 
-import type { Type, Constraint } from './type-ast';
+import type { Type } from './type-ast';
 import { freeTypeVars, formatType, typeRec } from './type-ast';
 import type { Substitution } from './type-env';
 import { applySubst, composeSubst, emptySubst } from './type-env';
 import type { TypeResult } from './type-errors';
-import { ok, err, flatMap, sequence } from './type-errors';
+import { ok, err, flatMap } from './type-errors';
 
 // Occurs check: does variable v occur in type t?
 const occurs = (v: string, t: Type): boolean => {
@@ -230,27 +230,3 @@ export const match = (pattern: Type, target: Type): TypeResult<Substitution> => 
   return err({ kind: 'unification-error', t1: pattern, t2: target });
 };
 
-// Check if constraints are satisfiable (basic check)
-export const constraintsSatisfiable = (
-  constraints: Constraint[],
-  subst: Substitution
-): Constraint[] => {
-  // Apply substitution to constraints and remove duplicates
-  const applied = constraints.map((c) => ({
-    class: c.class,
-    typeArg: applySubst(subst, c.typeArg),
-  }));
-
-  // Deduplicate
-  const seen = new Set<string>();
-  const result: Constraint[] = [];
-  for (const c of applied) {
-    const key = `${c.class}:${formatType(c.typeArg)}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      result.push(c);
-    }
-  }
-
-  return result;
-};

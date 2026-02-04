@@ -298,10 +298,11 @@ export const generalize = (env: TypeEnv, constraints: Constraint[], t: Type): Ty
   }
 
   // Filter constraints to only those mentioning quantified variables
+  const quantifiedSet = new Set(quantified);
   const relevantConstraints = constraints.filter((c) => {
     const cFree = freeTypeVars(c.typeArg);
     for (const v of cFree) {
-      if (quantified.includes(v)) return true;
+      if (quantifiedSet.has(v)) return true;
     }
     return false;
   });

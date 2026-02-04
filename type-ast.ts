@@ -118,12 +118,6 @@ export const tUnit: Type = typeConst('Unit');
 // Helper to create List type
 export const tList = (elem: Type): Type => typeApp(typeConst('List'), [elem]);
 
-// Helper to create Option type
-export const tOption = (elem: Type): Type => typeApp(typeConst('Option'), [elem]);
-
-// Helper to create Pair type
-export const tPair = (a: Type, b: Type): Type => typeApp(typeConst('Pair'), [a, b]);
-
 // FFI Types
 export const tFFILibrary: Type = typeConst('FFILibrary');
 export const tFFIStructDef: Type = typeConst('FFIStructDef');

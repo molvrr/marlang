@@ -1,1 +1,4 @@
-(define id (match (Some 20) ((Some x) x)))
+(define foo
+  (match (Some 20)
+    ((Some x) x)
+    (None "a")))

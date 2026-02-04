@@ -131,6 +131,218 @@ describe('Strings', () => {
   });
 });
 
+describe('Begin', () => {
+  test('begin with single expression', () => {
+    expect(eval_('(begin 42)')).toBe('42');
+  });
+
+  test('begin with multiple expressions', () => {
+    expect(eval_('(begin 1 2 3)')).toBe('3');
+  });
+
+  test('begin with side effects', () => {
+    const result = eval_(`
+      (begin
+        (define x 10)
+        (define y 20)
+        (+ x y))
+    `);
+    expect(result).toBe('30');
+  });
+
+  test('begin returns last expression value', () => {
+    expect(eval_('(begin "first" "second" "third")')).toBe('"third"');
+  });
+
+  test('begin in function body', () => {
+    const result = eval_(`
+      (define test (lambda ()
+        (begin
+          (define a 1)
+          (define b 2)
+          (+ a b))))
+      (test)
+    `);
+    expect(result).toBe('3');
+  });
+
+  test('nested begin', () => {
+    const result = eval_(`
+      (begin
+        (begin 1 2)
+        (begin 3 4))
+    `);
+    expect(result).toBe('4');
+  });
+
+  test('empty begin returns nil', () => {
+    expect(eval_('(begin)')).toBe('nil');
+  });
+});
+
+describe('Boolean Literals', () => {
+  test('true comparison result', () => {
+    expect(eval_('(< 1 2)')).toBe('#t');
+  });
+
+  test('false comparison result', () => {
+    expect(eval_('(> 1 2)')).toBe('#f');
+  });
+
+  test('equality returns boolean', () => {
+    expect(eval_('(= 5 5)')).toBe('#t');
+    expect(eval_('(= 5 6)')).toBe('#f');
+  });
+});
+
+describe('Negative Numbers', () => {
+  test('unary minus', () => {
+    expect(eval_('(- 5)')).toBe('-5');
+  });
+
+  test('negative result from subtraction', () => {
+    expect(eval_('(- 3 10)')).toBe('-7');
+  });
+
+  test('negative in arithmetic', () => {
+    expect(eval_('(+ (- 5) 10)')).toBe('5');
+  });
+
+  test('multiply negative', () => {
+    expect(eval_('(* (- 3) 4)')).toBe('-12');
+  });
+});
+
+describe('Let Bindings - Extended', () => {
+  test('nested let bindings', () => {
+    const result = eval_(`
+      (let ((x 1))
+        (let ((y 2))
+          (+ x y)))
+    `);
+    expect(result).toBe('3');
+  });
+
+  test('let shadowing', () => {
+    const result = eval_(`
+      (let ((x 1))
+        (let ((x 2))
+          x))
+    `);
+    expect(result).toBe('2');
+  });
+
+  test('let sequential bindings', () => {
+    const result = eval_(`
+      (let ((x 1) (y (+ 1 1)))
+        (+ x y))
+    `);
+    expect(result).toBe('3');
+  });
+
+  test('let with function', () => {
+    const result = eval_(`
+      (let ((f (lambda (x) (* x 2))))
+        (f 5))
+    `);
+    expect(result).toBe('10');
+  });
+});
+
+describe('Cond - Extended', () => {
+  test('cond first branch matches', () => {
+    expect(eval_('(cond ((< 1 2) 10) (else 20))')).toBe('10');
+  });
+
+  test('cond falls through to else', () => {
+    expect(eval_('(cond ((> 1 2) 10) (else 20))')).toBe('20');
+  });
+
+  test('cond without else returns nil', () => {
+    expect(eval_('(cond ((> 1 2) 10))')).toBe('nil');
+  });
+
+  test('cond with multiple false branches', () => {
+    const result = eval_(`
+      (cond
+        ((> 1 2) "first")
+        ((> 2 3) "second")
+        ((< 1 2) "third")
+        (else "fourth"))
+    `);
+    expect(result).toBe('"third"');
+  });
+});
+
+describe('Error Handling', () => {
+  test('undefined variable throws error', () => {
+    expect(() => eval_('undefined_var')).toThrow('Undefined variable: undefined_var');
+  });
+
+  test('wrong number of arguments to builtin', () => {
+    expect(() => eval_('(< 1)')).toThrow('< expects two arguments');
+    expect(() => eval_('(< 1 2 3)')).toThrow('< expects two arguments');
+  });
+
+  test('wrong type for arithmetic', () => {
+    expect(() => eval_('(+ 1 "two")')).toThrow('+ expects numbers');
+  });
+
+  test('wrong type for comparison', () => {
+    expect(() => eval_('(< "a" "b")')).toThrow('< expects numbers');
+  });
+
+  test('apply non-function', () => {
+    expect(() => eval_('(42 1 2)')).toThrow('Cannot apply non-function');
+  });
+
+  test('wrong arity for user function', () => {
+    expect(() => eval_(`
+      (define f (lambda (x y) (+ x y)))
+      (f 1)
+    `)).toThrow('Expected 2 arguments, got 1');
+  });
+
+  test('division - no division by zero check (returns Infinity)', () => {
+    // Note: JS semantics - division by zero returns Infinity, not error
+    expect(eval_('(/ 1 0)')).toBe('Infinity');
+  });
+
+  test('minus with no arguments throws', () => {
+    expect(() => eval_('(-)')).toThrow('- expects at least one argument');
+  });
+
+  test('division with less than 2 arguments throws', () => {
+    expect(() => eval_('(/ 5)')).toThrow('/ expects at least two arguments');
+  });
+
+  test('if with wrong number of arguments', () => {
+    expect(() => eval_('(if)')).toThrow();
+    expect(() => eval_('(if true)')).toThrow();
+  });
+
+  test('let with malformed bindings', () => {
+    expect(() => eval_('(let (x) x)')).toThrow();
+  });
+
+  test('define with wrong arguments', () => {
+    expect(() => eval_('(define)')).toThrow();
+    expect(() => eval_('(define x)')).toThrow();
+  });
+
+  test('lambda with wrong arguments', () => {
+    expect(() => eval_('(lambda)')).toThrow();
+    expect(() => eval_('(lambda ())')).toThrow();
+  });
+
+  test('match with no matching pattern throws', () => {
+    expect(() => eval_(`
+      (data Color Red Green Blue)
+      (match Red (Green 1))
+    `)).toThrow('No pattern matched');
+  });
+});
+
 describe('FFI', () => {
   test('libm math functions', () => {
     let interp = Interpreter.empty();

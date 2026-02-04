@@ -105,14 +105,6 @@ export const flatMap = <A, B>(
   return f(result.value);
 };
 
-export const mapError = <T>(
-  result: TypeResult<T>,
-  f: (e: TypeError) => TypeError
-): TypeResult<T> => {
-  if (result.ok) return result;
-  return err(f(result.error));
-};
-
 // Combine multiple results
 export const sequence = <T>(results: TypeResult<T>[]): TypeResult<T[]> => {
   const values: T[] = [];
@@ -121,16 +113,4 @@ export const sequence = <T>(results: TypeResult<T>[]): TypeResult<T[]> => {
     values.push(r.value);
   }
   return ok(values);
-};
-
-// Try multiple alternatives, return first success
-export const tryAll = <T>(
-  alternatives: (() => TypeResult<T>)[],
-  errorIfAllFail: TypeError
-): TypeResult<T> => {
-  for (const alt of alternatives) {
-    const result = alt();
-    if (result.ok) return result;
-  }
-  return err(errorIfAllFail);
 };

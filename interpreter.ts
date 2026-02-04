@@ -608,7 +608,11 @@ const matchPattern = (pattern: Expr, value: RuntimeValue, env: Env): Map<string,
         }
         return null;
       }
-    } catch {
+    } catch (e) {
+      // Only treat "Undefined variable" errors as "not found" - rethrow others
+      if (!(e instanceof Error && e.message.startsWith('Undefined variable:'))) {
+        throw e;
+      }
       // Variable not found in environment - treat as binding variable
     }
 
