@@ -1483,32 +1483,9 @@ const inferPerform = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> =
   });
 };
 
-// Parse handler clauses from handle expression
-// Format: (pattern args k) -> body
-const parseHandlerClause = (
-  elements: Expr[],
-  startIndex: number
-): { pattern: Expr; body: Expr; nextIndex: number } | null => {
-  if (startIndex >= elements.length) return null;
-
-  const pattern = elements[startIndex];
-  if (!pattern) return null;
-
-  // Look for -> after pattern
-  if (startIndex + 1 >= elements.length) return null;
-  const arrow = elements[startIndex + 1];
-  if (!arrow || !isSymbol(arrow, '->')) return null;
-
-  // Get body
-  if (startIndex + 2 >= elements.length) return null;
-  const body = elements[startIndex + 2];
-  if (!body) return null;
-
-  return { pattern, body, nextIndex: startIndex + 3 };
-};
-
 // Infer handle expression
-// Syntax: (handle expr (pattern args k) -> handler ...)
+// Syntax: (handle expr ((op arg k) -> body) ((op2 arg k) -> body2) ...)
+// Each handler clause is wrapped: ((pattern) -> body)
 const inferHandle = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
   if (elements.length < 2) {
     return err({ kind: 'arity-mismatch', expected: 1, got: elements.length - 1, context: 'handle' });
@@ -1524,14 +1501,20 @@ const inferHandle = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> =>
   let resultType: Type | undefined;
   const handledEffects: string[] = [];
 
-  // Parse handler clauses
-  let index = 2;
-  while (index < elements.length) {
-    const clause = parseHandlerClause(elements, index);
-    if (!clause) break;
+  // Parse handler clauses - each is ((pattern) -> body)
+  const handlerClauses = elements.slice(2);
+  for (const clause of handlerClauses) {
+    const clauseElements = listToArray(clause);
+    if (clauseElements.length !== 3) {
+      return err({ kind: 'invalid-type-annotation', message: 'handle clause must be ((pattern) -> body)' });
+    }
+    const arrow = clauseElements[1];
+    if (!arrow || !isSymbol(arrow, '->')) {
+      return err({ kind: 'invalid-type-annotation', message: 'handle clause must be ((pattern) -> body)' });
+    }
 
-    const { pattern, body, nextIndex } = clause;
-    index = nextIndex;
+    const pattern = clauseElements[0]!;
+    const body = clauseElements[2]!;
 
     // Parse handler pattern: (op-name args... k)
     if (pattern.kind === 'list') {

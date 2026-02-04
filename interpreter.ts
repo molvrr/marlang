@@ -1008,10 +1008,11 @@ function* evalExprGen(interp: T, expr: Expr): EvalGen {
     }
 
     // handle - nested handle within effectful computation
+    // Syntax: (handle expr ((op arg k) -> body) ((op2 arg k) -> body2) ...)
     if (sym === 'handle') {
       if (elements.length < 3) throw new Error('handle expects an expression and handler clauses');
       const bodyExpr = elements[1]!;
-      const handlerElements = elements.slice(2);
+      const handlerClauses = elements.slice(2);
 
       // Parse handler clauses (same logic as in evalExprTail)
       const handlers = new Map<string, { params: string[]; continuationParam: string; body: Expr }>();
@@ -1054,32 +1055,17 @@ function* evalExprGen(interp: T, expr: Expr): EvalGen {
         }
       };
 
-      let i = 0;
-      while (i < handlerElements.length) {
-        const current = handlerElements[i]!;
-        if (i + 2 < handlerElements.length) {
-          const maybeArrow = handlerElements[i + 1];
-          if (maybeArrow?.kind === 'atom' && maybeArrow.value.kind === 'symbol' && maybeArrow.value.value === '->') {
-            processHandler(current, handlerElements[i + 2]!);
-            i += 3;
-            continue;
-          }
+      // Parse each handler clause: ((pattern) -> body)
+      for (const clause of handlerClauses) {
+        const clauseElements = listToArray(clause);
+        if (clauseElements.length !== 3) {
+          throw new Error('handle clause must be ((pattern) -> body)');
         }
-        const clauseElements = listToArray(current);
-        if (clauseElements.length === 2) {
-          processHandler(clauseElements[0]!, clauseElements[1]!);
-          i += 1;
-        } else if (clauseElements.length === 3) {
-          const arrow = clauseElements[1];
-          if (arrow?.kind === 'atom' && arrow.value.kind === 'symbol' && arrow.value.value === '->') {
-            processHandler(clauseElements[0]!, clauseElements[2]!);
-            i += 1;
-          } else {
-            throw new Error('handle clause must be (pattern body) or pattern -> body');
-          }
-        } else {
-          throw new Error('handle clause must be (pattern body) or pattern -> body');
+        const arrow = clauseElements[1];
+        if (!arrow || arrow.kind !== 'atom' || arrow.value.kind !== 'symbol' || arrow.value.value !== '->') {
+          throw new Error('handle clause must be ((pattern) -> body)');
         }
+        processHandler(clauseElements[0]!, clauseElements[2]!);
       }
 
       // Run the body with local effect handling
@@ -1653,17 +1639,13 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
     }
 
     // handle - install effect handlers using generator-based evaluation
-    // Syntax: (handle expr handler-clauses...)
-    // Handler clause: ((op-name params... k) body) or (return (x) body)
+    // Syntax: (handle expr ((op arg k) -> body) ((op2 arg k) -> body2) ...)
+    // Each handler clause is wrapped: ((pattern) -> body)
     if (sym === 'handle') {
       if (elements.length < 3) throw new Error('handle expects an expression and handler clauses');
       const bodyExpr = elements[1]!;
-      const handlerElements = elements.slice(2);
+      const handlerClauses = elements.slice(2);
 
-      // Parse handler clauses
-      // Syntax can be:
-      //   (handle expr (pattern) -> body (pattern2) -> body2 ...)  -- flat arrow syntax
-      //   (handle expr ((pattern) body) ((pattern2) body2) ...)   -- nested tuple syntax
       const handlers = new Map<string, { params: string[]; continuationParam: string; body: Expr }>();
       let returnHandler: { param: string; body: Expr; env: Env } | undefined;
 
@@ -1712,41 +1694,17 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
         }
       };
 
-      // Parse handler elements - can be flat (pattern -> body) or nested ((pattern body))
-      let i = 0;
-      while (i < handlerElements.length) {
-        const current = handlerElements[i]!;
-
-        // Check if next element is an arrow (flat syntax: pattern -> body)
-        if (i + 2 < handlerElements.length) {
-          const maybeArrow = handlerElements[i + 1];
-          if (maybeArrow?.kind === 'atom' && maybeArrow.value.kind === 'symbol' && maybeArrow.value.value === '->') {
-            // Flat arrow syntax: (pattern) -> body
-            const patternExpr = current;
-            const handlerBody = handlerElements[i + 2]!;
-            processHandler(patternExpr, handlerBody);
-            i += 3;
-            continue;
-          }
+      // Parse each handler clause: ((pattern) -> body)
+      for (const clause of handlerClauses) {
+        const clauseElements = listToArray(clause);
+        if (clauseElements.length !== 3) {
+          throw new Error('handle clause must be ((pattern) -> body)');
         }
-
-        // Otherwise it should be a nested clause: ((pattern) body)
-        const clauseElements = listToArray(current);
-        if (clauseElements.length === 2) {
-          processHandler(clauseElements[0]!, clauseElements[1]!);
-          i += 1;
-        } else if (clauseElements.length === 3) {
-          // Nested with arrow: ((pattern) -> body)
-          const arrow = clauseElements[1];
-          if (arrow?.kind === 'atom' && arrow.value.kind === 'symbol' && arrow.value.value === '->') {
-            processHandler(clauseElements[0]!, clauseElements[2]!);
-            i += 1;
-          } else {
-            throw new Error('handle clause must be (pattern body) or pattern -> body');
-          }
-        } else {
-          throw new Error('handle clause must be (pattern body) or pattern -> body');
+        const arrow = clauseElements[1];
+        if (!arrow || arrow.kind !== 'atom' || arrow.value.kind !== 'symbol' || arrow.value.value !== '->') {
+          throw new Error('handle clause must be ((pattern) -> body)');
         }
+        processHandler(clauseElements[0]!, clauseElements[2]!);
       }
 
       // Create handler frame for the generator-based evaluation

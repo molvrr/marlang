@@ -14,7 +14,7 @@
 ; Use the effect in a computation
 (handle
   (+ 1 (perform ask ()))
-  (ask k) -> (resume k 10))
+  ((ask k) -> (resume k 10)))
 ; => 11 (the handler provides 10, computation adds 1)
 
 
@@ -34,8 +34,8 @@
 ; This handler always returns 0 for get (no real state)
 (handle
   (+ (counter) (counter))
-  (get k) -> (resume k 0)
-  (put v k) -> (resume k nil))
+  ((get k) -> (resume k 0))
+  ((put v k) -> (resume k nil)))
 ; => 0 (0 + 0, since get always returns 0)
 
 
@@ -54,13 +54,13 @@
 ; Normal case - no abort
 (handle
   (maybe-double 5)
-  (abort code k) -> (- 0 1))
+  ((abort code k) -> (- 0 1)))
 ; => 10
 
 ; Abort case - handler returns -1, continuation discarded
 (handle
   (maybe-double (- 0 5))
-  (abort code k) -> (- 0 1))
+  ((abort code k) -> (- 0 1)))
 ; => -1
 
 
@@ -76,8 +76,8 @@
     (begin
       (perform log "hello")
       (+ 100 (perform get ())))
-    (get k) -> (resume k 42))
-  (log msg k) -> (resume k nil))
+    ((get k) -> (resume k 42)))
+  ((log msg k) -> (resume k nil)))
 ; => 142 (inner handles get, outer handles log)
 
 
@@ -94,6 +94,6 @@
     (perform emit 2)
     (perform emit 3)
     0)
-  (emit n k) -> (+ n (resume k nil))
-  (return x) -> x)
+  ((emit n k) -> (+ n (resume k nil)))
+  ((return x) -> x))
 ; => 6 (accumulates: 1 + (2 + (3 + 0)))

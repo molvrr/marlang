@@ -104,7 +104,7 @@ describe('Effect System - Parsing', () => {
     test('simple handle with one clause', () => {
       const exprs = parse(`
         (handle expr
-          (print msg k) -> body)
+          ((print msg k) -> body))
       `);
       expect(exprs.length).toBe(1);
       const elements = listToArray(exprs[0]!);
@@ -114,24 +114,22 @@ describe('Effect System - Parsing', () => {
     test('handle with multiple clauses', () => {
       const exprs = parse(`
         (handle (greet)
-          (print msg k) -> (begin (display msg) (resume k unit))
-          (read k) -> (resume k "world"))
+          ((print msg k) -> (begin (display msg) (resume k unit)))
+          ((read k) -> (resume k "world")))
       `);
       expect(exprs.length).toBe(1);
       const elements = listToArray(exprs[0]!);
       expect(atomValue(elements[0]!)).toBe('handle');
-      // handle, expr, then each clause is 3 elements: (pattern) -> body
-      // So: handle, expr, (print msg k), ->, body, (read k), ->, body = 8
-      expect(elements.length).toBe(8);
-      expect(atomValue(elements[2]!)).not.toBe('->'); // pattern first
-      expect(atomValue(elements[3]!)).toBe('->');     // then arrow
+      // handle, expr, then each wrapped clause: ((pattern) -> body)
+      // So: handle, expr, clause1, clause2 = 4
+      expect(elements.length).toBe(4);
     });
 
     test('handle with return clause', () => {
       const exprs = parse(`
         (handle expr
-          (op1 arg k) -> handler1
-          (return x) -> x)
+          ((op1 arg k) -> handler1)
+          ((return x) -> x))
       `);
       expect(exprs.length).toBe(1);
       const elements = listToArray(exprs[0]!);
@@ -149,8 +147,8 @@ describe('Effect System - Parsing', () => {
           (perform print (perform read)))
 
         (handle (greet)
-          (print msg k) -> (begin (display msg) (resume k unit))
-          (read k) -> (resume k "world"))
+          ((print msg k) -> (begin (display msg) (resume k unit)))
+          ((read k) -> (resume k "world")))
       `);
       expect(exprs.length).toBe(3);
       expect(atomValue(listToArray(exprs[0]!)[0]!)).toBe('effect');
@@ -208,14 +206,14 @@ describe('Effect System - Type Checking', () => {
   });
 
   test('handle with undeclared effect fails', () => {
-    const result = check('(handle 42 (op k) -> 0)');
+    const result = check('(handle 42 ((op k) -> 0))');
     expect(result.ok).toBe(false);
   });
 
   test('handle type checks to its body type with declared effect', () => {
     const result = check(`
       (effect Test (op : Unit -> Int))
-      (handle 42 (op k) -> 0)
+      (handle 42 ((op k) -> 0))
     `);
     expect(result.ok).toBe(true);
     expect(formatType(result.types![1]!)).toBe('Int');
@@ -267,7 +265,7 @@ describe('Effect System - Effect Inference', () => {
       (effect Console
         (print : String -> Unit))
       (handle 42
-        (print msg k) -> 0)
+        ((print msg k) -> 0))
     `);
     expect(result.ok).toBe(true);
     // Handle should return Int (from both 42 and handler 0)
@@ -277,7 +275,7 @@ describe('Effect System - Effect Inference', () => {
   test('handle with return handler', () => {
     const result = check(`
       (handle 42
-        (return x) -> x)
+        ((return x) -> x))
     `);
     expect(result.ok).toBe(true);
     expect(formatType(result.types![0]!)).toBe('Int');
@@ -312,14 +310,14 @@ describe('Effect System - Effect Inference', () => {
         (get : Unit -> Int))
       (handle
         (+ 1 (perform get ()))
-        (get k) -> (resume k 10))
+        ((get k) -> (resume k 10)))
     `);
     expect(result.ok).toBe(true);
     expect(formatType(result.types![1]!)).toBe('Int');
   });
 
   test('resume with wrong arity fails', () => {
-    const result = check('(handle 1 (op k) -> (resume k))');
+    const result = check('(handle 1 ((op k) -> (resume k)))');
     expect(result.ok).toBe(false);
   });
 
@@ -329,7 +327,7 @@ describe('Effect System - Effect Inference', () => {
         (get : Unit -> Int))
       (handle
         (perform get ())
-        (get k) -> (+ (resume k 5) 1))
+        ((get k) -> (+ (resume k 5) 1)))
     `);
     expect(result.ok).toBe(true);
     // Handler body returns Int (from adding 1 to resume result)
@@ -342,7 +340,7 @@ describe('Effect System - Effect Inference', () => {
         (get : Unit -> String))
       (handle
         (perform get ())
-        (get k) -> (resume k 42))
+        ((get k) -> (resume k 42)))
     `);
     // Should fail because resume is called with Int but k expects String
     expect(result.ok).toBe(false);
@@ -368,7 +366,7 @@ describe('Effect System - Interpreter Recognition', () => {
 
   test('perform without operation throws error', () => {
     // The handler body with (perform) is only executed if the effect is triggered
-    expect(() => run('(handle (perform op) (op k) -> (perform))')).toThrow('expects an operation');
+    expect(() => run('(handle (perform op) ((op k) -> (perform)))')).toThrow('expects an operation');
   });
 
   test('handle without expression throws error', () => {
@@ -380,7 +378,7 @@ describe('Effect System - Runtime Behavior', () => {
   test('handle returns body value when no effects performed', () => {
     const result = run(`
       (handle 42
-        (op k) -> 0)
+        ((op k) -> 0))
     `);
     expect(result.value.kind).toBe('number');
     expect(result.value.value).toBe(42);
@@ -389,7 +387,7 @@ describe('Effect System - Runtime Behavior', () => {
   test('handle with return handler transforms result', () => {
     const result = run(`
       (handle 42
-        (return x) -> (+ x 1))
+        ((return x) -> (+ x 1)))
     `);
     expect(result.value.kind).toBe('number');
     expect(result.value.value).toBe(43);
@@ -399,7 +397,7 @@ describe('Effect System - Runtime Behavior', () => {
     const result = run(`
       (handle
         (+ 1 (perform get))
-        (get k) -> (resume k 10))
+        ((get k) -> (resume k 10)))
     `);
     expect(result.value.kind).toBe('number');
     expect(result.value.value).toBe(11);
@@ -409,7 +407,7 @@ describe('Effect System - Runtime Behavior', () => {
     const result = run(`
       (handle
         (perform put 42)
-        (put x k) -> x)
+        ((put x k) -> x))
     `);
     expect(result.value.kind).toBe('number');
     expect(result.value.value).toBe(42);
@@ -421,7 +419,7 @@ describe('Effect System - Runtime Behavior', () => {
         (begin
           (perform abort)
           100)
-        (abort k) -> 0)
+        ((abort k) -> 0))
     `);
     expect(result.value.kind).toBe('number');
     expect(result.value.value).toBe(0);
@@ -431,7 +429,7 @@ describe('Effect System - Runtime Behavior', () => {
     const result = run(`
       (handle
         (+ (perform get) (perform get))
-        (get k) -> (resume k 5))
+        ((get k) -> (resume k 5)))
     `);
     expect(result.value.kind).toBe('number');
     expect(result.value.value).toBe(10);
@@ -442,7 +440,7 @@ describe('Effect System - Runtime Behavior', () => {
       (define double (lambda (x) (* x 2)))
       (handle
         (double (perform get))
-        (get k) -> (resume k 7))
+        ((get k) -> (resume k 7)))
     `);
     expect(result.value.kind).toBe('number');
     expect(result.value.value).toBe(14);
@@ -454,7 +452,7 @@ describe('Effect System - Runtime Behavior', () => {
         (if (perform ask)
           100
           0)
-        (ask k) -> (resume k #t))
+        ((ask k) -> (resume k #t)))
     `);
     expect(result.value.kind).toBe('number');
     expect(result.value.value).toBe(100);
@@ -465,7 +463,7 @@ describe('Effect System - Runtime Behavior', () => {
       (handle
         (let ((x (perform get)))
           (* x x))
-        (get k) -> (resume k 4))
+        ((get k) -> (resume k 4)))
     `);
     expect(result.value.kind).toBe('number');
     expect(result.value.value).toBe(16);
@@ -478,7 +476,7 @@ describe('Effect System - Runtime Behavior', () => {
     const result = run(`
       (handle
         (+ 1 (perform get))
-        (get k) -> (resume k 10))
+        ((get k) -> (resume k 10)))
     `);
     expect(result.value.kind).toBe('number');
     expect(result.value.value).toBe(11);
@@ -488,8 +486,8 @@ describe('Effect System - Runtime Behavior', () => {
     const result = run(`
       (handle
         (perform get)
-        (get k) -> (resume k 10)
-        (return x) -> (* x 2))
+        ((get k) -> (resume k 10))
+        ((return x) -> (* x 2)))
     `);
     expect(result.value.kind).toBe('number');
     expect(result.value.value).toBe(20);
@@ -500,8 +498,8 @@ describe('Effect System - Runtime Behavior', () => {
       (handle
         (handle
           (+ (perform get) (perform inc))
-          (get k) -> (resume k 5))
-        (inc k) -> (resume k 1))
+          ((get k) -> (resume k 5)))
+        ((inc k) -> (resume k 1)))
     `);
     expect(result.value.kind).toBe('number');
     expect(result.value.value).toBe(6);
@@ -511,7 +509,7 @@ describe('Effect System - Runtime Behavior', () => {
     expect(() => run(`
       (handle
         (perform unhandled)
-        (other k) -> 0)
+        ((other k) -> 0))
     `)).toThrow('Unhandled effect: unhandled');
   });
 
@@ -519,7 +517,7 @@ describe('Effect System - Runtime Behavior', () => {
     const result = run(`
       (handle
         (begin (perform log) 42)
-        (log) -> 0)
+        ((log) -> 0))
     `);
     // Handler doesn't resume, so it returns 0
     expect(result.value.kind).toBe('number');
