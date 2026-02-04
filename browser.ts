@@ -63,3 +63,149 @@ export const run = (code: string, options: { typecheck?: boolean } = {}): {
 // Re-export types for TypeScript users
 export type { Type } from './type-ast';
 export { formatScheme } from './type-ast';
+
+// ===== Builtin Reference for UI =====
+
+export interface BuiltinCategory {
+  name: string;
+  items: BuiltinItem[];
+}
+
+export interface BuiltinItem {
+  name: string;
+  type: string;
+  description?: string;
+}
+
+export interface DataTypeInfo {
+  name: string;
+  typeParams: string[];
+  constructors: BuiltinItem[];
+}
+
+export interface TypeClassInfo {
+  name: string;
+  typeParam: string;
+  superclasses: string[];
+  methods: BuiltinItem[];
+}
+
+export interface BuiltinReference {
+  builtins: BuiltinCategory[];
+  dataTypes: DataTypeInfo[];
+  typeClasses: TypeClassInfo[];
+}
+
+export const getBuiltinReference = (): BuiltinReference => ({
+  builtins: [
+    {
+      name: 'Arithmetic',
+      items: [
+        { name: '+', type: 'Num a => a -> a -> a', description: 'Addition' },
+        { name: '-', type: 'Num a => a -> a -> a', description: 'Subtraction' },
+        { name: '*', type: 'Num a => a -> a -> a', description: 'Multiplication' },
+        { name: '/', type: 'Num a => a -> a -> a', description: 'Division' },
+      ],
+    },
+    {
+      name: 'Comparison',
+      items: [
+        { name: '=', type: 'Eq a => a -> a -> Bool', description: 'Equality' },
+        { name: '<', type: 'Ord a => a -> a -> Bool', description: 'Less than' },
+        { name: '>', type: 'Ord a => a -> a -> Bool', description: 'Greater than' },
+        { name: '<=', type: 'Ord a => a -> a -> Bool', description: 'Less than or equal' },
+        { name: '>=', type: 'Ord a => a -> a -> Bool', description: 'Greater than or equal' },
+      ],
+    },
+    {
+      name: 'Lists',
+      items: [
+        { name: 'list', type: 'a -> List a', description: 'Create a list' },
+        { name: 'nil', type: 'Unit', description: 'Unit/empty value' },
+      ],
+    },
+    {
+      name: 'Output',
+      items: [
+        { name: 'show', type: 'Show a => a -> String', description: 'Convert to string' },
+      ],
+    },
+    {
+      name: 'FFI',
+      items: [
+        { name: 'ffi-open', type: 'String -> List a -> FFILibrary', description: 'Open a shared library' },
+        { name: 'ffi-call', type: 'FFILibrary -> String -> a', description: 'Call a library function' },
+        { name: 'ffi-close', type: 'FFILibrary -> Unit', description: 'Close a library' },
+        { name: 'ffi-struct', type: 'String -> List a -> FFIStructDef', description: 'Define a struct type' },
+        { name: 'struct-new', type: 'FFIStructDef -> a -> FFIStruct', description: 'Create a struct instance' },
+        { name: 'struct-get', type: 'FFIStruct -> String -> a', description: 'Get a struct field' },
+        { name: 'struct-set', type: 'FFIStruct -> String -> a -> Unit', description: 'Set a struct field' },
+      ],
+    },
+  ],
+  dataTypes: [
+    {
+      name: 'Option',
+      typeParams: ['a'],
+      constructors: [
+        { name: 'None', type: 'Option a', description: 'No value' },
+        { name: 'Some', type: 'a -> Option a', description: 'Wrap a value' },
+      ],
+    },
+    {
+      name: 'List',
+      typeParams: ['a'],
+      constructors: [
+        { name: 'Nil', type: 'List a', description: 'Empty list' },
+        { name: 'Cons', type: 'a -> List a -> List a', description: 'Prepend element' },
+      ],
+    },
+    {
+      name: 'Pair',
+      typeParams: ['a', 'b'],
+      constructors: [
+        { name: 'MkPair', type: 'a -> b -> Pair a b', description: 'Create a pair' },
+      ],
+    },
+  ],
+  typeClasses: [
+    {
+      name: 'Num',
+      typeParam: 'a',
+      superclasses: [],
+      methods: [
+        { name: '+', type: 'a -> a -> a' },
+        { name: '-', type: 'a -> a -> a' },
+        { name: '*', type: 'a -> a -> a' },
+        { name: '/', type: 'a -> a -> a' },
+      ],
+    },
+    {
+      name: 'Eq',
+      typeParam: 'a',
+      superclasses: [],
+      methods: [
+        { name: '=', type: 'a -> a -> Bool' },
+      ],
+    },
+    {
+      name: 'Ord',
+      typeParam: 'a',
+      superclasses: ['Eq'],
+      methods: [
+        { name: '<', type: 'a -> a -> Bool' },
+        { name: '>', type: 'a -> a -> Bool' },
+        { name: '<=', type: 'a -> a -> Bool' },
+        { name: '>=', type: 'a -> a -> Bool' },
+      ],
+    },
+    {
+      name: 'Show',
+      typeParam: 'a',
+      superclasses: [],
+      methods: [
+        { name: 'show', type: 'a -> String' },
+      ],
+    },
+  ],
+});

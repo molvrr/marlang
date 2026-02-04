@@ -980,13 +980,82 @@ const inferPattern = (
 // Set of FFI functions that are variadic and bypass strict arity checking
 const FFI_VARIADIC_FUNCTIONS = new Set(['ffi-call', 'struct-new', 'struct-get', 'struct-set', 'list']);
 
+// Variadic arithmetic operators with their minimum argument requirements
+const VARIADIC_ARITH_OPS = new Map<string, { minArgs: number }>([
+  ['+', { minArgs: 0 }],  // (+) returns 0
+  ['*', { minArgs: 0 }],  // (*) returns 1
+  ['-', { minArgs: 1 }],  // (- x) = -x, requires at least 1 arg
+  ['/', { minArgs: 2 }],  // division requires at least 2 args
+]);
+
+// Infer type for variadic arithmetic operators (+, -, *, /)
+const inferVariadicArithApplication = (
+  env: TypeEnv,
+  opName: string,
+  argExprs: Expr[]
+): TypeResult<InferResult> => {
+  const opInfo = VARIADIC_ARITH_OPS.get(opName)!;
+
+  // Check minimum arity
+  if (argExprs.length < opInfo.minArgs) {
+    return err({
+      kind: 'arity-mismatch',
+      expected: opInfo.minArgs,
+      got: argExprs.length,
+      context: opName,
+    });
+  }
+
+  // Handle 0-arg case for + and *
+  if (argExprs.length === 0) {
+    return ok({ type: tInt, subst: emptySubst(), constraints: [] });
+  }
+
+  let subst = emptySubst();
+  let allConstraints: Constraint[] = [];
+  const argTypes: Type[] = [];
+
+  // Infer all argument types
+  for (const argExpr of argExprs) {
+    const argResult = inferExpr(applySubstEnv(subst, env), argExpr);
+    if (!argResult.ok) return argResult;
+    subst = composeSubst(argResult.value.subst, subst);
+    allConstraints = [...allConstraints, ...argResult.value.constraints];
+    argTypes.push(argResult.value.type);
+  }
+
+  // Unify all argument types together
+  let unifiedType = applySubst(subst, argTypes[0]!);
+  for (let i = 1; i < argTypes.length; i++) {
+    const argType = applySubst(subst, argTypes[i]!);
+    const unifyResult = unifyWithContext(unifiedType, argType, `${opName} argument ${i + 1}`);
+    if (!unifyResult.ok) return unifyResult;
+    subst = composeSubst(unifyResult.value, subst);
+    unifiedType = applySubst(subst, unifiedType);
+  }
+
+  // Add Num constraint
+  allConstraints.push({ class: 'Num', typeArg: unifiedType });
+
+  return ok({
+    type: unifiedType,
+    subst,
+    constraints: allConstraints,
+  });
+};
+
 // Infer type of function application
 const inferApplication = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
   const fnExpr = elements[0]!;
   const argExprs = elements.slice(1);
 
-  // Check for variadic FFI functions that bypass normal type checking
+  // Check for variadic arithmetic operators
   const fnName = getSymbol(fnExpr);
+  if (fnName && VARIADIC_ARITH_OPS.has(fnName)) {
+    return inferVariadicArithApplication(env, fnName, argExprs);
+  }
+
+  // Check for variadic FFI functions that bypass normal type checking
   if (fnName && FFI_VARIADIC_FUNCTIONS.has(fnName)) {
     return inferFFIApplication(env, fnName, argExprs);
   }

@@ -183,16 +183,6 @@ button:active {
   flex-direction: column;
 }
 
-.output-section h2 {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.65rem;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--text-muted);
-  margin-bottom: 1rem;
-}
-
 pre {
   flex: 1;
   background: var(--surface);
@@ -607,4 +597,135 @@ textarea::-webkit-scrollbar-thumb:hover {
 .insert-hint {
   color: var(--text-faint);
   font-size: 0.7rem;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Output Section Tabs
+   ═══════════════════════════════════════════════════════════════ */
+
+.output-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--bg-warm);
+  padding: 3px;
+  width: fit-content;
+  margin-bottom: 1rem;
+}
+
+.output-tabs button {
+  padding: 0.4rem 0.9rem;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.output-tabs button:hover:not(.active) {
+  color: var(--text);
+  background: var(--surface);
+  transform: none;
+  box-shadow: none;
+}
+
+.output-tabs button.active {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgba(61, 53, 41, 0.1);
+  transform: none;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Reference Panel
+   ═══════════════════════════════════════════════════════════════ */
+
+.reference-panel {
+  flex: 1;
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  padding: 1rem;
+}
+
+.reference-section {
+  margin-bottom: 1.5rem;
+}
+
+.reference-section:last-child {
+  margin-bottom: 0;
+}
+
+.reference-section h3 {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.reference-category {
+  margin-bottom: 1rem;
+}
+
+.reference-category h4 {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text);
+  margin-bottom: 0.5rem;
+}
+
+.reference-category h4 .type-params {
+  color: var(--syn-symbol);
+  font-weight: 400;
+}
+
+.reference-category h4 .superclasses {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: 0.75rem;
+}
+
+.reference-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.reference-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.75rem;
+  align-items: baseline;
+  padding: 0.3rem 0.5rem;
+  background: var(--bg);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.8rem;
+}
+
+.reference-item .ref-name {
+  color: var(--syn-special);
+  font-weight: 500;
+  min-width: 80px;
+}
+
+.reference-item .ref-type {
+  color: var(--syn-symbol);
+  font-size: 0.75rem;
+}
+
+.reference-item .ref-desc {
+  color: var(--text-muted);
+  font-family: 'Crimson Pro', Georgia, serif;
+  font-size: 0.8rem;
+  font-style: italic;
 }

@@ -1,6 +1,7 @@
 import { createSignal, createMemo, createEffect, onMount, onCleanup, Show, batch } from 'solid-js';
 import * as Marlang from '@marlang/browser';
 import ASTRenderer, { createASTState, navigate, scrollToPath, type NodePath, type NavigationDirection } from './ASTRenderer';
+import ReferencePanel from './ReferencePanel';
 import type { Expr } from '@marlang/types';
 import type { TypeMapResult } from '@marlang/browser';
 import { createEditorState, type EditorMode } from './editor-state';
@@ -14,12 +15,17 @@ const INITIAL_CODE = `(define factorial
 (factorial 5)`;
 
 type ViewMode = 'text' | 'ast';
+type OutputTab = 'output' | 'reference';
 
 export default function App() {
   const [code, setCode] = createSignal(INITIAL_CODE);
   const [output, setOutput] = createSignal<{ type: 'success' | 'error'; text: string } | null>(null);
   const [viewMode, setViewMode] = createSignal<ViewMode>('ast');
   const [showTypes, setShowTypes] = createSignal(true);
+  const [outputTab, setOutputTab] = createSignal<OutputTab>('output');
+
+  // Get builtin reference for Reference tab
+  const builtinReference = Marlang.getBuiltinReference();
 
   // Editor state (for structural editing)
   const editor = createEditorState();
@@ -539,10 +545,28 @@ export default function App() {
         </section>
 
         <section class="output-section">
-          <h2>Output</h2>
-          <pre class={output()?.type ?? ''}>
-            {output()?.text ?? 'Click "Run" or "Type Check" to see output'}
-          </pre>
+          <div class="output-tabs">
+            <button
+              class={outputTab() === 'output' ? 'active' : ''}
+              onClick={() => setOutputTab('output')}
+            >
+              Output
+            </button>
+            <button
+              class={outputTab() === 'reference' ? 'active' : ''}
+              onClick={() => setOutputTab('reference')}
+            >
+              Reference
+            </button>
+          </div>
+          <Show
+            when={outputTab() === 'output'}
+            fallback={<ReferencePanel reference={builtinReference} />}
+          >
+            <pre class={output()?.type ?? ''}>
+              {output()?.text ?? 'Click "Run" or "Type Check" to see output'}
+            </pre>
+          </Show>
         </section>
       </main>
     </div>

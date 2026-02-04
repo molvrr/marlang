@@ -473,6 +473,44 @@ describe('Show Typeclass', () => {
   });
 });
 
+describe('Variadic Arithmetic Operators', () => {
+  test('+ with zero args', () => {
+    expect(check('(+)')).toMatchObject({ ok: true });
+  });
+
+  test('+ with multiple args', () => {
+    expect(check('(+ 1 2 3 4)')).toMatchObject({ ok: true });
+  });
+
+  test('* with zero args', () => {
+    expect(check('(*)')).toMatchObject({ ok: true });
+  });
+
+  test('* with multiple args', () => {
+    expect(check('(* 2 3 4)')).toMatchObject({ ok: true });
+  });
+
+  test('- with one arg (negation)', () => {
+    expect(check('(- 5)')).toMatchObject({ ok: true });
+  });
+
+  test('- with multiple args', () => {
+    expect(check('(- 10 3 2)')).toMatchObject({ ok: true });
+  });
+
+  test('- with zero args fails', () => {
+    expect(check('(-)')).toMatchObject({ ok: false });
+  });
+
+  test('/ with two args', () => {
+    expect(check('(/ 10 2)')).toMatchObject({ ok: true });
+  });
+
+  test('/ with one arg fails', () => {
+    expect(check('(/ 10)')).toMatchObject({ ok: false });
+  });
+});
+
 describe('Integration Tests', () => {
   test('factorial with type annotation', () => {
     const code = `
