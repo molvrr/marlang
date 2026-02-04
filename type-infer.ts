@@ -731,6 +731,75 @@ const inferCond = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
   });
 };
 
+// Get the DataType from a Type (handles type-const and type-app)
+const getDataTypeFromType = (env: TypeEnv, t: Type): DataType | undefined => {
+  if (t.kind === 'type-const') {
+    return lookupDataType(env, t.name);
+  }
+  if (t.kind === 'type-app' && t.constructor.kind === 'type-const') {
+    return lookupDataType(env, t.constructor.name);
+  }
+  return undefined;
+};
+
+// Check if a pattern covers all constructors (wildcard or variable)
+const patternCoversAll = (pattern: Pattern): boolean => {
+  return pattern.kind === 'pattern-wildcard' || pattern.kind === 'pattern-var';
+};
+
+// Get the constructor name from a pattern (if it's a constructor pattern)
+const getPatternConstructor = (pattern: Pattern): string | undefined => {
+  if (pattern.kind === 'pattern-constructor') {
+    return pattern.name;
+  }
+  return undefined;
+};
+
+// Check exhaustiveness of match patterns
+const checkExhaustiveness = (
+  env: TypeEnv,
+  scrutineeType: Type,
+  patterns: Pattern[]
+): TypeResult<void> => {
+  // Get the DataType for the scrutinee
+  const dataType = getDataTypeFromType(env, scrutineeType);
+
+  // If not an ADT (e.g., Int, String, type variable), skip exhaustiveness check
+  if (!dataType) {
+    return ok(undefined);
+  }
+
+  // Check if any pattern covers all cases (wildcard or variable)
+  for (const pattern of patterns) {
+    if (patternCoversAll(pattern)) {
+      return ok(undefined);
+    }
+  }
+
+  // Collect all covered constructor names
+  const coveredConstructors = new Set<string>();
+  for (const pattern of patterns) {
+    const ctorName = getPatternConstructor(pattern);
+    if (ctorName) {
+      coveredConstructors.add(ctorName);
+    }
+  }
+
+  // Find missing constructors
+  const missingConstructors: string[] = [];
+  for (const ctor of dataType.constructors) {
+    if (!coveredConstructors.has(ctor.name)) {
+      missingConstructors.push(ctor.name);
+    }
+  }
+
+  if (missingConstructors.length > 0) {
+    return err({ kind: 'non-exhaustive-patterns', missing: missingConstructors });
+  }
+
+  return ok(undefined);
+};
+
 // Infer type of match expression
 const inferMatch = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
   if (elements.length < 3) {
@@ -746,6 +815,7 @@ const inferMatch = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => 
     let scrutineeType = scrutineeResult.type;
     let resultType: Type | undefined;
     let allConstraints = [...scrutineeResult.constraints];
+    const parsedPatterns: Pattern[] = [];
 
     for (const branchExpr of branches) {
       const branchElements = listToArray(branchExpr);
@@ -759,6 +829,9 @@ const inferMatch = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => 
       // Parse pattern
       const patternResult = parsePattern(patternExpr, env);
       if (!patternResult.ok) return patternResult;
+
+      // Collect parsed patterns for exhaustiveness check
+      parsedPatterns.push(patternResult.value);
 
       // Type check pattern and get bindings
       const patternCheck = inferPattern(env, patternResult.value, applySubst(subst, scrutineeType));
@@ -800,6 +873,10 @@ const inferMatch = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => 
         resultType = applySubst(subst, resultType);
       }
     }
+
+    // Check exhaustiveness with final scrutinee type
+    const exhaustivenessCheck = checkExhaustiveness(env, applySubst(subst, scrutineeType), parsedPatterns);
+    if (!exhaustivenessCheck.ok) return exhaustivenessCheck;
 
     return ok({
       type: resultType || tUnit,
@@ -860,10 +937,13 @@ const inferPattern = (
         typeVarMap.set(tv, freshTypeVar());
       }
 
-      const instantiatedResult = typeApp(
-        typeConst(dataType.name),
-        dataType.typeParams.map((tv) => typeVarMap.get(tv)!)
-      );
+      // For data types with no parameters, use typeConst; otherwise use typeApp
+      const instantiatedResult = dataType.typeParams.length === 0
+        ? typeConst(dataType.name)
+        : typeApp(
+            typeConst(dataType.name),
+            dataType.typeParams.map((tv) => typeVarMap.get(tv)!)
+          );
 
       // Unify with expected type
       return flatMap(unify(expectedType, instantiatedResult), (s1) => {

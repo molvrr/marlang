@@ -228,6 +228,25 @@ Use `match` to destructure values:
   (_ 0))                 ; => 3
 ```
 
+### Exhaustiveness Checking
+
+The type checker verifies that `match` expressions cover all possible constructors:
+
+```lisp
+; ERROR: Non-exhaustive patterns. Missing: None
+(match (Some 42)
+  ((Some v) v))
+
+; OK: All constructors covered
+(match (Some 42)
+  (None 0)
+  ((Some v) v))
+
+; OK: Wildcard covers all cases
+(match (Some 42)
+  (_ 0))
+```
+
 ### Arithmetic Operations
 
 ```lisp

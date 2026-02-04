@@ -343,6 +343,88 @@ describe('Recursive Types (μ-types)', () => {
   });
 });
 
+describe('Exhaustiveness Checking', () => {
+  test('missing constructor should fail', () => {
+    const code = `
+      (data (Option a) None (Some a))
+      (define id (match (Some 20) ((Some x) x)))
+    `;
+    const result = check(code);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('Non-exhaustive patterns');
+    expect(result.error).toContain('None');
+  });
+
+  test('all constructors covered should pass', () => {
+    const code = `
+      (data (Option a) None (Some a))
+      (match (Some 42)
+        (None 0)
+        ((Some x) x))
+    `;
+    const result = check(code);
+    expect(result.ok).toBe(true);
+  });
+
+  test('wildcard covers all should pass', () => {
+    const code = `
+      (data (Option a) None (Some a))
+      (match (Some 42)
+        (_ 99))
+    `;
+    const result = check(code);
+    expect(result.ok).toBe(true);
+  });
+
+  test('variable pattern covers all should pass', () => {
+    const code = `
+      (data (Option a) None (Some a))
+      (match (Some 42)
+        (x 99))
+    `;
+    const result = check(code);
+    expect(result.ok).toBe(true);
+  });
+
+  test('missing Nil constructor in List should fail', () => {
+    const code = `
+      (data (List a) Nil (Cons a (List a)))
+      (define head (lambda (xs)
+        (match xs
+          ((Cons h t) h))))
+    `;
+    const result = check(code);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('Non-exhaustive patterns');
+    expect(result.error).toContain('Nil');
+  });
+
+  test('multiple missing constructors should list all', () => {
+    const code = `
+      (data Color Red Green Blue)
+      (match Red
+        (Red 1))
+    `;
+    const result = check(code);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('Non-exhaustive patterns');
+    expect(result.error).toContain('Green');
+    expect(result.error).toContain('Blue');
+  });
+
+  test('complete enum coverage should pass', () => {
+    const code = `
+      (data Color Red Green Blue)
+      (match Red
+        (Red 1)
+        (Green 2)
+        (Blue 3))
+    `;
+    const result = check(code);
+    expect(result.ok).toBe(true);
+  });
+});
+
 describe('Integration Tests', () => {
   test('factorial with type annotation', () => {
     const code = `

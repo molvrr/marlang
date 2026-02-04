@@ -31,7 +31,7 @@ Tests are in `spec/` directory using bun:test.
 - `type-ast.ts` - Type representation (Type, TypeScheme, Constraint, Pattern)
 - `type-env.ts` - Type environment, substitution, generalization
 - `type-unify.ts` - Robinson's unification algorithm
-- `type-infer.ts` - Constraint generation and inference
+- `type-infer.ts` - Constraint generation, inference, and exhaustiveness checking for match
 - `type-builtins.ts` - Built-in types (Int, Float, Bool, String) and typeclasses (Num, Eq, Ord)
 - `type-checker.ts` - Main entry point for type checking
 - `type-errors.ts` - Error types and formatting
