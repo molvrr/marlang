@@ -1,9 +1,9 @@
 // Unification algorithm for type checking
 
-import type { Type } from './type-ast';
-import { freeTypeVars, formatType, typeRec } from './type-ast';
-import type { Substitution } from './type-env';
-import { applySubst, composeSubst, emptySubst } from './type-env';
+import type { Type, EffectRow } from './type-ast';
+import { freeTypeVars, formatType, typeRec, effectRowClosed, effectRowOpen, formatEffectRow } from './type-ast';
+import type { Substitution, EffectRowSubstitution } from './type-env';
+import { applySubst, composeSubst, emptySubst, applyEffectRowSubst } from './type-env';
 import type { TypeResult } from './type-errors';
 import { ok, err, flatMap } from './type-errors';
 
@@ -228,5 +228,137 @@ export const match = (pattern: Type, target: Type): TypeResult<Substitution> => 
   }
 
   return err({ kind: 'unification-error', t1: pattern, t2: target });
+};
+
+// ===== Effect Row Unification =====
+
+// Unify two effect rows, returning an effect row substitution
+// Effect row unification is simpler than type unification:
+// - Closed rows unify if they have the same effects (order independent)
+// - Open rows can unify by binding the row variable
+export const unifyEffectRows = (
+  r1: EffectRow | null,
+  r2: EffectRow | null
+): TypeResult<EffectRowSubstitution> => {
+  // null means pure (no effects) - treat as empty closed row
+  const row1 = r1 || effectRowClosed([]);
+  const row2 = r2 || effectRowClosed([]);
+
+  // Both closed: must have same effects (order independent)
+  if (row1.kind === 'effect-row-closed' && row2.kind === 'effect-row-closed') {
+    const set1 = new Set(row1.effects);
+    const set2 = new Set(row2.effects);
+    if (set1.size !== set2.size) {
+      return err({
+        kind: 'unification-error',
+        t1: { kind: 'type-const', name: formatEffectRow(row1) },
+        t2: { kind: 'type-const', name: formatEffectRow(row2) },
+        context: 'effect rows',
+      });
+    }
+    for (const e of set1) {
+      if (!set2.has(e)) {
+        return err({
+          kind: 'unification-error',
+          t1: { kind: 'type-const', name: formatEffectRow(row1) },
+          t2: { kind: 'type-const', name: formatEffectRow(row2) },
+          context: 'effect rows',
+        });
+      }
+    }
+    return ok(new Map());
+  }
+
+  // row1 open, row2 closed: bind row var to remaining effects
+  if (row1.kind === 'effect-row-open' && row2.kind === 'effect-row-closed') {
+    // r1 = {e1, e2 | ε} and r2 = {e1, e2, e3}
+    // => ε = {e3}
+    const remaining = row2.effects.filter((e) => !row1.effects.includes(e));
+    // Check that all effects in row1 are present in row2
+    for (const e of row1.effects) {
+      if (!row2.effects.includes(e)) {
+        return err({
+          kind: 'unification-error',
+          t1: { kind: 'type-const', name: formatEffectRow(row1) },
+          t2: { kind: 'type-const', name: formatEffectRow(row2) },
+          context: 'effect rows',
+        });
+      }
+    }
+    return ok(new Map([[row1.rowVar, effectRowClosed(remaining)]]));
+  }
+
+  // row1 closed, row2 open: symmetric case
+  if (row1.kind === 'effect-row-closed' && row2.kind === 'effect-row-open') {
+    const remaining = row1.effects.filter((e) => !row2.effects.includes(e));
+    for (const e of row2.effects) {
+      if (!row1.effects.includes(e)) {
+        return err({
+          kind: 'unification-error',
+          t1: { kind: 'type-const', name: formatEffectRow(row1) },
+          t2: { kind: 'type-const', name: formatEffectRow(row2) },
+          context: 'effect rows',
+        });
+      }
+    }
+    return ok(new Map([[row2.rowVar, effectRowClosed(remaining)]]));
+  }
+
+  // Both open: unify row variables
+  if (row1.kind === 'effect-row-open' && row2.kind === 'effect-row-open') {
+    if (row1.rowVar === row2.rowVar) {
+      // Same row var, just check that named effects are compatible
+      const set1 = new Set(row1.effects);
+      const set2 = new Set(row2.effects);
+      // Combine effects and keep the shared row var
+      const combined = [...new Set([...set1, ...set2])];
+      // If they're identical, no substitution needed
+      if (set1.size === set2.size && [...set1].every((e) => set2.has(e))) {
+        return ok(new Map());
+      }
+      // Otherwise create a fresh row var for the combined row
+      // This is a simplification - full row polymorphism would be more complex
+      return ok(new Map());
+    }
+
+    // Different row vars: bind one to the other (with effect combination)
+    // r1 = {e1 | ε1}, r2 = {e2 | ε2}
+    // We need to find effects that are in one but not the other
+    const onlyIn1 = row1.effects.filter((e) => !row2.effects.includes(e));
+    const onlyIn2 = row2.effects.filter((e) => !row1.effects.includes(e));
+
+    // ε1 = {onlyIn2 | ε2}  (row1's var gets row2's extra effects plus row2's var)
+    // or equivalently: ε2 = {onlyIn1 | ε1}
+    const subst = new Map<string, EffectRow>();
+    if (onlyIn2.length > 0 || true) {
+      // Bind ε1 to {onlyIn2 | ε2}
+      subst.set(row1.rowVar, effectRowOpen(onlyIn2, row2.rowVar));
+    }
+    return ok(subst);
+  }
+
+  return ok(new Map());
+};
+
+// Combine two effect rows (union)
+export const combineEffectRows = (r1: EffectRow, r2: EffectRow): EffectRow => {
+  const effects1 = r1.effects;
+  const effects2 = r2.effects;
+  const combined = [...new Set([...effects1, ...effects2])];
+
+  // If either is open, result is open
+  if (r1.kind === 'effect-row-open') {
+    if (r2.kind === 'effect-row-open' && r1.rowVar !== r2.rowVar) {
+      // Two different row vars - keep one (simplified)
+      return effectRowOpen(combined, r1.rowVar);
+    }
+    return effectRowOpen(combined, r1.rowVar);
+  }
+  if (r2.kind === 'effect-row-open') {
+    return effectRowOpen(combined, r2.rowVar);
+  }
+
+  // Both closed
+  return effectRowClosed(combined);
 };
 

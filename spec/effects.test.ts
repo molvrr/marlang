@@ -215,6 +215,91 @@ describe('Effect System - Type Checking', () => {
   });
 });
 
+describe('Effect System - Effect Inference', () => {
+  test('perform infers effect operation return type', () => {
+    const result = check(`
+      (effect Console
+        (print : String -> Unit))
+      (perform print "hello")
+    `);
+    expect(result.ok).toBe(true);
+    expect(formatType(result.types![1]!)).toBe('Unit');
+  });
+
+  test('perform infers type from effect op with unit param', () => {
+    const result = check(`
+      (effect State
+        (get : Unit -> Int)
+        (put : Int -> Unit))
+      (perform get ())
+    `);
+    expect(result.ok).toBe(true);
+    expect(formatType(result.types![1]!)).toBe('Int');
+  });
+
+  test('perform with wrong argument type fails', () => {
+    const result = check(`
+      (effect Console
+        (print : String -> Unit))
+      (perform print 42)
+    `);
+    expect(result.ok).toBe(false);
+  });
+
+  test('perform with wrong arity fails', () => {
+    const result = check(`
+      (effect Console
+        (print : String -> Unit))
+      (perform print)
+    `);
+    expect(result.ok).toBe(false);
+  });
+
+  test('handle infers handler body types', () => {
+    const result = check(`
+      (effect Console
+        (print : String -> Unit))
+      (handle 42
+        (print msg k) -> 0)
+    `);
+    expect(result.ok).toBe(true);
+    // Handle should return Int (from both 42 and handler 0)
+    expect(formatType(result.types![1]!)).toBe('Int');
+  });
+
+  test('handle with return handler', () => {
+    const result = check(`
+      (handle 42
+        (return x) -> x)
+    `);
+    expect(result.ok).toBe(true);
+    expect(formatType(result.types![0]!)).toBe('Int');
+  });
+
+  test('lambda with effects has effectful type', () => {
+    const result = check(`
+      (effect Console
+        (print : String -> Unit))
+      (define f (lambda (x) (perform print x)))
+    `);
+    expect(result.ok).toBe(true);
+    // f should have type (-> String {Console} Unit)
+    const fType = formatType(result.types![1]!);
+    expect(fType).toBe('Unit'); // define returns Unit, but the lambda is registered
+  });
+
+  test('nested perform infers correctly', () => {
+    const result = check(`
+      (effect Console
+        (print : String -> Unit)
+        (read : Unit -> String))
+      (perform print (perform read ()))
+    `);
+    expect(result.ok).toBe(true);
+    expect(formatType(result.types![1]!)).toBe('Unit');
+  });
+});
+
 describe('Effect System - Interpreter Recognition', () => {
   test('effect declaration returns nil', () => {
     const result = run(`

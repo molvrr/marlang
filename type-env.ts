@@ -9,6 +9,8 @@ import type {
   Constructor,
   TypeAlias,
   Constraint,
+  EffectRow,
+  EffectDeclaration,
 } from './type-ast';
 import { freeTypeVars, freeTypeVarsScheme, typeVar } from './type-ast';
 
@@ -29,6 +31,8 @@ export type TypeEnv = {
   instances: Map<string, ClassInstance[]>;
   // Type aliases: name -> TypeAlias
   aliases: Map<string, TypeAlias>;
+  // Effect declarations: name -> EffectDeclaration
+  effects: Map<string, EffectDeclaration>;
   // Parent environment (for scoping)
   parent: TypeEnv | null;
 };
@@ -42,6 +46,7 @@ export const emptyEnv = (): TypeEnv => ({
   classes: new Map(),
   instances: new Map(),
   aliases: new Map(),
+  effects: new Map(),
   parent: null,
 });
 
@@ -52,6 +57,7 @@ export const childEnv = (parent: TypeEnv): TypeEnv => ({
   classes: new Map(),
   instances: new Map(),
   aliases: new Map(),
+  effects: new Map(),
   parent,
 });
 
@@ -122,6 +128,32 @@ export const lookupAlias = (env: TypeEnv, name: string): TypeAlias | undefined =
   return undefined;
 };
 
+export const lookupEffect = (env: TypeEnv, name: string): EffectDeclaration | undefined => {
+  const effect = env.effects.get(name);
+  if (effect !== undefined) return effect;
+  if (env.parent) return lookupEffect(env.parent, name);
+  return undefined;
+};
+
+// Lookup an effect operation by name, returning the effect and operation
+export const lookupEffectOp = (
+  env: TypeEnv,
+  opName: string
+): { effect: EffectDeclaration; op: { name: string; params: Type[]; result: Type } } | undefined => {
+  let current: TypeEnv | null = env;
+  while (current !== null) {
+    for (const effect of current.effects.values()) {
+      for (const op of effect.operations) {
+        if (op.name === opName) {
+          return { effect, op };
+        }
+      }
+    }
+    current = current.parent;
+  }
+  return undefined;
+};
+
 // ===== Environment Modification =====
 
 export const defineDataType = (env: TypeEnv, dt: DataType): TypeEnv => {
@@ -155,12 +187,53 @@ export const defineAlias = (env: TypeEnv, alias: TypeAlias): TypeEnv => {
   return { ...env, aliases: newAliases };
 };
 
+export const defineEffect = (env: TypeEnv, effect: EffectDeclaration): TypeEnv => {
+  const newEffects = new Map(env.effects);
+  newEffects.set(effect.name, effect);
+  return { ...env, effects: newEffects };
+};
+
 // ===== Substitution Operations =====
 
 export const emptySubst = (): Substitution => new Map();
 
 export const singleSubst = (name: string, t: Type): Substitution =>
   new Map([[name, t]]);
+
+// Effect row substitution (maps effect row variable names to effect rows)
+export type EffectRowSubstitution = Map<string, EffectRow>;
+
+export const emptyEffectRowSubst = (): EffectRowSubstitution => new Map();
+
+// Apply effect row substitution to an effect row
+export const applyEffectRowSubst = (
+  subst: EffectRowSubstitution,
+  row: EffectRow | null
+): EffectRow | null => {
+  if (row === null) return null;
+  switch (row.kind) {
+    case 'effect-row-closed':
+      return row;
+    case 'effect-row-open': {
+      const replacement = subst.get(row.rowVar);
+      if (replacement === undefined) return row;
+      // Combine the effects from this row with the replacement
+      switch (replacement.kind) {
+        case 'effect-row-closed':
+          return {
+            kind: 'effect-row-closed',
+            effects: [...row.effects, ...replacement.effects],
+          };
+        case 'effect-row-open':
+          return {
+            kind: 'effect-row-open',
+            effects: [...row.effects, ...replacement.effects],
+            rowVar: replacement.rowVar,
+          };
+      }
+    }
+  }
+};
 
 // Apply substitution to a type
 export const applySubst = (subst: Substitution, t: Type): Type => {
@@ -181,6 +254,7 @@ export const applySubst = (subst: Substitution, t: Type): Type => {
       return {
         kind: 'type-arrow',
         params: t.params.map((p) => applySubst(subst, p)),
+        effects: t.effects,  // Effect rows have their own substitution
         result: applySubst(subst, t.result),
       };
     case 'type-rec': {

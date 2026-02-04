@@ -2,12 +2,36 @@
 
 import type { Expr } from './types';
 
-// Core type representation
+// ===== Effect System Types =====
+
+// Effect row - represents a set of effects a function may perform
+// Closed: {Console, State} - exactly these effects
+// Open: {Console | ε} - Console plus whatever ε represents (for polymorphism)
+export type EffectRow =
+  | { kind: 'effect-row-closed'; effects: string[] }                    // Closed row
+  | { kind: 'effect-row-open'; effects: string[]; rowVar: string };     // Open row with variable
+
+// Effect operation (single operation in an effect declaration)
+export type EffectOp = {
+  name: string;
+  params: Type[];    // Parameter types
+  result: Type;      // Return type
+};
+
+// Effect declaration (defines an effect with its operations)
+export type EffectDeclaration = {
+  name: string;
+  typeParams: string[];    // Type parameters for parameterized effects like (State a)
+  operations: EffectOp[];
+};
+
+// ===== Core Type Representation =====
+
 export type Type =
   | { kind: 'type-var'; name: string }                   // Type variable: a, b, etc.
   | { kind: 'type-const'; name: string }                 // Concrete type: Int, Float, Bool, String
   | { kind: 'type-app'; constructor: Type; args: Type[] } // Type application: (List a), (Option Int)
-  | { kind: 'type-arrow'; params: Type[]; result: Type }  // Function type: (-> a b c)
+  | { kind: 'type-arrow'; params: Type[]; effects: EffectRow | null; result: Type }  // Function type with effects
   | { kind: 'type-rec'; var: string; body: Type }        // Recursive type: μ var. body
 
 // Typeclass constraint: (Num a), (Eq a), etc.
@@ -95,11 +119,38 @@ export const typeApp = (constructor: Type, args: Type[]): Type => ({
   args,
 });
 
-export const typeArrow = (params: Type[], result: Type): Type => ({
+export const typeArrow = (params: Type[], result: Type, effects: EffectRow | null = null): Type => ({
   kind: 'type-arrow',
   params,
+  effects,
   result,
 });
+
+// ===== Effect Row Constructors =====
+
+export const effectRowClosed = (effects: string[]): EffectRow => ({
+  kind: 'effect-row-closed',
+  effects,
+});
+
+export const effectRowOpen = (effects: string[], rowVar: string): EffectRow => ({
+  kind: 'effect-row-open',
+  effects,
+  rowVar,
+});
+
+export const effectRowEmpty: EffectRow = effectRowClosed([]);
+
+// Fresh effect row variable counter
+let effectRowVarCounter = 0;
+
+export const freshEffectRowVar = (prefix: string = 'ε'): string => {
+  return `${prefix}${effectRowVarCounter++}`;
+};
+
+export const resetEffectRowVarCounter = (): void => {
+  effectRowVarCounter = 0;
+};
 
 export const typeRec = (varName: string, body: Type): Type => ({
   kind: 'type-rec',
@@ -147,6 +198,17 @@ export const constrainedType = (
 
 // ===== Free Type Variables =====
 
+// Free effect row variables in an effect row
+export const freeEffectRowVars = (row: EffectRow | null): Set<string> => {
+  if (row === null) return new Set();
+  switch (row.kind) {
+    case 'effect-row-closed':
+      return new Set();
+    case 'effect-row-open':
+      return new Set([row.rowVar]);
+  }
+};
+
 export const freeTypeVars = (t: Type): Set<string> => {
   switch (t.kind) {
     case 'type-var':
@@ -170,6 +232,10 @@ export const freeTypeVars = (t: Type): Set<string> => {
         }
       }
       for (const v of freeTypeVars(t.result)) {
+        result.add(v);
+      }
+      // Include effect row variables
+      for (const v of freeEffectRowVars(t.effects)) {
         result.add(v);
       }
       return result;
@@ -201,6 +267,18 @@ export const freeTypeVarsScheme = (scheme: TypeScheme): Set<string> => {
 
 // ===== Type Printing =====
 
+export const formatEffectRow = (row: EffectRow | null): string => {
+  if (row === null) return '';
+  switch (row.kind) {
+    case 'effect-row-closed':
+      if (row.effects.length === 0) return '{}';
+      return `{${row.effects.join(', ')}}`;
+    case 'effect-row-open':
+      if (row.effects.length === 0) return `{${row.rowVar}}`;
+      return `{${row.effects.join(', ')} | ${row.rowVar}}`;
+  }
+};
+
 export const formatType = (t: Type): string => {
   switch (t.kind) {
     case 'type-var':
@@ -212,11 +290,14 @@ export const formatType = (t: Type): string => {
         return formatType(t.constructor);
       }
       return `(${formatType(t.constructor)} ${t.args.map(formatType).join(' ')})`;
-    case 'type-arrow':
+    case 'type-arrow': {
+      const paramsStr = t.params.map(formatType).join(' ');
+      const effectsStr = t.effects ? ` ${formatEffectRow(t.effects)}` : '';
       if (t.params.length === 0) {
-        return `(-> ${formatType(t.result)})`;
+        return `(->${effectsStr} ${formatType(t.result)})`;
       }
-      return `(-> ${t.params.map(formatType).join(' ')} ${formatType(t.result)})`;
+      return `(-> ${paramsStr}${effectsStr} ${formatType(t.result)})`;
+    }
     case 'type-rec':
       return `(mu ${t.var} ${formatType(t.body)})`;
   }

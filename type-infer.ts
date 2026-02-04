@@ -1,7 +1,7 @@
 // Type inference engine
 
 import type { Expr, LispValue } from './types';
-import type { Type, TypeScheme, Constraint, Pattern, MatchBranch, DataType } from './type-ast';
+import type { Type, TypeScheme, Constraint, Pattern, MatchBranch, DataType, EffectRow, EffectDeclaration } from './type-ast';
 import {
   typeVar,
   typeConst,
@@ -18,6 +18,11 @@ import {
   tFFIStruct,
   formatType,
   freeTypeVars,
+  effectRowClosed,
+  effectRowOpen,
+  effectRowEmpty,
+  freshEffectRowVar,
+  formatEffectRow,
 } from './type-ast';
 import type { TypeEnv, Substitution } from './type-env';
 import {
@@ -26,6 +31,9 @@ import {
   lookupVar,
   lookupConstructor,
   lookupDataType,
+  lookupEffect,
+  lookupEffectOp,
+  defineEffect,
   applySubst,
   applySubstEnv,
   composeSubst,
@@ -35,17 +43,21 @@ import {
   instantiate,
   defineDataType,
   extendEnvMany,
+  type EffectRowSubstitution,
+  emptyEffectRowSubst,
+  applyEffectRowSubst,
 } from './type-env';
-import { unify, unifyWithContext, unifyMany } from './type-unify';
+import { unify, unifyWithContext, unifyMany, unifyEffectRows, combineEffectRows } from './type-unify';
 import type { TypeResult, TypeError } from './type-errors';
 import { ok, err, flatMap, sequence, map } from './type-errors';
 import { resolveConstraints } from './type-builtins';
 
-// Inference result: type, substitution, and constraints
+// Inference result: type, substitution, constraints, and effects
 export type InferResult = {
   type: Type;
   subst: Substitution;
   constraints: Constraint[];
+  effects: EffectRow;  // Effects performed by this expression
 };
 
 // Convert list Expr to array of Expr
@@ -285,6 +297,14 @@ export const parsePattern = (expr: Expr, env: TypeEnv): TypeResult<Pattern> => {
 
 // ===== Main Inference =====
 
+// Helper to create a pure (effect-free) result
+const pureResult = (type: Type, subst: Substitution = emptySubst(), constraints: Constraint[] = []): InferResult => ({
+  type,
+  subst,
+  constraints,
+  effects: effectRowEmpty,
+});
+
 // Infer type of an expression
 export const inferExpr = (
   env: TypeEnv,
@@ -292,7 +312,7 @@ export const inferExpr = (
 ): TypeResult<InferResult> => {
   // Nil
   if (expr.kind === 'nil') {
-    return ok({ type: tUnit, subst: emptySubst(), constraints: [] });
+    return ok(pureResult(tUnit));
   }
 
   // Atom
@@ -303,7 +323,7 @@ export const inferExpr = (
   // List expression
   const elements = listToArray(expr);
   if (elements.length === 0) {
-    return ok({ type: tUnit, subst: emptySubst(), constraints: [] });
+    return ok(pureResult(tUnit));
   }
 
   const first = elements[0]!;
@@ -353,14 +373,14 @@ const inferAtom = (env: TypeEnv, value: LispValue): TypeResult<InferResult> => {
     case 'number': {
       // Use the isFloat flag from the lexer to determine the type
       const type = value.isFloat ? tFloat : tInt;
-      return ok({ type, subst: emptySubst(), constraints: [] });
+      return ok(pureResult(type));
     }
     case 'string':
-      return ok({ type: tString, subst: emptySubst(), constraints: [] });
+      return ok(pureResult(tString));
     case 'symbol': {
       // Boolean literals
       if (value.value === '#t' || value.value === '#f') {
-        return ok({ type: tBool, subst: emptySubst(), constraints: [] });
+        return ok(pureResult(tBool));
       }
 
       // Variable lookup
@@ -371,7 +391,7 @@ const inferAtom = (env: TypeEnv, value: LispValue): TypeResult<InferResult> => {
 
       // Instantiate the type scheme
       const { type, constraints } = instantiate(scheme);
-      return ok({ type, subst: emptySubst(), constraints });
+      return ok(pureResult(type, emptySubst(), constraints));
     }
   }
 };
@@ -409,6 +429,7 @@ const inferDefine = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> =>
               type: tUnit,
               subst: finalSubst,
               constraints: resolveConstraints(allConstraints),
+              effects: valueResult.effects,
             });
           });
         });
@@ -427,6 +448,7 @@ const inferDefine = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> =>
       type: tUnit,
       subst: result.subst,
       constraints: result.constraints,
+      effects: result.effects,
     });
   });
 };
@@ -472,10 +494,11 @@ const inferLambda = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> =>
     paramEnv = extendEnv(paramEnv, name, { quantifiedVars: [], qualType: { constraints: [], type: paramType } });
   }
 
-  // Infer body type
+  // Infer body type and collect effects
   let bodySubst = emptySubst();
   let bodyType: Type = tUnit;
   let allConstraints: Constraint[] = [];
+  let bodyEffects: EffectRow = effectRowEmpty;
 
   for (let i = 0; i < bodyExprs.length; i++) {
     const bodyExpr = bodyExprs[i]!;
@@ -484,21 +507,27 @@ const inferLambda = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> =>
 
     bodySubst = composeSubst(result.value.subst, bodySubst);
     allConstraints = [...allConstraints, ...result.value.constraints];
+    // Combine effects from all body expressions
+    bodyEffects = combineEffectRows(bodyEffects, result.value.effects);
 
     if (i === bodyExprs.length - 1) {
       bodyType = result.value.type;
     }
   }
 
-  // Build function type
+  // Build function type with effects
   const paramTypes = params.map((p) => applySubst(bodySubst, p.type));
   const resultType = applySubst(bodySubst, bodyType);
-  const fnType = typeArrow(paramTypes, resultType);
+  // Include effects in the function type if the body has effects
+  const fnEffects = bodyEffects.effects.length > 0 || bodyEffects.kind === 'effect-row-open' ? bodyEffects : null;
+  const fnType = typeArrow(paramTypes, resultType, fnEffects);
 
+  // Lambda definition itself is pure - the effects are captured in the function type
   return ok({
     type: fnType,
     subst: bodySubst,
     constraints: allConstraints,
+    effects: effectRowEmpty,
   });
 };
 
@@ -535,19 +564,27 @@ const inferIf = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
 
             return flatMap(unifyWithContext(thenType, elseType, 'if branches'), (branchUnify) => {
               const finalSubst = composeSubst(branchUnify, s3);
+              // Combine effects from all branches
+              const allEffects = combineEffectRows(
+                combineEffectRows(condResult.effects, thenResult.effects),
+                elseResult.effects
+              );
               return ok({
                 type: applySubst(finalSubst, thenType),
                 subst: finalSubst,
                 constraints: [...condResult.constraints, ...thenResult.constraints, ...elseResult.constraints],
+                effects: allEffects,
               });
             });
           });
         } else {
           // No else branch - result is Unit
+          const allEffects = combineEffectRows(condResult.effects, thenResult.effects);
           return ok({
             type: tUnit,
             subst: s2,
             constraints: [...condResult.constraints, ...thenResult.constraints],
+            effects: allEffects,
           });
         }
       });
@@ -568,6 +605,7 @@ const inferLet = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
   let letEnv = childEnv(env);
   let subst = emptySubst();
   let allConstraints: Constraint[] = [];
+  let allEffects: EffectRow = effectRowEmpty;
 
   for (const binding of bindings) {
     const pair = listToArray(binding);
@@ -610,6 +648,7 @@ const inferLet = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
 
     subst = composeSubst(valueResult.value.subst, subst);
     allConstraints = [...allConstraints, ...valueResult.value.constraints];
+    allEffects = combineEffectRows(allEffects, valueResult.value.effects);
 
     let bindingType = valueResult.value.type;
 
@@ -635,6 +674,7 @@ const inferLet = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
 
     subst = composeSubst(result.value.subst, subst);
     allConstraints = [...allConstraints, ...result.value.constraints];
+    allEffects = combineEffectRows(allEffects, result.value.effects);
 
     if (i === bodyExprs.length - 1) {
       bodyType = result.value.type;
@@ -645,6 +685,7 @@ const inferLet = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
     type: applySubst(subst, bodyType),
     subst,
     constraints: allConstraints,
+    effects: allEffects,
   });
 };
 
@@ -653,12 +694,13 @@ const inferBegin = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => 
   const bodyExprs = elements.slice(1);
 
   if (bodyExprs.length === 0) {
-    return ok({ type: tUnit, subst: emptySubst(), constraints: [] });
+    return ok(pureResult(tUnit));
   }
 
   let subst = emptySubst();
   let lastType: Type = tUnit;
   let allConstraints: Constraint[] = [];
+  let allEffects: EffectRow = effectRowEmpty;
 
   for (const expr of bodyExprs) {
     const result = inferExpr(applySubstEnv(subst, env), expr);
@@ -666,6 +708,7 @@ const inferBegin = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => 
 
     subst = composeSubst(result.value.subst, subst);
     allConstraints = [...allConstraints, ...result.value.constraints];
+    allEffects = combineEffectRows(allEffects, result.value.effects);
     lastType = result.value.type;
   }
 
@@ -673,6 +716,7 @@ const inferBegin = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => 
     type: applySubst(subst, lastType),
     subst,
     constraints: allConstraints,
+    effects: allEffects,
   });
 };
 
@@ -681,12 +725,13 @@ const inferCond = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
   const clauses = elements.slice(1);
 
   if (clauses.length === 0) {
-    return ok({ type: tUnit, subst: emptySubst(), constraints: [] });
+    return ok(pureResult(tUnit));
   }
 
   let subst = emptySubst();
   let resultType: Type | undefined;
   let allConstraints: Constraint[] = [];
+  let allEffects: EffectRow = effectRowEmpty;
 
   for (const clauseExpr of clauses) {
     const clause = listToArray(clauseExpr);
@@ -708,6 +753,7 @@ const inferCond = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
 
       subst = composeSubst(testUnify.value, composeSubst(testResult.value.subst, subst));
       allConstraints = [...allConstraints, ...testResult.value.constraints];
+      allEffects = combineEffectRows(allEffects, testResult.value.effects);
     }
 
     // Infer result type
@@ -716,6 +762,7 @@ const inferCond = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
 
     subst = composeSubst(exprResult.value.subst, subst);
     allConstraints = [...allConstraints, ...exprResult.value.constraints];
+    allEffects = combineEffectRows(allEffects, exprResult.value.effects);
 
     const clauseType = applySubst(subst, exprResult.value.type);
 
@@ -734,6 +781,7 @@ const inferCond = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
     type: resultType || tUnit,
     subst,
     constraints: allConstraints,
+    effects: allEffects,
   });
 };
 
@@ -821,6 +869,7 @@ const inferMatch = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => 
     let scrutineeType = scrutineeResult.type;
     let resultType: Type | undefined;
     let allConstraints = [...scrutineeResult.constraints];
+    let allEffects = scrutineeResult.effects;
     const parsedPatterns: Pattern[] = [];
 
     for (const branchExpr of branches) {
@@ -866,6 +915,7 @@ const inferMatch = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => 
 
       subst = composeSubst(bodyResult.value.subst, subst);
       allConstraints = [...allConstraints, ...bodyResult.value.constraints];
+      allEffects = combineEffectRows(allEffects, bodyResult.value.effects);
 
       const branchType = applySubst(subst, bodyResult.value.type);
 
@@ -888,6 +938,7 @@ const inferMatch = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => 
       type: resultType || tUnit,
       subst,
       constraints: allConstraints,
+      effects: allEffects,
     });
   });
 };
@@ -1014,11 +1065,12 @@ const inferVariadicArithApplication = (
 
   // Handle 0-arg case for + and *
   if (argExprs.length === 0) {
-    return ok({ type: tInt, subst: emptySubst(), constraints: [] });
+    return ok(pureResult(tInt));
   }
 
   let subst = emptySubst();
   let allConstraints: Constraint[] = [];
+  let allEffects: EffectRow = effectRowEmpty;
   const argTypes: Type[] = [];
 
   // Infer all argument types
@@ -1027,6 +1079,7 @@ const inferVariadicArithApplication = (
     if (!argResult.ok) return argResult;
     subst = composeSubst(argResult.value.subst, subst);
     allConstraints = [...allConstraints, ...argResult.value.constraints];
+    allEffects = combineEffectRows(allEffects, argResult.value.effects);
     argTypes.push(argResult.value.type);
   }
 
@@ -1047,6 +1100,7 @@ const inferVariadicArithApplication = (
     type: unifiedType,
     subst,
     constraints: allConstraints,
+    effects: allEffects,
   });
 };
 
@@ -1070,6 +1124,7 @@ const inferApplication = (env: TypeEnv, elements: Expr[]): TypeResult<InferResul
   return flatMap(inferExpr(env, fnExpr), (fnResult) => {
     let subst = fnResult.subst;
     let allConstraints = [...fnResult.constraints];
+    let allEffects = fnResult.effects;
     const argTypes: Type[] = [];
 
     // Infer argument types
@@ -1079,23 +1134,32 @@ const inferApplication = (env: TypeEnv, elements: Expr[]): TypeResult<InferResul
 
       subst = composeSubst(argResult.value.subst, subst);
       allConstraints = [...allConstraints, ...argResult.value.constraints];
+      allEffects = combineEffectRows(allEffects, argResult.value.effects);
       argTypes.push(argResult.value.type);
     }
 
     // Create fresh result type variable
     const resultType = freshTypeVar();
 
-    // Build expected function type
+    // Build expected function type (without effects in the expected type)
     const expectedFnType = typeArrow(argTypes.map((t) => applySubst(subst, t)), resultType);
 
     // Unify with actual function type
     const fnType = applySubst(subst, fnResult.type);
     return flatMap(unifyWithContext(fnType, expectedFnType, 'function application'), (appSubst) => {
       const finalSubst = composeSubst(appSubst, subst);
+
+      // If the function type has effects, those effects are performed when calling it
+      const appliedFnType = applySubst(finalSubst, fnResult.type);
+      if (appliedFnType.kind === 'type-arrow' && appliedFnType.effects) {
+        allEffects = combineEffectRows(allEffects, appliedFnType.effects);
+      }
+
       return ok({
         type: applySubst(finalSubst, resultType),
         subst: finalSubst,
         constraints: allConstraints,
+        effects: allEffects,
       });
     });
   });
@@ -1110,6 +1174,7 @@ const inferFFIApplication = (
 ): TypeResult<InferResult> => {
   let subst = emptySubst();
   let allConstraints: Constraint[] = [];
+  let allEffects: EffectRow = effectRowEmpty;
 
   // Type check all arguments (for side effects and to catch obvious errors)
   for (const argExpr of argExprs) {
@@ -1117,6 +1182,7 @@ const inferFFIApplication = (
     if (!argResult.ok) return argResult;
     subst = composeSubst(argResult.value.subst, subst);
     allConstraints = [...allConstraints, ...argResult.value.constraints];
+    allEffects = combineEffectRows(allEffects, argResult.value.effects);
   }
 
   // Return appropriate type based on the FFI function
@@ -1150,6 +1216,7 @@ const inferFFIApplication = (
     type: resultType,
     subst,
     constraints: allConstraints,
+    effects: allEffects,
   });
 };
 
@@ -1225,87 +1292,222 @@ const inferDataDef = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> =
   }
 
   // This is a declaration, actual environment update happens in type checker
-  return ok({
-    type: tUnit,
-    subst: emptySubst(),
-    constraints: [],
-  });
+  return ok(pureResult(tUnit));
 };
 
 // Infer typeclass definition
-const inferClassDef = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
+const inferClassDef = (_env: TypeEnv, _elements: Expr[]): TypeResult<InferResult> => {
   // (class (ClassName a) method-signatures...)
   // This is just validated, not inferred
-  return ok({
-    type: tUnit,
-    subst: emptySubst(),
-    constraints: [],
-  });
+  return ok(pureResult(tUnit));
 };
 
 // Infer instance definition
-const inferInstanceDef = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
+const inferInstanceDef = (_env: TypeEnv, _elements: Expr[]): TypeResult<InferResult> => {
   // (instance (ClassName Type) method-implementations...)
   // This is just validated, not inferred
-  return ok({
-    type: tUnit,
-    subst: emptySubst(),
-    constraints: [],
-  });
+  return ok(pureResult(tUnit));
 };
 
 // Infer type alias
-const inferTypeAlias = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
+const inferTypeAlias = (_env: TypeEnv, _elements: Expr[]): TypeResult<InferResult> => {
   // (type AliasName Type)
-  return ok({
-    type: tUnit,
-    subst: emptySubst(),
-    constraints: [],
-  });
+  return ok(pureResult(tUnit));
 };
 
-// ===== Effect System (Placeholder) =====
+// ===== Effect System =====
+
+// Parse an effect operation from (op-name : ParamType -> ResultType)
+const parseEffectOp = (
+  expr: Expr,
+  env: TypeEnv
+): TypeResult<{ name: string; params: Type[]; result: Type }> => {
+  if (expr.kind !== 'list') {
+    return err({ kind: 'invalid-type-annotation', message: 'Effect operation must be a list' });
+  }
+
+  const elements = listToArray(expr);
+  // Format: (op-name : Type1 -> Type2)
+  // Elements: [op-name, :, Type1, ->, Type2]
+  if (elements.length < 3) {
+    return err({ kind: 'invalid-type-annotation', message: 'Effect operation must be (name : ParamType -> ResultType)' });
+  }
+
+  const opName = getSymbol(elements[0]!);
+  if (!opName) {
+    return err({ kind: 'invalid-type-annotation', message: 'Effect operation name must be a symbol' });
+  }
+
+  // Check for colon
+  if (!isSymbol(elements[1]!, ':')) {
+    return err({ kind: 'invalid-type-annotation', message: 'Effect operation must have : after name' });
+  }
+
+  // Parse the type signature (Type1 -> Type2)
+  // Find the -> to split params from result
+  let arrowIndex = -1;
+  for (let i = 2; i < elements.length; i++) {
+    if (isSymbol(elements[i]!, '->')) {
+      arrowIndex = i;
+      break;
+    }
+  }
+
+  if (arrowIndex === -1) {
+    return err({ kind: 'invalid-type-annotation', message: 'Effect operation must have -> in signature' });
+  }
+
+  // Parse parameter types
+  const paramTypes: Type[] = [];
+  for (let i = 2; i < arrowIndex; i++) {
+    const paramResult = parseTypeExpr(elements[i]!, env);
+    if (!paramResult.ok) return paramResult;
+    paramTypes.push(paramResult.value);
+  }
+
+  // Parse result type
+  if (arrowIndex >= elements.length - 1) {
+    return err({ kind: 'invalid-type-annotation', message: 'Effect operation must have result type after ->' });
+  }
+
+  const resultResult = parseTypeExpr(elements[arrowIndex + 1]!, env);
+  if (!resultResult.ok) return resultResult;
+
+  return ok({ name: opName, params: paramTypes, result: resultResult.value });
+};
 
 // Infer effect definition
 // Syntax: (effect EffectName (op1 : Type1 -> Type2) ...)
-const inferEffectDef = (_env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
+const inferEffectDef = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
   if (elements.length < 2) {
     return err({ kind: 'arity-mismatch', expected: 1, got: elements.length - 1, context: 'effect' });
   }
 
-  // For now, just validate that effect name is a symbol
+  // Get effect name
   const nameExpr = elements[1]!;
   if (nameExpr.kind !== 'atom' || nameExpr.value.kind !== 'symbol') {
     return err({ kind: 'invalid-type-annotation', message: 'effect name must be a symbol' });
   }
+  const effectName = nameExpr.value.value;
 
-  // Effect declarations return unit
-  return ok({
-    type: tUnit,
-    subst: emptySubst(),
-    constraints: [],
-  });
+  // Parse operations
+  const operations: { name: string; params: Type[]; result: Type }[] = [];
+  for (let i = 2; i < elements.length; i++) {
+    const opResult = parseEffectOp(elements[i]!, env);
+    if (!opResult.ok) return opResult;
+    operations.push(opResult.value);
+  }
+
+  // Effect declarations return unit and are pure
+  // The actual registration happens in inferProgram
+  return ok(pureResult(tUnit));
 };
 
 // Infer perform expression
 // Syntax: (perform op-name arg?)
-const inferPerform = (_env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
+const inferPerform = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
   if (elements.length < 2) {
     return err({ kind: 'arity-mismatch', expected: 1, got: elements.length - 1, context: 'perform' });
   }
 
-  // Perform returns a fresh type variable for now
-  // Full implementation will look up the effect operation's return type
-  const resultType = freshTypeVar();
+  // Get operation name
+  const opNameExpr = elements[1]!;
+  const opName = getSymbol(opNameExpr);
+  if (!opName) {
+    return err({ kind: 'invalid-type-annotation', message: 'perform operation name must be a symbol' });
+  }
+
+  // Look up the effect operation in the environment
+  const opInfo = lookupEffectOp(env, opName);
+
+  let subst = emptySubst();
+  let allConstraints: Constraint[] = [];
+  let allEffects: EffectRow = effectRowEmpty;
+
+  // Infer argument types if any
+  const argExprs = elements.slice(2);
+  const argTypes: Type[] = [];
+  for (const argExpr of argExprs) {
+    const argResult = inferExpr(applySubstEnv(subst, env), argExpr);
+    if (!argResult.ok) return argResult;
+    subst = composeSubst(argResult.value.subst, subst);
+    allConstraints = [...allConstraints, ...argResult.value.constraints];
+    allEffects = combineEffectRows(allEffects, argResult.value.effects);
+    argTypes.push(argResult.value.type);
+  }
+
+  let resultType: Type;
+
+  if (opInfo) {
+    // Found the effect operation - use its type
+    const { effect, op } = opInfo;
+
+    // Check arity
+    if (argTypes.length !== op.params.length) {
+      return err({
+        kind: 'arity-mismatch',
+        expected: op.params.length,
+        got: argTypes.length,
+        context: `effect operation ${opName}`,
+      });
+    }
+
+    // Unify argument types with parameter types
+    for (let i = 0; i < argTypes.length; i++) {
+      const argType = applySubst(subst, argTypes[i]!);
+      const paramType = op.params[i]!;
+      const unifyResult = unifyWithContext(argType, paramType, `argument ${i + 1} of ${opName}`);
+      if (!unifyResult.ok) return unifyResult;
+      subst = composeSubst(unifyResult.value, subst);
+    }
+
+    resultType = applySubst(subst, op.result);
+
+    // Add this effect to the performed effects
+    allEffects = combineEffectRows(allEffects, effectRowClosed([effect.name]));
+  } else {
+    // Effect operation not found - use fresh type variable
+    // This allows perform to work even without effect declarations (for flexibility)
+    resultType = freshTypeVar();
+    // Create an open effect row since we don't know what effect this is
+    const rowVar = freshEffectRowVar();
+    allEffects = combineEffectRows(allEffects, effectRowOpen([], rowVar));
+  }
+
   return ok({
     type: resultType,
-    subst: emptySubst(),
-    constraints: [],
+    subst,
+    constraints: allConstraints,
+    effects: allEffects,
   });
 };
 
+// Parse handler clauses from handle expression
+// Format: (pattern args k) -> body
+const parseHandlerClause = (
+  elements: Expr[],
+  startIndex: number
+): { pattern: Expr; body: Expr; nextIndex: number } | null => {
+  if (startIndex >= elements.length) return null;
+
+  const pattern = elements[startIndex];
+  if (!pattern) return null;
+
+  // Look for -> after pattern
+  if (startIndex + 1 >= elements.length) return null;
+  const arrow = elements[startIndex + 1];
+  if (!arrow || !isSymbol(arrow, '->')) return null;
+
+  // Get body
+  if (startIndex + 2 >= elements.length) return null;
+  const body = elements[startIndex + 2];
+  if (!body) return null;
+
+  return { pattern, body, nextIndex: startIndex + 3 };
+};
+
 // Infer handle expression
-// Syntax: (handle expr (pattern) -> handler ...)
+// Syntax: (handle expr (pattern args k) -> handler ...)
 const inferHandle = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
   if (elements.length < 2) {
     return err({ kind: 'arity-mismatch', expected: 1, got: elements.length - 1, context: 'handle' });
@@ -1316,12 +1518,165 @@ const inferHandle = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> =>
   const bodyResult = inferExpr(env, bodyExpr);
   if (!bodyResult.ok) return bodyResult;
 
-  // For now, the handle expression has the same type as its body
-  // Full implementation will unify handler return types
+  let subst = bodyResult.value.subst;
+  let allConstraints = [...bodyResult.value.constraints];
+  let resultType: Type | undefined;
+  const handledEffects: string[] = [];
+
+  // Parse handler clauses
+  let index = 2;
+  while (index < elements.length) {
+    const clause = parseHandlerClause(elements, index);
+    if (!clause) break;
+
+    const { pattern, body, nextIndex } = clause;
+    index = nextIndex;
+
+    // Parse handler pattern: (op-name args... k)
+    if (pattern.kind === 'list') {
+      const patternElements = listToArray(pattern);
+      if (patternElements.length < 1) {
+        return err({ kind: 'invalid-type-annotation', message: 'Handler pattern must have operation name' });
+      }
+
+      const opName = getSymbol(patternElements[0]!);
+      if (opName) {
+        // Check for return handler
+        if (opName === 'return') {
+          // Return handler: (return x) -> body
+          // x is bound to the value returned by the body
+          let handlerEnv = applySubstEnv(subst, env);
+          if (patternElements.length >= 2) {
+            const returnVarName = getSymbol(patternElements[1]!);
+            if (returnVarName) {
+              const returnType = applySubst(subst, bodyResult.value.type);
+              handlerEnv = extendEnv(handlerEnv, returnVarName, {
+                quantifiedVars: [],
+                qualType: { constraints: [], type: returnType },
+              });
+            }
+          }
+
+          const handlerResult = inferExpr(handlerEnv, body);
+          if (!handlerResult.ok) return handlerResult;
+
+          subst = composeSubst(handlerResult.value.subst, subst);
+          allConstraints = [...allConstraints, ...handlerResult.value.constraints];
+
+          const handlerType = applySubst(subst, handlerResult.value.type);
+          if (resultType === undefined) {
+            resultType = handlerType;
+          } else {
+            const unifyResult = unifyWithContext(resultType, handlerType, 'handler return types');
+            if (!unifyResult.ok) return unifyResult;
+            subst = composeSubst(unifyResult.value, subst);
+            resultType = applySubst(subst, resultType);
+          }
+          continue;
+        }
+
+        // Effect handler: (op-name args... k) -> body
+        handledEffects.push(opName);
+
+        // Look up the effect operation
+        const opInfo = lookupEffectOp(env, opName);
+
+        let handlerEnv = applySubstEnv(subst, env);
+
+        // Bind arguments from pattern
+        const argPatterns = patternElements.slice(1, -1); // All except first (name) and last (continuation)
+        const continuationPattern = patternElements[patternElements.length - 1];
+
+        if (opInfo) {
+          // Bind each argument to its type from the effect operation
+          for (let i = 0; i < argPatterns.length; i++) {
+            const argName = getSymbol(argPatterns[i]!);
+            if (argName && i < opInfo.op.params.length) {
+              handlerEnv = extendEnv(handlerEnv, argName, {
+                quantifiedVars: [],
+                qualType: { constraints: [], type: opInfo.op.params[i]! },
+              });
+            }
+          }
+
+          // Bind continuation: k has type (ResultType -> HandlerResult)
+          // But we don't know HandlerResult yet, so use a fresh var
+          if (continuationPattern) {
+            const kName = getSymbol(continuationPattern);
+            if (kName) {
+              const kResultType = freshTypeVar();
+              const kType = typeArrow([opInfo.op.result], kResultType);
+              handlerEnv = extendEnv(handlerEnv, kName, {
+                quantifiedVars: [],
+                qualType: { constraints: [], type: kType },
+              });
+            }
+          }
+        } else {
+          // Unknown operation - bind everything to fresh type vars
+          for (const argPattern of argPatterns) {
+            const argName = getSymbol(argPattern);
+            if (argName) {
+              handlerEnv = extendEnv(handlerEnv, argName, {
+                quantifiedVars: [],
+                qualType: { constraints: [], type: freshTypeVar() },
+              });
+            }
+          }
+          if (continuationPattern) {
+            const kName = getSymbol(continuationPattern);
+            if (kName) {
+              const kType = typeArrow([freshTypeVar()], freshTypeVar());
+              handlerEnv = extendEnv(handlerEnv, kName, {
+                quantifiedVars: [],
+                qualType: { constraints: [], type: kType },
+              });
+            }
+          }
+        }
+
+        // Infer handler body
+        const handlerResult = inferExpr(handlerEnv, body);
+        if (!handlerResult.ok) return handlerResult;
+
+        subst = composeSubst(handlerResult.value.subst, subst);
+        allConstraints = [...allConstraints, ...handlerResult.value.constraints];
+
+        const handlerType = applySubst(subst, handlerResult.value.type);
+        if (resultType === undefined) {
+          resultType = handlerType;
+        } else {
+          const unifyResult = unifyWithContext(resultType, handlerType, 'handler return types');
+          if (!unifyResult.ok) return unifyResult;
+          subst = composeSubst(unifyResult.value, subst);
+          resultType = applySubst(subst, resultType);
+        }
+      }
+    }
+  }
+
+  // If no handlers provided result type, use body type
+  if (resultType === undefined) {
+    resultType = bodyResult.value.type;
+  }
+
+  // Remove handled effects from the body's effects
+  let remainingEffects = bodyResult.value.effects;
+  if (handledEffects.length > 0) {
+    // Filter out handled effects
+    const remaining = remainingEffects.effects.filter((e) => !handledEffects.includes(e));
+    if (remainingEffects.kind === 'effect-row-open') {
+      remainingEffects = effectRowOpen(remaining, remainingEffects.rowVar);
+    } else {
+      remainingEffects = effectRowClosed(remaining);
+    }
+  }
+
   return ok({
-    type: bodyResult.value.type,
-    subst: bodyResult.value.subst,
-    constraints: bodyResult.value.constraints,
+    type: applySubst(subst, resultType),
+    subst,
+    constraints: allConstraints,
+    effects: remainingEffects,
   });
 };
 
@@ -1354,6 +1709,15 @@ export const inferProgram = (
         if (!defineResult.ok) return defineResult;
         currentEnv = defineResult.value.env;
         globalSubst = defineResult.value.subst;
+        types.push(tUnit);
+        continue;
+      }
+
+      // Handle effect declarations - they extend the environment
+      if (elements.length >= 2 && isSymbol(elements[0]!, 'effect')) {
+        const effectResult = processEffectDef(currentEnv, elements);
+        if (!effectResult.ok) return effectResult;
+        currentEnv = effectResult.value;
         types.push(tUnit);
         continue;
       }
@@ -1538,4 +1902,36 @@ const processDefine = (
   const newEnv = extendEnv(env, name, scheme);
 
   return ok({ env: newEnv, subst });
+};
+
+// Process effect definition and update environment
+const processEffectDef = (env: TypeEnv, elements: Expr[]): TypeResult<TypeEnv> => {
+  if (elements.length < 2) {
+    return err({ kind: 'arity-mismatch', expected: 1, got: elements.length - 1, context: 'effect' });
+  }
+
+  // Get effect name
+  const nameExpr = elements[1]!;
+  if (nameExpr.kind !== 'atom' || nameExpr.value.kind !== 'symbol') {
+    return err({ kind: 'invalid-type-annotation', message: 'effect name must be a symbol' });
+  }
+  const effectName = nameExpr.value.value;
+
+  // Parse operations
+  const operations: { name: string; params: Type[]; result: Type }[] = [];
+  for (let i = 2; i < elements.length; i++) {
+    const opResult = parseEffectOp(elements[i]!, env);
+    if (!opResult.ok) return opResult;
+    operations.push(opResult.value);
+  }
+
+  // Create effect declaration
+  const effectDecl: EffectDeclaration = {
+    name: effectName,
+    typeParams: [],  // TODO: Support parameterized effects like (State a)
+    operations,
+  };
+
+  // Register effect in environment
+  return ok(defineEffect(env, effectDecl));
 };
