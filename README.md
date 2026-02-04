@@ -178,6 +178,26 @@ All comparisons return `#t` or `#f`:
 (grade 65)      ; => "F"
 ```
 
+**`begin`** - evaluate a sequence of expressions, returning the last value:
+
+```lisp
+(begin
+  (define x 10)
+  (define y 20)
+  (+ x y))          ; => 30
+```
+
+Useful for executing multiple expressions where only one is expected, such as in `if` branches:
+
+```lisp
+(if (> score 100)
+  (begin
+    (print "High score!")
+    (save-score score)
+    score)
+  0)
+```
+
 ## FFI (Foreign Function Interface)
 
 Marlang can call functions from native C libraries using Bun's FFI.

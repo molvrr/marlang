@@ -583,6 +583,19 @@ const isTruthy = (value: RuntimeValue): boolean => {
   return true;
 };
 
+// Evaluate a sequence of expressions, returning the last value
+const evalSequence = (interp: T, exprs: Expr[], isTail: boolean): EvalOutcome => {
+  if (exprs.length === 0) {
+    return { kind: 'nil' };
+  }
+  for (let i = 0; i < exprs.length - 1; i++) {
+    const expr = exprs[i];
+    if (expr !== undefined) trampoline(evalExprTail(interp, expr, false));
+  }
+  const lastExpr = exprs[exprs.length - 1];
+  return lastExpr ? evalExprTail(interp, lastExpr, isTail) : { kind: 'nil' };
+};
+
 // Check if an outcome is a tail call thunk
 const isTailCall = (outcome: EvalOutcome): outcome is TailCall => {
   return typeof outcome === 'object' && 'kind' in outcome && outcome.kind === 'tail-call';
@@ -619,7 +632,7 @@ const applyInternal = (fn: RuntimeValue, args: RuntimeValue[]): EvalOutcome => {
       fnEnv = Environment.define(fnEnv, param, arg);
     }
     // Evaluate body in new environment with tail position enabled
-    return evalExprTail({ env: fnEnv }, fn.body, true);
+    return evalSequence({ env: fnEnv }, fn.body, true);
   }
   throw new Error(`Cannot apply non-function: ${fn.kind}`);
 };
@@ -679,10 +692,9 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
 
     // lambda - returns function value, not a tail call
     if (sym === 'lambda') {
-      if (elements.length !== 3) throw new Error('lambda expects 2 arguments');
+      if (elements.length < 3) throw new Error('lambda expects at least 2 arguments');
       const paramsExpr = elements[1];
-      const body = elements[2];
-      if (paramsExpr === undefined || body === undefined) throw new Error('lambda expects 2 arguments');
+      if (paramsExpr === undefined) throw new Error('lambda expects parameters');
 
       // Parse parameters
       const paramExprs = listToArray(paramsExpr);
@@ -694,7 +706,9 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
         params.push(p.value.value);
       }
 
-      return { kind: 'function', params, body, closure: interp.env };
+      // Collect body expressions (all expressions after params)
+      const bodyExprs = elements.slice(2);
+      return { kind: 'function', params, body: bodyExprs, closure: interp.env };
     }
 
     // if - propagates tail position to branches
@@ -717,10 +731,9 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
 
     // let - propagates tail position to body
     if (sym === 'let') {
-      if (elements.length !== 3) throw new Error('let expects 2 arguments');
+      if (elements.length < 3) throw new Error('let expects at least 2 arguments');
       const bindingsExpr = elements[1];
-      const body = elements[2];
-      if (bindingsExpr === undefined || body === undefined) throw new Error('let expects 2 arguments');
+      if (bindingsExpr === undefined) throw new Error('let expects bindings');
 
       // Create child environment
       let letEnv = Environment.child(interp.env);
@@ -742,8 +755,10 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
         letEnv = Environment.define(letEnv, name, value);
       }
 
+      // Collect body expressions (all expressions after bindings)
+      const bodyExprs = elements.slice(2);
       // Evaluate body in let environment - propagate tail position
-      return evalExprTail({ env: letEnv }, body, isTail);
+      return evalSequence({ env: letEnv }, bodyExprs, isTail);
     }
 
     // cond - propagates tail position to result expressions
@@ -768,6 +783,12 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
         }
       }
       return { kind: 'nil' };
+    }
+
+    // begin - evaluate sequence of expressions, return last value
+    if (sym === 'begin') {
+      const bodyExprs = elements.slice(1);
+      return evalSequence(interp, bodyExprs, isTail);
     }
 
     // current-env

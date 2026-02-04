@@ -37,7 +37,7 @@ export type RuntimeValue =
   | { kind: 'nil' }
   | { kind: 'string', value: string }
   | { kind: 'list', elements: RuntimeValue[] }
-  | { kind: 'function', params: string[], body: Expr, closure: Env }
+  | { kind: 'function', params: string[], body: Expr[], closure: Env }
   | { kind: 'builtin', name: string, fn: (args: RuntimeValue[]) => RuntimeValue }
   | { kind: 'ffi-library', path: string, lib: any, signatures: Map<string, FFISignature> }
   | { kind: 'ffi-pointer', ptr: number }
