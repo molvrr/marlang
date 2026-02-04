@@ -19,6 +19,12 @@ bun install
 
 ## Running
 
+Run a Marlang file:
+
+```bash
+bun run.ts <filename.mar>
+```
+
 Run the test suite:
 
 ```bash
@@ -34,6 +40,13 @@ bun run repl.ts
 ## Language Reference
 
 ### Data Types
+
+**Comments** - semicolon to end of line:
+
+```lisp
+; This is a comment
+(+ 1 2) ; inline comment
+```
 
 **Numbers** - integers and floating-point:
 
@@ -192,6 +205,14 @@ Marlang can call functions from native C libraries using Bun's FFI.
 | `bool`   | Boolean                  |
 | `void`   | Void (for return types)  |
 
+### Library Paths
+
+`ffi-open` accepts library names in several formats:
+
+- **Short name**: `"m"` → automatically becomes `libm.dylib` (macOS) or `libm.so` (Linux)
+- **Absolute path**: `"/usr/local/lib/libcustom.dylib"` → used as-is
+- **Relative path with extension**: `"./mylib.so"` → used as-is
+
 ### Example: Using libm
 
 ```lisp
@@ -210,6 +231,18 @@ Marlang can call functions from native C libraries using Bun's FFI.
 
 ; Close when done
 (ffi-close math)
+```
+
+### Example: Using an absolute path
+
+```lisp
+; Load a custom library by absolute path
+(define mylib (ffi-open "/usr/local/lib/libcustom.dylib"
+  (list
+    (list "custom_fn" (list "i32") "i32"))))
+
+(ffi-call mylib "custom_fn" 42)
+(ffi-close mylib)
 ```
 
 ## Architecture

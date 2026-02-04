@@ -148,7 +148,11 @@ const builtins: [string, (args: RuntimeValue[]) => RuntimeValue][] = [
     }
 
     // Open the library
-    const lib = dlopen(`lib${libPath}.${suffix}`, ffiSymbols);
+    // If the path is absolute or contains an extension, use it as-is
+    const fullPath = libPath.startsWith('/') || libPath.includes('.')
+      ? libPath
+      : `lib${libPath}.${suffix}`;
+    const lib = dlopen(fullPath, ffiSymbols);
 
     return { kind: 'ffi-library', path: libPath, lib, signatures };
   }],

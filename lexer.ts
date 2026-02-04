@@ -11,11 +11,11 @@ export type T = { code: string, idx: number, tokens: Token[] }
 export const empty = (code: string): T => ({ code, idx: 0, tokens: [] });
 
 const isChar = (input: string, char: string): boolean => input === char;
-const isSpace = (input: string): boolean => isChar(input, ' ');
+const isWhitespace = (input: string): boolean => input === ' ' || input === '\n' || input === '\r' || input === '\t';
 const isNumber = (input: string): boolean => !!input.match(/[0-9]/);
 const isNumberChar = (input: string): boolean => !!input.match(/[0-9.]/);
 const isAlphanum = (input: string): boolean => !!input.match(/[0-9A-Za-z]/);
-const isSymbolChar = (input: string): boolean => !!input.match(/[0-9A-Za-z+\-*\/<>=!?_]/);
+const isSymbolChar = (input: string): boolean => !!input.match(/[0-9A-Za-z+\-*\/<>=!?_#]/);
 
 // Parse a string literal starting at idx (after the opening quote)
 const parseString = (code: string, startIdx: number): { value: string, endIdx: number } => {
@@ -49,6 +49,7 @@ export const peek = (lexer: T): [T, Token] => {
   if (c === undefined) return [lexer, { kind: 'eof' }];
   if (isChar(c, '(')) return [lexer, { kind: 'lparen' }];
   if (isChar(c, ')')) return [lexer, { kind: 'rparen' }];
+  if (isChar(c, ';')) return [lexer, { kind: 'spc' }]; // Comments treated as whitespace
   if (isChar(c, '"')) {
     const { value } = parseString(lexer.code, lexer.idx + 1);
     return [lexer, { kind: 'string', value }];
@@ -76,7 +77,7 @@ export const peek = (lexer: T): [T, Token] => {
 
     return [lexer, { kind: 'number', value: parseFloat(num) }];
   }
-  if (isSpace(c)) return [lexer, { kind: 'spc' }];
+  if (isWhitespace(c)) return [lexer, { kind: 'spc' }];
   if (isSymbolChar(c)) {
     let value = c;
     let idx = lexer.idx + 1;
@@ -97,6 +98,15 @@ export const peek = (lexer: T): [T, Token] => {
 const incrIdx = (lexer: T): T => ({ ...lexer, idx: lexer.idx + 1 });
 const addToken = (lexer: T, token: Token): T => ({ ...lexer, tokens: [...lexer.tokens, token] });
 
+// Skip a comment from current position to end of line
+const skipComment = (code: string, startIdx: number): number => {
+  let idx = startIdx;
+  while (idx < code.length && code[idx] !== '\n') {
+    idx++;
+  }
+  return idx;
+};
+
 export const advance = (lexer: T): [T, Token] => {
   const c = lexer.code[lexer.idx];
 
@@ -108,6 +118,17 @@ export const advance = (lexer: T): [T, Token] => {
   if (isChar(c, ')')) {
     const token: Token = { kind: 'rparen' };
     return [addToken(incrIdx(lexer), token), token];
+  }
+  if (isChar(c, ';')) {
+    // Skip comment until end of line
+    const endIdx = skipComment(lexer.code, lexer.idx);
+    let peeked = peek({ ...lexer, idx: endIdx });
+
+    while (peeked[1].kind === 'spc') {
+      peeked = peek(incrIdx(peeked[0]));
+    }
+
+    return [addToken({ ...lexer, idx: peeked[0].idx }, { kind: 'spc' }), { kind: 'spc' }];
   }
   if (isChar(c, '"')) {
     const { value, endIdx } = parseString(lexer.code, lexer.idx + 1);
@@ -140,7 +161,7 @@ export const advance = (lexer: T): [T, Token] => {
     return [addToken({ ...lexer, idx }, token), token];
   }
 
-  if (isSpace(c)) {
+  if (isWhitespace(c)) {
     let peeked = peek({ ...lexer, idx: lexer.idx + 1 });
 
     while (peeked[1].kind === 'spc') {
