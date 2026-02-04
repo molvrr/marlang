@@ -1101,6 +1101,29 @@ const evalExprTail = (interp: T, expr: Expr, isTail: boolean): EvalOutcome => {
     if (sym === 'type') {
       return { kind: 'nil' };
     }
+
+    // effect - define effect type (no-op at runtime for now)
+    // Syntax: (effect EffectName (op1 : Type1 -> Type2) ...)
+    if (sym === 'effect') {
+      // Effect declarations are processed at type-check time
+      // At runtime, we just validate basic structure
+      if (elements.length < 2) throw new Error('effect expects a name');
+      return { kind: 'nil' };
+    }
+
+    // perform - invoke an effect operation (placeholder)
+    // Syntax: (perform op-name arg)
+    if (sym === 'perform') {
+      if (elements.length < 2) throw new Error('perform expects an operation name');
+      throw new Error('perform requires effect handlers (not yet implemented)');
+    }
+
+    // handle - install effect handlers (placeholder)
+    // Syntax: (handle expr (pattern) -> handler ...)
+    if (sym === 'handle') {
+      if (elements.length < 2) throw new Error('handle expects an expression');
+      throw new Error('handle requires delimited continuations (not yet implemented)');
+    }
   }
 
   // Function application

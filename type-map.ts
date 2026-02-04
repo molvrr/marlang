@@ -183,7 +183,19 @@ const inferExprWithMap = (
       case 'class':
       case 'instance':
       case 'type':
+      case 'effect':
         return ok(tUnit);
+      case 'perform': {
+        // Perform returns fresh type var for now
+        const resultType = freshTypeVar();
+        return ok(resultType);
+      }
+      case 'handle': {
+        // Handle has the type of its body expression
+        if (elements.length < 2) return ok(tUnit);
+        const bodyPath = [...path, 1];
+        return inferExprWithMap(ctx, elements[1]!, bodyPath);
+      }
     }
   }
 

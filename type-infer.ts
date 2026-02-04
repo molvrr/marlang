@@ -334,6 +334,12 @@ export const inferExpr = (
         return inferInstanceDef(env, elements);
       case 'type':
         return inferTypeAlias(env, elements);
+      case 'effect':
+        return inferEffectDef(env, elements);
+      case 'perform':
+        return inferPerform(env, elements);
+      case 'handle':
+        return inferHandle(env, elements);
     }
   }
 
@@ -1255,6 +1261,67 @@ const inferTypeAlias = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult>
     type: tUnit,
     subst: emptySubst(),
     constraints: [],
+  });
+};
+
+// ===== Effect System (Placeholder) =====
+
+// Infer effect definition
+// Syntax: (effect EffectName (op1 : Type1 -> Type2) ...)
+const inferEffectDef = (_env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
+  if (elements.length < 2) {
+    return err({ kind: 'arity-mismatch', expected: 1, got: elements.length - 1, context: 'effect' });
+  }
+
+  // For now, just validate that effect name is a symbol
+  const nameExpr = elements[1]!;
+  if (nameExpr.kind !== 'atom' || nameExpr.value.kind !== 'symbol') {
+    return err({ kind: 'invalid-type-annotation', message: 'effect name must be a symbol' });
+  }
+
+  // Effect declarations return unit
+  return ok({
+    type: tUnit,
+    subst: emptySubst(),
+    constraints: [],
+  });
+};
+
+// Infer perform expression
+// Syntax: (perform op-name arg?)
+const inferPerform = (_env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
+  if (elements.length < 2) {
+    return err({ kind: 'arity-mismatch', expected: 1, got: elements.length - 1, context: 'perform' });
+  }
+
+  // Perform returns a fresh type variable for now
+  // Full implementation will look up the effect operation's return type
+  const resultType = freshTypeVar();
+  return ok({
+    type: resultType,
+    subst: emptySubst(),
+    constraints: [],
+  });
+};
+
+// Infer handle expression
+// Syntax: (handle expr (pattern) -> handler ...)
+const inferHandle = (env: TypeEnv, elements: Expr[]): TypeResult<InferResult> => {
+  if (elements.length < 2) {
+    return err({ kind: 'arity-mismatch', expected: 1, got: elements.length - 1, context: 'handle' });
+  }
+
+  // Infer the type of the handled expression
+  const bodyExpr = elements[1]!;
+  const bodyResult = inferExpr(env, bodyExpr);
+  if (!bodyResult.ok) return bodyResult;
+
+  // For now, the handle expression has the same type as its body
+  // Full implementation will unify handler return types
+  return ok({
+    type: bodyResult.value.type,
+    subst: bodyResult.value.subst,
+    constraints: bodyResult.value.constraints,
   });
 };
 

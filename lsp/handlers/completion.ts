@@ -25,6 +25,9 @@ const KEYWORDS = [
   'instance',
   'type',
   'else',
+  'effect',
+  'perform',
+  'handle',
 ];
 
 // Handle completion request

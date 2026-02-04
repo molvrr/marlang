@@ -19,6 +19,7 @@ export type ASTRendererProps = {
 const SPECIAL_FORMS = new Set([
   'define', 'lambda', 'if', 'let', 'cond', 'begin',
   'match', 'data', 'class', 'instance', 'type',
+  'effect', 'perform', 'handle',
 ]);
 
 const KEYWORDS = new Set(['true', 'false', 'nil']);
