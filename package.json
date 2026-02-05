@@ -1,21 +1,17 @@
-<<<<<<< Conflict 1 of 1
-+++++++ Contents of side #1
-%%%%%%% Changes from base to side #2
- {
-   "name": "marlang",
-   "module": "index.ts",
-   "type": "module",
-   "private": true,
-   "scripts": {
-+    "install": "bun install.ts",
-     "build:browser": "bun build-browser.ts",
-     "test": "bun test"
-   },
-   "devDependencies": {
-     "@types/bun": "latest"
-   },
-   "peerDependencies": {
-     "typescript": "^5"
-   }
- }
->>>>>>> Conflict 1 of 1 ends
+{
+  "name": "marlang",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "install": "bun install.ts",
+    "build:browser": "bun build-browser.ts",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
