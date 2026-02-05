@@ -135,17 +135,20 @@ export const lookupEffect = (env: TypeEnv, name: string): EffectDeclaration | un
   return undefined;
 };
 
-// Lookup an effect operation by name, returning the effect and operation
+// Lookup an effect operation by name, returning the effect and operation.
+// Later-declared effects take priority over earlier ones (shadowing).
 export const lookupEffectOp = (
   env: TypeEnv,
   opName: string
 ): { effect: EffectDeclaration; op: { name: string; typeParams: string[]; constraints: Constraint[]; params: Type[]; result: Type } } | undefined => {
   let current: TypeEnv | null = env;
   while (current !== null) {
-    for (const effect of current.effects.values()) {
-      for (const op of effect.operations) {
+    // Search in reverse insertion order so later declarations shadow earlier ones
+    const effects = [...current.effects.values()];
+    for (let i = effects.length - 1; i >= 0; i--) {
+      for (const op of effects[i].operations) {
         if (op.name === opName) {
-          return { effect, op };
+          return { effect: effects[i], op };
         }
       }
     }

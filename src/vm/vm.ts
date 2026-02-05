@@ -1,13 +1,13 @@
 // Stack-based VM for Marlang
 
-import { Op, OpName, type Chunk, type FunctionPrototype, type VMValue, type VMObject, type VMClosure, type VMBuiltin, type VMContinuation, type CallFrame, NIL, TRUE, FALSE, vmKind, preconvertConstants } from './bytecode';
+import { Op, OpName, type Chunk, type FunctionPrototype, type VMValue, type VMObject, type VMClosure, type VMBuiltin, type VMContinuation, type VMPid, type VMChannel, type CallFrame, NIL, TRUE, FALSE, vmKind, preconvertConstants } from './bytecode';
 import type { RuntimeValue } from '../core/types';
 import { createBuiltinGlobals } from './builtins';
 import * as fs from 'fs';
 
 // --- Effect System Types ---
 
-type VMHandlerFrame = {
+export type VMHandlerFrame = {
   handlers: Map<string, { closure: VMClosure; arity: number }>;
   returnHandler?: VMClosure;
   // Immutable: where to unwind VM state when an effect is caught
@@ -20,7 +20,7 @@ type VMHandlerFrame = {
   captureStackStart: number;
 };
 
-class EffectSignal {
+export class EffectSignal {
   opName: string;
   args: VMValue[];
   continuation: VMContinuation;
@@ -47,11 +47,11 @@ export type VM = {
 
 // --- Stack Operations ---
 
-function push(vm: VM, value: VMValue): void {
+export function push(vm: VM, value: VMValue): void {
   vm.stack[vm.stackTop++] = value;
 }
 
-function pop(vm: VM): VMValue {
+export function pop(vm: VM): VMValue {
   return vm.stack[--vm.stackTop];
 }
 
@@ -61,7 +61,7 @@ function peek(vm: VM, distance: number = 0): VMValue {
 
 // --- Truthiness ---
 
-function isTruthy(value: VMValue): boolean {
+export function isTruthy(value: VMValue): boolean {
   if (typeof value === 'number') return true;
   if (value.kind === 'nil') return false;
   if (value.kind === 'boolean' && !value.value) return false;
@@ -76,6 +76,8 @@ function valuesEqual(a: VMValue, b: VMValue): boolean {
   if (a.kind === 'nil' && b.kind === 'nil') return true;
   if (a.kind === 'boolean' && b.kind === 'boolean') return a.value === b.value;
   if (a.kind === 'string' && b.kind === 'string') return a.value === b.value;
+  if (a.kind === 'pid' && b.kind === 'pid') return a.id === b.id;
+  if (a.kind === 'channel' && b.kind === 'channel') return a.id === b.id;
   if (a.kind === 'adt-value' && b.kind === 'adt-value') {
     if (a.constructor !== b.constructor) return false;
     if (a.args.length !== b.args.length) return false;
@@ -120,7 +122,7 @@ function createClosureFromProto(frame: CallFrame, proto: FunctionPrototype): VMC
   return { kind: 'vm-closure', proto, upvalues };
 }
 
-function callClosure(vm: VM, closure: VMClosure, args: VMValue[]): VMValue {
+export function callClosure(vm: VM, closure: VMClosure, args: VMValue[]): VMValue {
   const locals = new Array(closure.proto.chunk.localCount).fill(NIL);
   for (let i = 0; i < args.length; i++) {
     locals[i] = args[i];
@@ -213,6 +215,62 @@ function runRestoredContinuation(
   }
 }
 
+/** Resume a continuation from TypeScript (used by scheduler).
+ *  Unlike the RESUME opcode, this does NOT catch EffectSignal —
+ *  effects propagate to the caller (the scheduler's try/catch). */
+export function resumeContinuation(
+  vm: VM,
+  cont: VMContinuation,
+  value: VMValue,
+): VMValue {
+  if (cont.resumed) {
+    throw new VMError('Continuation already resumed (one-shot)', []);
+  }
+  cont.resumed = true;
+
+  // Restore continuation frames
+  const resumeBase = vm.frameCount;
+  for (const f of cont.frames) {
+    vm.frames[vm.frameCount++] = {
+      closure: f.closure,
+      ip: f.ip,
+      locals: [...f.locals],
+    };
+  }
+
+  // Restore continuation stack
+  for (const v of cont.stack) {
+    push(vm, v);
+  }
+
+  // Push the resume value (what PERFORM "returns" to the body)
+  push(vm, value);
+
+  // Restore nested handlers, rebasing frame/stack indices
+  const savedHandlerLen = vm.handlerStack.length;
+  const frameOffset = resumeBase - cont.frameBase;
+  const stackOffset = (vm.stackTop - cont.stack.length - 1) - cont.stackBase;
+  for (const h of cont.handlerStack as VMHandlerFrame[]) {
+    vm.handlerStack.push({
+      handlers: h.handlers,
+      returnHandler: h.returnHandler,
+      unwindFrameCount: h.unwindFrameCount + frameOffset,
+      unwindStackTop: h.unwindStackTop + stackOffset,
+      captureFrameStart: h.captureFrameStart + frameOffset,
+      captureStackStart: h.captureStackStart + stackOffset,
+    });
+  }
+
+  // Run — let EffectSignal propagate to caller (scheduler catches it)
+  const result = run(vm, resumeBase);
+
+  // Clean up
+  vm.frameCount = resumeBase;
+  vm.handlerStack.length = savedHandlerLen;
+
+  return result;
+}
+
 // --- Interpret ---
 
 /** Recursively pre-convert constant pools to VMValues */
@@ -257,7 +315,7 @@ export function interpret(vm: VM, chunk: Chunk): RuntimeValue {
 
 // --- Main Execution Loop ---
 
-function run(vm: VM, baseFrameCount: number): VMValue {
+export function run(vm: VM, baseFrameCount: number): VMValue {
   let frame = vm.frames[vm.frameCount - 1];
 
   while (true) {
@@ -491,7 +549,7 @@ function run(vm: VM, baseFrameCount: number): VMValue {
             args[i] = pop(vm);
           }
           pop(vm);
-          const result = callee.fn(args);
+          const result = callee.fn(args, vm);
           push(vm, result);
 
         } else if (callee.kind === 'adt-constructor') {
@@ -546,7 +604,7 @@ function run(vm: VM, baseFrameCount: number): VMValue {
             args[i] = pop(vm);
           }
           pop(vm);
-          const result = callee.fn(args);
+          const result = callee.fn(args, vm);
           push(vm, result);
           vm.frameCount--;
           if (vm.frameCount <= baseFrameCount) return result;
@@ -1001,6 +1059,8 @@ export function formatVMValue(value: VMValue): string {
     case 'vm-closure': return `#<vm-closure ${value.proto.name}>`;
     case 'vm-builtin': return `#<vm-builtin ${value.name}>`;
     case 'vm-continuation': return '#<continuation>';
+    case 'pid': return `#<pid ${value.id}>`;
+    case 'channel': return `#<channel ${value.id}>`;
     case 'ffi-library': return `#<ffi-library ${value.path}>`;
     case 'ffi-pointer': return `#<ffi-pointer 0x${value.ptr.toString(16)}>`;
     case 'ffi-struct-def': return `#<ffi-struct-def ${value.def.name} (${value.def.size} bytes)>`;
@@ -1022,6 +1082,8 @@ function toRuntimeValue(v: VMValue): RuntimeValue {
     case 'vm-closure': return { kind: 'function', params: [], body: [], closure: { bindings: new Map(), parent: null } };
     case 'vm-builtin': return { kind: 'builtin', name: v.name, fn: () => ({ kind: 'nil' }) };
     case 'vm-continuation': return { kind: 'nil' };
+    case 'pid': return { kind: 'pid', id: v.id };
+    case 'channel': return { kind: 'channel', id: v.id };
     case 'ffi-library': return { kind: 'ffi-library', path: v.path, lib: v.lib, signatures: v.signatures };
     case 'ffi-pointer': return { kind: 'ffi-pointer', ptr: v.ptr };
     case 'ffi-struct-def': return { kind: 'ffi-struct-def', def: v.def };

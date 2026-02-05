@@ -1,0 +1,32 @@
+; Green Threads (Fibers) Example
+;
+; Fibers are lightweight, cooperatively-scheduled threads.
+; All concurrency operations are algebraic effects handled
+; by the run-fibers scheduler.
+;
+; Run with: bun index.ts run examples/fibers.mar --vm 
+; === Example 1: Spawn and Yield ===
+;
+; Fibers interleave execution at yield points
+
+(run-fibers (lambda ()
+  (perform fiber-spawn (lambda ()
+    (perform println "B1")
+    (perform fiber-yield)
+    (perform println "B2")
+    (perform fiber-yield)
+    (perform println "B3")))
+
+  (perform println "A1")
+  (perform fiber-yield)
+  (perform println "A2")
+  (perform fiber-yield)
+  (perform println "A3")))
+
+; Output (interleaved):
+;   A1
+;   B1
+;   A2
+;   B2
+;   A3
+;   B3

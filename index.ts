@@ -6,6 +6,7 @@ import * as Parser from './src/core/parser';
 import * as Interpreter from './src/core/interpreter';
 import { typeCheck, formatError, formatTypes } from './src/types/type-checker';
 import { compileProgram, createVM, interpret, formatVMValue, VMError, disassemble } from './src/vm';
+import { getLastRunFibersPromise } from './src/vm/scheduler';
 
 // Register native IO handlers
 import './src/core/io-handlers';
@@ -65,7 +66,11 @@ const runFile = async () => {
       const vm = createVM();
       const result = interpret(vm, chunk);
 
-      if (result.kind !== 'nil') {
+      // Check if run-fibers was called — if so, await the async scheduler
+      const fibersPromise = getLastRunFibersPromise();
+      if (fibersPromise) {
+        await fibersPromise;
+      } else if (result.kind !== 'nil') {
         const { formatValue } = require('./src/core/interpreter');
         console.log(formatValue(result));
       }

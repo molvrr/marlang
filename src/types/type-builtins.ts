@@ -16,16 +16,20 @@ import {
   tFFIStructDef,
   tFFIStruct,
   tFFIPointer,
+  tPid,
+  tChannel,
   monotype,
   polytype,
   constrainedType,
 } from './type-ast';
+import type { EffectDeclaration } from './type-ast';
 import type { TypeEnv } from './type-env';
 import {
   emptyEnv,
   extendEnv,
   defineClass,
   defineDataType,
+  defineEffect,
 } from './type-env';
 
 // ===== Built-in Typeclasses =====
@@ -285,6 +289,77 @@ export const createBuiltinEnv = (): TypeEnv => {
     ['a'],
     typeArrow([tFFIStruct, tString, typeVar('a')], tUnit)
   ));
+
+  // === Concurrency builtins ===
+
+  // run-fibers : forall a. (-> Unit a) -> a
+  env = extendEnv(env, 'run-fibers', polytype(
+    ['a'],
+    typeArrow([typeArrow([], typeVar('a'))], typeVar('a'))
+  ));
+
+  // error : forall a. String -> a
+  env = extendEnv(env, 'error', polytype(
+    ['a'],
+    typeArrow([tString], typeVar('a'))
+  ));
+
+  // === Concurrency effects ===
+
+  // Fiber effect: spawn, yield, self
+  const fiberEffect: EffectDeclaration = {
+    name: 'Fiber',
+    typeParams: [],
+    operations: [
+      { name: 'fiber-spawn', typeParams: [], constraints: [], params: [typeArrow([], tUnit)], result: tPid },
+      { name: 'fiber-yield', typeParams: [], constraints: [], params: [], result: tUnit },
+      { name: 'fiber-self', typeParams: [], constraints: [], params: [], result: tPid },
+    ],
+  };
+  env = defineEffect(env, fiberEffect);
+
+  // Channel effect: new, send, recv, close
+  const channelEffect: EffectDeclaration = {
+    name: 'Channel',
+    typeParams: [],
+    operations: [
+      { name: 'chan-new', typeParams: [], constraints: [], params: [tInt], result: tChannel },
+      { name: 'chan-send', typeParams: ['a'], constraints: [], params: [tChannel, typeVar('a')], result: tUnit },
+      { name: 'chan-recv', typeParams: ['a'], constraints: [], params: [tChannel], result: typeVar('a') },
+      { name: 'chan-close', typeParams: [], constraints: [], params: [tChannel], result: tUnit },
+    ],
+  };
+  env = defineEffect(env, channelEffect);
+
+  // Actor effect: send, receive, monitor, link, trap-exit
+  const actorEffect: EffectDeclaration = {
+    name: 'Actor',
+    typeParams: [],
+    operations: [
+      { name: 'actor-send', typeParams: ['a'], constraints: [], params: [tPid, typeVar('a')], result: tUnit },
+      { name: 'actor-receive', typeParams: ['a'], constraints: [], params: [], result: typeVar('a') },
+      { name: 'actor-receive-match', typeParams: ['a'], constraints: [], params: [typeArrow([typeVar('a')], tBool)], result: typeVar('a') },
+      { name: 'actor-monitor', typeParams: [], constraints: [], params: [tPid], result: tUnit },
+      { name: 'actor-link', typeParams: [], constraints: [], params: [tPid], result: tUnit },
+      { name: 'actor-unlink', typeParams: [], constraints: [], params: [tPid], result: tUnit },
+      { name: 'actor-trap-exit', typeParams: [], constraints: [], params: [tBool], result: tUnit },
+    ],
+  };
+  env = defineEffect(env, actorEffect);
+
+  // IO effect (built-in default handlers): print, println, read-line, read-file, write-file
+  const ioEffect: EffectDeclaration = {
+    name: 'IO',
+    typeParams: [],
+    operations: [
+      { name: 'print', typeParams: ['a'], constraints: [{ class: 'Show', typeArg: typeVar('a') }], params: [typeVar('a')], result: tUnit },
+      { name: 'println', typeParams: ['a'], constraints: [{ class: 'Show', typeArg: typeVar('a') }], params: [typeVar('a')], result: tUnit },
+      { name: 'read-line', typeParams: [], constraints: [], params: [], result: tString },
+      { name: 'read-file', typeParams: [], constraints: [], params: [tString], result: tString },
+      { name: 'write-file', typeParams: [], constraints: [], params: [tString, tString], result: tUnit },
+    ],
+  };
+  env = defineEffect(env, ioEffect);
 
   return env;
 };

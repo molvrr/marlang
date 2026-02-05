@@ -177,6 +177,10 @@ export const tFFIStructDef: Type = typeConst('FFIStructDef');
 export const tFFIStruct: Type = typeConst('FFIStruct');
 export const tFFIPointer: Type = typeConst('FFIPointer');
 
+// Concurrency types
+export const tPid: Type = typeConst('Pid');
+export const tChannel: Type = typeConst('Channel');
+
 // ===== Type Scheme Helpers =====
 
 export const monotype = (t: Type): TypeScheme => ({

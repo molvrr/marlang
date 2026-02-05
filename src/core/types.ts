@@ -54,6 +54,8 @@ export type RuntimeValue =
   | { kind: 'adt-value', constructor: string, args: RuntimeValue[] }
   | { kind: 'adt-constructor', name: string, arity: number }
   | { kind: 'continuation', cont: Continuation }
+  | { kind: 'pid', id: number }
+  | { kind: 'channel', id: number }
 
 export type Env = {
   bindings: Map<string, RuntimeValue>;

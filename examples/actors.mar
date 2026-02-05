@@ -1,0 +1,112 @@
+; Actor Model Example
+;
+; Actors are fibers with mailboxes. They communicate via
+; asynchronous message passing, inspired by Erlang/Elixir.
+;
+; Run with: bun index.ts run examples/actors.mar --vm
+
+; === Example 1: Ping-Pong ===
+;
+; Two actors exchanging messages back and forth
+
+(data PingPong (Ping Pid) (Pong Pid))
+
+(define pong (lambda ()
+  (let ((msg (perform actor-receive)))
+    (match msg
+      ((Ping sender)
+        (let ((me (perform fiber-self)))
+          (perform actor-send sender (Pong me))
+          (pong)))
+      (_ (pong))))))
+
+(define ping (lambda (partner n)
+  (if (<= n 0)
+    (perform println "ping-pong done!")
+    (let ((me (perform fiber-self)))
+      (perform actor-send partner (Ping me))
+      (let ((msg (perform actor-receive)))
+        (match msg
+          ((Pong _) (ping partner (- n 1)))
+          (_ nil)))))))
+(run-fibers (lambda ()
+  (let ((p (perform fiber-spawn pong)))
+    (ping p 5))))
+
+; Output:
+;   ping-pong done!
+
+
+; === Example 2: Counter Actor ===
+;
+; A stateful actor that processes messages in a loop
+
+(data CounterMsg
+  (Increment Int)
+  (GetCount Pid))
+(data CounterReply
+  (Count Int))
+
+(define counter (lambda (count)
+  (let ((msg (perform actor-receive)))
+    (match msg
+      ((Increment n) (counter (+ count n)))
+      ((GetCount sender)
+        (begin
+          (perform actor-send sender (Count count))
+          (counter count)))))))
+
+(run-fibers (lambda ()
+  (let ((c (perform fiber-spawn (lambda () (counter 0))))
+        (me (perform fiber-self)))
+    (perform actor-send c (Increment 5))
+    (perform actor-send c (Increment 3))
+    (perform actor-send c (Increment 10))
+    (perform actor-send c (GetCount me))
+    (let ((reply (perform actor-receive)))
+      (match reply
+        ((Count n) (begin (perform print "count = ") (perform println n))))))))
+
+; Output:
+;   count = 18
+
+
+; === Example 3: Selective Receive ===
+;
+; Receive only messages matching a predicate
+
+(data Priority (High String) (Low String))
+
+(run-fibers (lambda ()
+  (let ((me (perform fiber-self)))
+
+    ; Send low-priority then high-priority
+    (perform fiber-spawn (lambda ()
+      (perform actor-send me (Low "boring"))
+      (perform actor-send me (High "urgent"))
+      (perform actor-send me (Low "meh"))))
+
+    (perform fiber-yield)
+    (perform fiber-yield)
+
+    ; Receive only High messages first
+    (let ((msg (perform actor-receive-match
+                 (lambda (m) (match m ((High _) #t) (_ #f))))))
+      (match msg
+        ((High s) (perform println s))
+        (_ nil)))
+
+    ; Then drain the rest
+    (let ((msg (perform actor-receive)))
+      (match msg
+        ((Low s) (perform println s))
+        (_ nil)))
+    (let ((msg (perform actor-receive)))
+      (match msg
+        ((Low s) (perform println s))
+        (_ nil))))))
+
+; Output:
+;   urgent
+;   boring
+;   meh

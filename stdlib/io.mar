@@ -70,3 +70,20 @@
 ; println-bool : (-> Bool {IO} Unit)
 ; Print a boolean with a newline
 (define println-bool (lambda (b) (perform println (show b))))
+
+; === Async IO Effects (for use inside run-fibers) ===
+
+(effect AsyncIO
+  (io-stdout    (-> Unit Channel))
+  (io-stderr    (-> Unit Channel))
+  (io-stdin     (-> Unit Channel))
+  (io-read-file  (-> String String))
+  (io-write-file (-> String String Unit))
+  (io-open-file  (-> String String Channel)))
+
+(define stdout     (lambda () (perform io-stdout)))
+(define stderr     (lambda () (perform io-stderr)))
+(define stdin      (lambda () (perform io-stdin)))
+(define async-read-file  (lambda (path) (perform io-read-file path)))
+(define async-write-file (lambda (path content) (perform io-write-file path content)))
+(define open-file  (lambda (path mode) (perform io-open-file path mode)))

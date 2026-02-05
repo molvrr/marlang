@@ -656,9 +656,54 @@ textarea::-webkit-scrollbar-thumb:hover {
 
 .reference-panel {
   flex: 1;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
   background: var(--surface);
   border: 1px solid var(--border-light);
+  overflow: hidden;
+}
+
+.ref-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--bg-warm);
+  padding: 3px;
+  width: fit-content;
+  margin: 1rem 1rem 0 1rem;
+  flex-shrink: 0;
+}
+
+.ref-tabs button {
+  padding: 0.4rem 0.9rem;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ref-tabs button:hover:not(.active) {
+  color: var(--text);
+  background: var(--surface);
+  transform: none;
+  box-shadow: none;
+}
+
+.ref-tabs button.active {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgba(61, 53, 41, 0.1);
+  transform: none;
+}
+
+.ref-content {
+  flex: 1;
+  overflow: auto;
   padding: 1rem;
 }
 

@@ -1,0 +1,72 @@
+; Channels (CSP) Example
+;
+; Channels provide synchronous communication between fibers,
+; inspired by Go channels and Communicating Sequential Processes.
+;
+; Run with: bun index.ts run examples/channels.mar --vm
+
+; === Example 1: Unbuffered Channel ===
+;
+; Sender blocks until a receiver is ready (and vice versa)
+
+(define consume (lambda (ch)
+  (let ((v (perform chan-recv ch)))
+    (if (= v nil)
+      (perform println "done")
+      (begin
+        (perform println v)
+        (consume ch))))))
+
+(run-fibers (lambda ()
+  (let ((ch (perform chan-new 0)))
+
+    ; Producer: sends three values then closes
+    (perform fiber-spawn (lambda ()
+      (perform chan-send ch 10)
+      (perform chan-send ch 20)
+      (perform chan-send ch 30)
+      (perform chan-close ch)))
+
+    ; Consumer: receives until channel is closed (returns nil)
+    (consume ch))))
+
+; Output:
+;   10
+;   20
+;   30
+;   done
+
+
+; === Example 2: Fan-Out / Fan-In ===
+;
+; Multiple workers read from one channel, results collected in another
+
+(run-fibers (lambda ()
+  (let ((jobs (perform chan-new 10))
+        (results (perform chan-new 10)))
+
+    ; Spawn 3 workers
+    (perform fiber-spawn (lambda ()
+      (let ((j (perform chan-recv jobs)))
+        (perform chan-send results (* j j)))))
+    (perform fiber-spawn (lambda ()
+      (let ((j (perform chan-recv jobs)))
+        (perform chan-send results (* j j)))))
+    (perform fiber-spawn (lambda ()
+      (let ((j (perform chan-recv jobs)))
+        (perform chan-send results (* j j)))))
+
+    ; Send 3 jobs
+    (perform chan-send jobs 2)
+    (perform chan-send jobs 3)
+    (perform chan-send jobs 4)
+
+    ; Collect results
+    (let ((a (perform chan-recv results))
+          (b (perform chan-recv results))
+          (c (perform chan-recv results)))
+      (perform print "sum of squares: ")
+      (perform println (+ a (+ b c)))))))
+
+; Output:
+;   sum of squares: 29

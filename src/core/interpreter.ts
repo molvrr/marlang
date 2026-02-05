@@ -2094,5 +2094,9 @@ export const formatValue = (value: RuntimeValue): string => {
       return `#<constructor ${value.name}/${value.arity}>`;
     case 'continuation':
       return `#<continuation>`;
+    case 'pid':
+      return `#<pid ${value.id}>`;
+    case 'channel':
+      return `#<channel ${value.id}>`;
   }
 };

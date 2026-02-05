@@ -1,9 +1,11 @@
 // Builtin functions and globals for the Marlang VM
 
-import type { VMValue, VMFFILibrary, VMFFIStruct } from './bytecode';
+import type { VMValue, VMFFILibrary, VMFFIStruct, VMClosure } from './bytecode';
 import { NIL, TRUE, FALSE } from './bytecode';
 import { formatVMValue } from './vm';
+import type { VM } from './vm';
 import type { FFISignature, StructField, StructDef } from '../core/types';
+import { runFibers, setLastRunFibersPromise } from './scheduler';
 
 // --- FFI Helpers ---
 
@@ -502,6 +504,28 @@ export function createBuiltinGlobals(): Map<string, VMValue> {
     const view = new DataView(structArg.buffer.buffer);
     writeVMFieldValue(view, field, value);
     return NIL;
+  });
+
+  // --- Concurrency ---
+
+  builtin('run-fibers', (args, vm) => {
+    const closure = args[0];
+    if (typeof closure === 'number' || closure.kind !== 'vm-closure') {
+      throw new Error('run-fibers: argument must be a closure');
+    }
+    // Start the async scheduler and store the promise for CLI to await
+    const promise = runFibers(vm as VM, closure);
+    setLastRunFibersPromise(promise);
+    // Return a sentinel — the CLI detects this and awaits the promise
+    return { kind: 'string', value: '\0__run_fibers_promise__' };
+  });
+
+  builtin('error', (args) => {
+    const msg = args[0];
+    if (typeof msg !== 'number' && msg.kind === 'string') {
+      throw new Error(msg.value);
+    }
+    throw new Error(formatVMValue(msg ?? NIL));
   });
 
   return globals;

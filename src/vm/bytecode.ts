@@ -110,7 +110,17 @@ export type VMClosure = {
 export type VMBuiltin = {
   kind: 'vm-builtin';
   name: string;
-  fn: (args: VMValue[]) => VMValue;
+  fn: (args: VMValue[], vm?: any) => VMValue;
+};
+
+export type VMPid = {
+  kind: 'pid';
+  id: number;
+};
+
+export type VMChannel = {
+  kind: 'channel';
+  id: number;
 };
 
 export type VMContinuation = {
@@ -135,6 +145,8 @@ export type VMObject =
   | VMClosure
   | VMBuiltin
   | VMContinuation
+  | VMPid
+  | VMChannel
   | VMFFILibrary
   | VMFFIPointer
   | VMFFIStructDef
