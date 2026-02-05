@@ -570,13 +570,15 @@ Example output:
 ```
 src/vm/
   index.ts          # Public exports
-  bytecode.ts       # D1: Types and instruction set
+  bytecode.ts       # D1: Types, instruction set, VM value types (incl. FFI)
   compiler.ts       # D2: AST → Bytecode
-  vm.ts             # D3: Execution engine
-  effects.ts        # D4: Effect handling
+  vm.ts             # D3: Execution engine + D4: Effect handling + default IO handlers
   debug.ts          # Disassembler, stack traces
-  builtins.ts       # Builtin function table for VM
+  builtins.ts       # Builtin function table for VM (arithmetic, comparison, FFI, structs)
 ```
+
+> **Note:** Effects (D4) were implemented directly in `vm.ts` rather than a separate `effects.ts` file.
+> FFI builtins use lazy `require('bun:ffi')` so the VM module loads in non-FFI environments (web playground).
 
 ---
 

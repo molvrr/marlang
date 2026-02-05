@@ -373,6 +373,106 @@ describe('VM - Effects', () => {
   });
 });
 
+describe('VM - IO Effects', () => {
+  test('print returns nil', () => {
+    expect(run('(perform print "hello")')).toBe('nil');
+  });
+
+  test('println returns nil', () => {
+    expect(run('(perform println "world")')).toBe('nil');
+  });
+
+  test('write-file and read-file roundtrip', () => {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const tmpFile = path.join(os.tmpdir(), `marlang-test-${Date.now()}.txt`);
+    try {
+      const tokens = Lexer.lex(Lexer.empty(`
+        (begin
+          (perform write-file "${tmpFile}" "hello from vm")
+          (perform read-file "${tmpFile}"))
+      `));
+      const parsed = Parser.parse(Parser.empty(tokens));
+      const chunk = compileProgram(parsed.exprs);
+      const vm = createVM();
+      const result = interpret(vm, chunk);
+      expect(result).toEqual({ kind: 'string', value: 'hello from vm' });
+    } finally {
+      try { fs.unlinkSync(tmpFile); } catch {}
+    }
+  });
+});
+
+describe('VM - FFI', () => {
+  test('ffi-open, ffi-call, ffi-close with libm (cos)', () => {
+    const result = runVM(`
+      (let ((lib (ffi-open "m" (list (list "cos" (list "f64") "f64")))))
+        (let ((result (ffi-call lib "cos" 0.0)))
+          (begin
+            (ffi-close lib)
+            result)))
+    `);
+    expect(result).toEqual({ kind: 'number', value: 1 });
+  });
+
+  test('ffi-call with sin', () => {
+    const result = runVM(`
+      (let ((lib (ffi-open "m" (list (list "sin" (list "f64") "f64")))))
+        (let ((result (ffi-call lib "sin" 0.0)))
+          (begin
+            (ffi-close lib)
+            result)))
+    `);
+    expect(result).toEqual({ kind: 'number', value: 0 });
+  });
+
+  test('ffi-call with pow', () => {
+    const result = runVM(`
+      (let ((lib (ffi-open "m" (list (list "pow" (list "f64" "f64") "f64")))))
+        (let ((result (ffi-call lib "pow" 2.0 10.0)))
+          (begin
+            (ffi-close lib)
+            result)))
+    `);
+    expect(result).toEqual({ kind: 'number', value: 1024 });
+  });
+
+  test('struct-new, struct-get, struct-set roundtrip', () => {
+    const result = runVM(`
+      (let ((def (ffi-struct "Point" (list (list "x" "f64") (list "y" "f64")))))
+        (let ((p (struct-new def 3.0 4.0)))
+          (begin
+            (struct-set p "x" 10.0)
+            (list (struct-get p "x") (struct-get p "y")))))
+    `);
+    expect(result).toEqual({
+      kind: 'list',
+      elements: [
+        { kind: 'number', value: 10 },
+        { kind: 'number', value: 4 },
+      ],
+    });
+  });
+
+  test('struct with integer fields', () => {
+    const result = runVM(`
+      (let ((def (ffi-struct "Rect" (list (list "x" "i32") (list "y" "i32") (list "w" "i32") (list "h" "i32")))))
+        (let ((r (struct-new def 10 20 100 200)))
+          (list (struct-get r "x") (struct-get r "y") (struct-get r "w") (struct-get r "h"))))
+    `);
+    expect(result).toEqual({
+      kind: 'list',
+      elements: [
+        { kind: 'number', value: 10 },
+        { kind: 'number', value: 20 },
+        { kind: 'number', value: 100 },
+        { kind: 'number', value: 200 },
+      ],
+    });
+  });
+});
+
 describe('VM - Disassembly', () => {
   test('disassemble simple program', () => {
     const tokens = Lexer.lex(Lexer.empty('(+ 1 2)'));

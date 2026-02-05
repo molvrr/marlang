@@ -3,6 +3,7 @@
 import { Op, OpName, type Chunk, type FunctionPrototype, type VMValue, type VMObject, type VMClosure, type VMBuiltin, type VMContinuation, type CallFrame, NIL, TRUE, FALSE, vmKind, preconvertConstants } from './bytecode';
 import type { RuntimeValue } from '../core/types';
 import { createBuiltinGlobals } from './builtins';
+import * as fs from 'fs';
 
 // --- Effect System Types ---
 
@@ -156,13 +157,58 @@ function runWithHandler(
       // Handler was already removed from stack by PERFORM's unwind.
       const clause = handlerFrame.handlers.get(e.opName);
       if (!clause) throw e; // shouldn't happen
-      const handlerArgs = [...e.args, e.continuation];
+      // Only pass the operation args the handler declares, then the continuation
+      const expectedArgCount = clause.arity - 1;
+      const handlerArgs: VMValue[] = [];
+      for (let i = 0; i < expectedArgCount && i < e.args.length; i++) {
+        handlerArgs.push(e.args[i]);
+      }
+      handlerArgs.push(e.continuation);
       // Deep handler semantics: recursively run handler body with same handler def
       return runWithHandler(vm, handlerDef, clause.closure, handlerArgs);
     }
     // Not for us — clean up if our handler is still on the stack
     const idx = vm.handlerStack.lastIndexOf(handlerFrame);
     if (idx !== -1) vm.handlerStack.splice(idx, 1);
+    throw e;
+  }
+}
+
+/** Run a restored continuation, catching effects that target restored handlers */
+function runRestoredContinuation(
+  vm: VM,
+  resumeBase: number,
+  restoredHandlers: VMHandlerFrame[],
+  savedHandlerLen: number,
+): VMValue {
+  try {
+    return run(vm, resumeBase);
+  } catch (e) {
+    if (e instanceof EffectSignal) {
+      // Check if the effect targets one of our restored handlers
+      for (const hframe of restoredHandlers) {
+        if (e.targetHandler === hframe) {
+          const clause = hframe.handlers.get(e.opName);
+          if (!clause) throw e;
+
+          const expectedArgCount = clause.arity - 1;
+          const handlerArgs: VMValue[] = [];
+          for (let i = 0; i < expectedArgCount && i < e.args.length; i++) {
+            handlerArgs.push(e.args[i]);
+          }
+          handlerArgs.push(e.continuation);
+
+          // Clean up restored handlers before dispatching
+          vm.handlerStack.length = savedHandlerLen;
+
+          // Deep handler semantics: run handler body with same handler def
+          return runWithHandler(vm, {
+            handlers: hframe.handlers,
+            returnHandler: hframe.returnHandler,
+          }, clause.closure, handlerArgs);
+        }
+      }
+    }
     throw e;
   }
 }
@@ -711,6 +757,8 @@ function run(vm: VM, baseFrameCount: number): VMValue {
               stack: capturedStack,
               handlerStack: capturedHandlers,
               resumed: false,
+              frameBase: hframe.captureFrameStart,
+              stackBase: hframe.captureStackStart,
             };
 
             // Unwind VM state to handler's installation point
@@ -745,12 +793,15 @@ function run(vm: VM, baseFrameCount: number): VMValue {
         }
         cont.resumed = true;
 
-        // Update the current (top) handler frame's capture start so that
-        // if the body performs again, only body frames are captured
+        // Update the current (top) handler frame so that:
+        // - captureStart: re-performed effects only capture body frames
+        // - unwind: protects the current handler body's frame from being unwound
         const topHandler = vm.handlerStack[vm.handlerStack.length - 1];
         if (topHandler) {
           topHandler.captureFrameStart = vm.frameCount;
           topHandler.captureStackStart = vm.stackTop;
+          topHandler.unwindFrameCount = vm.frameCount;
+          topHandler.unwindStackTop = vm.stackTop;
         }
 
         // Restore continuation frames
@@ -771,16 +822,60 @@ function run(vm: VM, baseFrameCount: number): VMValue {
         // Push the resume value (this is what PERFORM "returns" to the body)
         push(vm, value);
 
-        // Restore nested handlers from the continuation
+        // Restore nested handlers from the continuation, rebasing their
+        // frame/stack indices to the current restoration context
         const savedHandlerLen = vm.handlerStack.length;
+        const restoredHandlers: VMHandlerFrame[] = [];
+        const frameOffset = resumeBase - cont.frameBase;
+        const stackOffset = (vm.stackTop - cont.stack.length - 1) - cont.stackBase;
         for (const h of cont.handlerStack as VMHandlerFrame[]) {
-          vm.handlerStack.push(h);
+          const rebased: VMHandlerFrame = {
+            handlers: h.handlers,
+            returnHandler: h.returnHandler,
+            unwindFrameCount: h.unwindFrameCount + frameOffset,
+            unwindStackTop: h.unwindStackTop + stackOffset,
+            captureFrameStart: h.captureFrameStart + frameOffset,
+            captureStackStart: h.captureStackStart + stackOffset,
+          };
+          restoredHandlers.push(rebased);
+          vm.handlerStack.push(rebased);
         }
 
-        // Continue execution of the body
-        const result = run(vm, resumeBase);
+        // Continue execution of the body, catching effects that target
+        // restored handlers or the enclosing deep handler
+        let result: VMValue;
+        try {
+          if (restoredHandlers.length === 0) {
+            result = run(vm, resumeBase);
+          } else {
+            result = runRestoredContinuation(vm, resumeBase, restoredHandlers, savedHandlerLen);
+          }
+        } catch (e) {
+          if (e instanceof EffectSignal && topHandler && e.targetHandler === topHandler) {
+            // Body re-performed an effect handled by the enclosing handler.
+            // Dispatch to handler clause with deep handler semantics so that
+            // the result flows back to this RESUME (preserving the handler
+            // body's pending computation like `(+ n (resume k nil))`).
+            const clause = topHandler.handlers.get(e.opName);
+            if (!clause) throw e;
+            const expectedArgCount = clause.arity - 1;
+            const handlerArgs: VMValue[] = [];
+            for (let i = 0; i < expectedArgCount && i < e.args.length; i++) {
+              handlerArgs.push(e.args[i]);
+            }
+            handlerArgs.push(e.continuation);
+            result = runWithHandler(vm, {
+              handlers: topHandler.handlers,
+              returnHandler: topHandler.returnHandler,
+            }, clause.closure, handlerArgs);
+          } else {
+            throw e;
+          }
+        }
 
-        // Clean up any restored handlers that remain
+        // Restore VM state: frame count and handler stack may have been
+        // modified by handler dispatch within the restored continuation
+        vm.frameCount = resumeBase;
         vm.handlerStack.length = savedHandlerLen;
 
         push(vm, result);
@@ -824,7 +919,26 @@ function tryDefaultHandler(opName: string, args: VMValue[]): VMValue | undefined
       return NIL;
     }
     case 'read-line': {
-      return { kind: 'string', value: '' };
+      return { kind: 'string', value: prompt('') ?? '' };
+    }
+    case 'read-file': {
+      const path = args[0];
+      if (path === undefined || typeof path === 'number' || path.kind !== 'string') {
+        throw new Error('read-file: path must be a string');
+      }
+      return { kind: 'string', value: fs.readFileSync(path.value, 'utf-8') };
+    }
+    case 'write-file': {
+      const path = args[0];
+      const content = args[1];
+      if (path === undefined || typeof path === 'number' || path.kind !== 'string') {
+        throw new Error('write-file: path must be a string');
+      }
+      if (content === undefined || typeof content === 'number' || content.kind !== 'string') {
+        throw new Error('write-file: content must be a string');
+      }
+      fs.writeFileSync(path.value, content.value);
+      return NIL;
     }
     default:
       return undefined;
@@ -887,6 +1001,10 @@ export function formatVMValue(value: VMValue): string {
     case 'vm-closure': return `#<vm-closure ${value.proto.name}>`;
     case 'vm-builtin': return `#<vm-builtin ${value.name}>`;
     case 'vm-continuation': return '#<continuation>';
+    case 'ffi-library': return `#<ffi-library ${value.path}>`;
+    case 'ffi-pointer': return `#<ffi-pointer 0x${value.ptr.toString(16)}>`;
+    case 'ffi-struct-def': return `#<ffi-struct-def ${value.def.name} (${value.def.size} bytes)>`;
+    case 'ffi-struct': return `#<ffi-struct ${value.def.name}>`;
   }
 }
 
@@ -904,5 +1022,9 @@ function toRuntimeValue(v: VMValue): RuntimeValue {
     case 'vm-closure': return { kind: 'function', params: [], body: [], closure: { bindings: new Map(), parent: null } };
     case 'vm-builtin': return { kind: 'builtin', name: v.name, fn: () => ({ kind: 'nil' }) };
     case 'vm-continuation': return { kind: 'nil' };
+    case 'ffi-library': return { kind: 'ffi-library', path: v.path, lib: v.lib, signatures: v.signatures };
+    case 'ffi-pointer': return { kind: 'ffi-pointer', ptr: v.ptr };
+    case 'ffi-struct-def': return { kind: 'ffi-struct-def', def: v.def };
+    case 'ffi-struct': return { kind: 'ffi-struct', def: v.def, buffer: v.buffer };
   }
 }

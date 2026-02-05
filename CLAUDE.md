@@ -54,10 +54,10 @@ web/          - Web playground
 - `type-errors.ts` - Error types and formatting
 
 ### Bytecode VM (`src/vm/`)
-- `bytecode.ts` - Opcodes, instructions, chunks, VM value types (VMValue, VMClosure, VMContinuation)
+- `bytecode.ts` - Opcodes, instructions, chunks, VM value types (VMValue, VMClosure, VMContinuation, FFI types)
 - `compiler.ts` - AST → bytecode compiler with flat closures and upvalue capture
-- `vm.ts` - Stack-based VM with algebraic effect system (handler frames, continuations)
-- `builtins.ts` - Built-in globals for the VM (arithmetic, comparison, list, show, ADT constructors)
+- `vm.ts` - Stack-based VM with algebraic effect system (handler frames, continuations, default IO handlers)
+- `builtins.ts` - Built-in globals for the VM (arithmetic, comparison, list, show, ADT constructors, FFI)
 - `debug.ts` - Bytecode disassembler (formatInstruction, getAnnotation)
 - `index.ts` - Public API exports (compileProgram, createVM, interpret, etc.)
 
@@ -93,13 +93,21 @@ Effect operations use arrow type syntax:
 ```
 
 ### Built-in Functions
-Defined in `interpreter.ts` builtins array:
+Defined in `interpreter.ts` builtins array (tree-walker) and `builtins.ts` (VM):
 - Arithmetic: `+`, `-`, `*`, `/`
 - Comparison: `<`, `>`, `=`, `<=`, `>=`
 - Lists: `list`
-- FFI: `ffi-open`, `ffi-call`, `ffi-close`
-- Structs: `ffi-struct`, `struct-new`, `struct-get`, `struct-set`
-- Environment: `env-bindings`, `env-get`, `env-parent`
+- FFI: `ffi-open`, `ffi-call`, `ffi-close` (both tree-walker and VM)
+- Structs: `ffi-struct`, `struct-new`, `struct-get`, `struct-set` (both tree-walker and VM)
+- Environment: `env-bindings`, `env-get`, `env-parent` (tree-walker only)
+
+### Default IO Effect Handlers
+Both tree-walker and VM provide built-in handlers for IO effects (no `handle` block needed):
+- `print` — write string to stdout (no newline)
+- `println` — write string to stdout with newline
+- `read-line` — read a line from stdin
+- `read-file` — read file contents as string
+- `write-file` — write string to file
 
 ## Code Conventions
 

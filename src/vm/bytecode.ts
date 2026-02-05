@@ -119,6 +119,8 @@ export type VMContinuation = {
   stack: VMValue[];
   handlerStack: unknown[];
   resumed: boolean;
+  frameBase: number;  // Frame index that frames[0] was captured from
+  stackBase: number;  // Stack index that stack[0] was captured from
 };
 
 // Unboxed numbers: raw JS numbers avoid heap allocation.
@@ -132,7 +134,37 @@ export type VMObject =
   | { kind: 'adt-constructor'; name: string; arity: number }
   | VMClosure
   | VMBuiltin
-  | VMContinuation;
+  | VMContinuation
+  | VMFFILibrary
+  | VMFFIPointer
+  | VMFFIStructDef
+  | VMFFIStruct;
+
+// FFI types — reuse StructDef/FFISignature from core/types.ts
+import type { FFISignature, StructDef } from '../core/types';
+
+export type VMFFILibrary = {
+  kind: 'ffi-library';
+  path: string;
+  lib: any;
+  signatures: Map<string, FFISignature>;
+};
+
+export type VMFFIPointer = {
+  kind: 'ffi-pointer';
+  ptr: number;
+};
+
+export type VMFFIStructDef = {
+  kind: 'ffi-struct-def';
+  def: StructDef;
+};
+
+export type VMFFIStruct = {
+  kind: 'ffi-struct';
+  def: StructDef;
+  buffer: Uint8Array;
+};
 
 export type VMValue = number | VMObject;
 

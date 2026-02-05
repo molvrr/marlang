@@ -5,4 +5,4 @@ export { createVM, interpret, VMError, formatVMValue } from './vm';
 export type { VM, StackFrame } from './vm';
 export { disassemble } from './debug';
 export { Op, OpName } from './bytecode';
-export type { Chunk, FunctionPrototype, VMValue, VMObject, VMClosure, VMBuiltin, VMContinuation, CallFrame, Instruction, OpCode } from './bytecode';
+export type { Chunk, FunctionPrototype, VMValue, VMObject, VMClosure, VMBuiltin, VMContinuation, VMFFILibrary, VMFFIPointer, VMFFIStructDef, VMFFIStruct, CallFrame, Instruction, OpCode } from './bytecode';
