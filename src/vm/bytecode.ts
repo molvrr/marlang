@@ -94,6 +94,12 @@ export type UpvalueDescriptor = {
 
 // --- VM Runtime Value Types ---
 
+export type CallFrame = {
+  closure: VMClosure;
+  ip: number;
+  locals: VMValue[];
+};
+
 export type VMClosure = {
   kind: 'vm-closure';
   proto: FunctionPrototype;
@@ -106,6 +112,14 @@ export type VMBuiltin = {
   fn: (args: VMValue[]) => VMValue;
 };
 
+export type VMContinuation = {
+  kind: 'vm-continuation';
+  frames: CallFrame[];
+  stack: VMValue[];
+  handlerStack: unknown[];
+  resumed: boolean;
+};
+
 export type VMValue =
   | { kind: 'number'; value: number }
   | { kind: 'boolean'; value: boolean }
@@ -115,7 +129,8 @@ export type VMValue =
   | { kind: 'adt-value'; constructor: string; args: VMValue[] }
   | { kind: 'adt-constructor'; name: string; arity: number }
   | VMClosure
-  | VMBuiltin;
+  | VMBuiltin
+  | VMContinuation;
 
 export const NIL: VMValue = { kind: 'nil' };
 export const TRUE: VMValue = { kind: 'boolean', value: true };

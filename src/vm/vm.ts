@@ -1,16 +1,39 @@
 // Stack-based VM for Marlang
 
-import { Op, OpName, type Chunk, type FunctionPrototype, type VMValue, type VMClosure, type VMBuiltin, NIL } from './bytecode';
+import { Op, OpName, type Chunk, type FunctionPrototype, type VMValue, type VMClosure, type VMBuiltin, type VMContinuation, type CallFrame, NIL } from './bytecode';
 import type { RuntimeValue } from '../core/types';
 import { createBuiltinGlobals } from './builtins';
 
-// --- VM Types ---
+// --- Effect System Types ---
 
-export type CallFrame = {
-  closure: VMClosure;
-  ip: number;
-  locals: VMValue[];
+type VMHandlerFrame = {
+  handlers: Map<string, { closure: VMClosure; arity: number }>;
+  returnHandler?: VMClosure;
+  // Immutable: where to unwind VM state when an effect is caught
+  unwindFrameCount: number;
+  unwindStackTop: number;
+  // Mutable: where to start capturing continuation frames/stack.
+  // Initially same as unwind values. Updated by RESUME so that
+  // re-performed effects only capture body frames, not handler body frames.
+  captureFrameStart: number;
+  captureStackStart: number;
 };
+
+class EffectSignal {
+  opName: string;
+  args: VMValue[];
+  continuation: VMContinuation;
+  targetHandler: VMHandlerFrame;
+
+  constructor(opName: string, args: VMValue[], continuation: VMContinuation, targetHandler: VMHandlerFrame) {
+    this.opName = opName;
+    this.args = args;
+    this.continuation = continuation;
+    this.targetHandler = targetHandler;
+  }
+}
+
+// --- VM Types ---
 
 export type VM = {
   stack: VMValue[];
@@ -18,6 +41,7 @@ export type VM = {
   frames: CallFrame[];
   frameCount: number;
   globals: Map<string, VMValue>;
+  handlerStack: VMHandlerFrame[];
 };
 
 // --- Stack Operations ---
@@ -54,12 +78,10 @@ function valuesEqual(a: VMValue, b: VMValue): boolean {
     if (a.args.length !== b.args.length) return false;
     return a.args.every((arg, i) => valuesEqual(arg, b.args[i]));
   }
-  // Lists
   if (a.kind === 'list' && b.kind === 'list') {
     if (a.elements.length !== b.elements.length) return false;
     return a.elements.every((el, i) => valuesEqual(el, b.elements[i]));
   }
-  // Nil list match
   if (a.kind === 'nil' && b.kind === 'list' && b.elements.length === 0) return true;
   if (b.kind === 'nil' && a.kind === 'list' && a.elements.length === 0) return true;
   if (a.kind === 'nil' && b.kind === 'adt-value' && b.constructor === 'Nil' && b.args.length === 0) return true;
@@ -76,13 +98,76 @@ export function createVM(): VM {
     frames: [],
     frameCount: 0,
     globals: createBuiltinGlobals(),
+    handlerStack: [],
   };
+}
+
+// --- Closure Helpers ---
+
+function createClosureFromProto(frame: CallFrame, proto: FunctionPrototype): VMClosure {
+  const upvalues: VMValue[] = new Array(proto.upvalues.length);
+  for (let i = 0; i < proto.upvalues.length; i++) {
+    const desc = proto.upvalues[i];
+    if (desc.isLocal) {
+      upvalues[i] = frame.locals[desc.index];
+    } else {
+      upvalues[i] = frame.closure.upvalues[desc.index];
+    }
+  }
+  return { kind: 'vm-closure', proto, upvalues };
+}
+
+function callClosure(vm: VM, closure: VMClosure, args: VMValue[]): VMValue {
+  const locals = new Array(closure.proto.chunk.localCount).fill(NIL);
+  for (let i = 0; i < args.length; i++) {
+    locals[i] = args[i];
+  }
+  const newFrame: CallFrame = { closure, ip: 0, locals };
+  const baseFrameCount = vm.frameCount;
+  vm.frames[vm.frameCount++] = newFrame;
+  return run(vm, baseFrameCount);
+}
+
+// --- Effect Handler Execution ---
+
+function runWithHandler(
+  vm: VM,
+  handlerDef: { handlers: Map<string, { closure: VMClosure; arity: number }>; returnHandler?: VMClosure },
+  closure: VMClosure,
+  args: VMValue[],
+): VMValue {
+  const handlerFrame: VMHandlerFrame = {
+    handlers: handlerDef.handlers,
+    returnHandler: handlerDef.returnHandler,
+    unwindFrameCount: vm.frameCount,
+    unwindStackTop: vm.stackTop,
+    captureFrameStart: vm.frameCount,
+    captureStackStart: vm.stackTop,
+  };
+
+  vm.handlerStack.push(handlerFrame);
+
+  try {
+    return callClosure(vm, closure, args);
+  } catch (e) {
+    if (e instanceof EffectSignal && e.targetHandler === handlerFrame) {
+      // Handler was already removed from stack by PERFORM's unwind.
+      const clause = handlerFrame.handlers.get(e.opName);
+      if (!clause) throw e; // shouldn't happen
+      const handlerArgs = [...e.args, e.continuation];
+      // Deep handler semantics: recursively run handler body with same handler def
+      return runWithHandler(vm, handlerDef, clause.closure, handlerArgs);
+    }
+    // Not for us — clean up if our handler is still on the stack
+    const idx = vm.handlerStack.lastIndexOf(handlerFrame);
+    if (idx !== -1) vm.handlerStack.splice(idx, 1);
+    throw e;
+  }
 }
 
 // --- Interpret ---
 
 export function interpret(vm: VM, chunk: Chunk): RuntimeValue {
-  // Wrap the chunk in a script closure
   const scriptProto: FunctionPrototype = {
     name: '<script>',
     arity: 0,
@@ -96,7 +181,6 @@ export function interpret(vm: VM, chunk: Chunk): RuntimeValue {
     upvalues: [],
   };
 
-  // Push initial frame
   const frame: CallFrame = {
     closure: scriptClosure,
     ip: 0,
@@ -106,13 +190,13 @@ export function interpret(vm: VM, chunk: Chunk): RuntimeValue {
   vm.frames[0] = frame;
   vm.frameCount = 1;
 
-  const result = run(vm);
+  const result = run(vm, 0);
   return toRuntimeValue(result);
 }
 
 // --- Main Execution Loop ---
 
-function run(vm: VM): VMValue {
+function run(vm: VM, baseFrameCount: number): VMValue {
   let frame = vm.frames[vm.frameCount - 1];
 
   while (true) {
@@ -127,7 +211,6 @@ function run(vm: VM): VMValue {
           case 'boolean': push(vm, { kind: 'boolean', value: constant.value }); break;
           case 'nil': push(vm, NIL); break;
           case 'prototype':
-            // Shouldn't happen directly, prototypes are used via CLOSURE
             throw new VMError('Cannot push prototype as value', getStackTrace(vm, frame));
         }
         break;
@@ -164,7 +247,6 @@ function run(vm: VM): VMValue {
         if (name.kind !== 'string') throw new VMError('Global name must be string', getStackTrace(vm, frame));
         const value = pop(vm);
 
-        // Handle special constructor encoding from compiler
         if (value.kind === 'string' && value.value.startsWith('\0ctor:')) {
           const parts = value.value.substring(6).split(':');
           const ctorName = parts[0];
@@ -313,7 +395,7 @@ function run(vm: VM): VMValue {
         const result = pop(vm);
         vm.frameCount--;
 
-        if (vm.frameCount === 0) {
+        if (vm.frameCount <= baseFrameCount) {
           return result;
         }
 
@@ -336,19 +418,13 @@ function run(vm: VM): VMValue {
             );
           }
 
-          // Collect arguments
           const locals = new Array(callee.proto.chunk.localCount).fill(NIL);
           for (let i = arity - 1; i >= 0; i--) {
             locals[i] = pop(vm);
           }
           pop(vm); // pop callee
 
-          // Push new frame
-          const newFrame: CallFrame = {
-            closure: callee,
-            ip: 0,
-            locals,
-          };
+          const newFrame: CallFrame = { closure: callee, ip: 0, locals };
           vm.frames[vm.frameCount++] = newFrame;
           frame = newFrame;
 
@@ -357,7 +433,7 @@ function run(vm: VM): VMValue {
           for (let i = arity - 1; i >= 0; i--) {
             args[i] = pop(vm);
           }
-          pop(vm); // pop callee
+          pop(vm);
           const result = callee.fn(args);
           push(vm, result);
 
@@ -372,7 +448,7 @@ function run(vm: VM): VMValue {
           for (let i = arity - 1; i >= 0; i--) {
             args[i] = pop(vm);
           }
-          pop(vm); // pop callee
+          pop(vm);
           push(vm, { kind: 'adt-value', constructor: callee.name, args });
 
         } else {
@@ -393,20 +469,17 @@ function run(vm: VM): VMValue {
             );
           }
 
-          // Collect arguments
           const locals = new Array(callee.proto.chunk.localCount).fill(NIL);
           for (let i = arity - 1; i >= 0; i--) {
             locals[i] = pop(vm);
           }
-          pop(vm); // pop callee
+          pop(vm);
 
-          // Reuse current frame
           frame.closure = callee;
           frame.ip = 0;
           frame.locals = locals;
 
         } else if (callee.kind === 'vm-builtin') {
-          // Can't tail-call a builtin in the traditional sense, just call it
           const args: VMValue[] = [];
           for (let i = arity - 1; i >= 0; i--) {
             args[i] = pop(vm);
@@ -414,15 +487,9 @@ function run(vm: VM): VMValue {
           pop(vm);
           const result = callee.fn(args);
           push(vm, result);
-          // Now we need to return this result
-          // Since this was a tail call, we should return from the current frame
           vm.frameCount--;
-          if (vm.frameCount === 0) return result;
+          if (vm.frameCount <= baseFrameCount) return result;
           frame = vm.frames[vm.frameCount - 1];
-          // result is already on stack from push above... actually no.
-          // The push went to the current frame's stack. After popping the frame,
-          // we need to push to the parent. Let me fix this.
-          // Actually, stackTop is global, so the push is already visible to the parent frame.
           break;
 
         } else if (callee.kind === 'adt-constructor') {
@@ -438,9 +505,8 @@ function run(vm: VM): VMValue {
           }
           pop(vm);
           const result: VMValue = { kind: 'adt-value', constructor: callee.name, args };
-          // Return from current frame with this result
           vm.frameCount--;
-          if (vm.frameCount === 0) return result;
+          if (vm.frameCount <= baseFrameCount) return result;
           frame = vm.frames[vm.frameCount - 1];
           push(vm, result);
           break;
@@ -458,7 +524,6 @@ function run(vm: VM): VMValue {
         }
         const proto = constant.proto;
 
-        // Capture upvalues
         const upvalues: VMValue[] = new Array(proto.upvalues.length);
         for (let i = 0; i < proto.upvalues.length; i++) {
           const desc = proto.upvalues[i];
@@ -497,7 +562,6 @@ function run(vm: VM): VMValue {
           }
           push(vm, value.args[fieldIdx]);
         } else if (value.kind === 'list') {
-          // Support Cons-style field access on lists
           if (fieldIdx === 0) {
             if (value.elements.length === 0) {
               throw new VMError('Cannot get head of empty list', getStackTrace(vm, frame));
@@ -524,12 +588,10 @@ function run(vm: VM): VMValue {
         if (value.kind === 'adt-value' && value.constructor === nameConst.value) {
           matches = true;
         }
-        // Match list against Cons/Nil
         if (value.kind === 'list') {
           if (nameConst.value === 'Cons' && value.elements.length > 0) matches = true;
           if (nameConst.value === 'Nil' && value.elements.length === 0) matches = true;
         }
-        // Match nil against Nil
         if (value.kind === 'nil' && nameConst.value === 'Nil') matches = true;
 
         if (!matches) {
@@ -538,7 +600,60 @@ function run(vm: VM): VMValue {
         break;
       }
 
-      // --- Effects (Phase 2 stubs) ---
+      // --- Effects ---
+
+      case Op.PUSH_HANDLER: {
+        const descriptorConst = frame.closure.proto.chunk.constants[inst.operand!];
+        if (descriptorConst.kind !== 'string' || !descriptorConst.value.startsWith('\0handler:')) {
+          throw new VMError('Invalid handler descriptor', getStackTrace(vm, frame));
+        }
+
+        const descriptorJson = descriptorConst.value.substring('\0handler:'.length);
+        const descriptor = JSON.parse(descriptorJson);
+
+        // Create body closure from prototype
+        const bodyProtoConst = frame.closure.proto.chunk.constants[descriptor.bodyProtoIdx];
+        if (bodyProtoConst.kind !== 'prototype') throw new VMError('Expected body prototype', getStackTrace(vm, frame));
+        const bodyClosure = createClosureFromProto(frame, bodyProtoConst.proto);
+
+        // Create handler clause closures
+        const handlers = new Map<string, { closure: VMClosure; arity: number }>();
+        for (const h of descriptor.handlers) {
+          const opNameConst = frame.closure.proto.chunk.constants[h.opNameIdx];
+          const protoConst = frame.closure.proto.chunk.constants[h.protoIdx];
+          if (opNameConst.kind !== 'string' || protoConst.kind !== 'prototype') {
+            throw new VMError('Invalid handler clause', getStackTrace(vm, frame));
+          }
+          handlers.set(opNameConst.value, {
+            closure: createClosureFromProto(frame, protoConst.proto),
+            arity: h.arity,
+          });
+        }
+
+        // Create return handler closure
+        let returnClosure: VMClosure | undefined;
+        if (descriptor.returnProtoIdx >= 0) {
+          const returnProtoConst = frame.closure.proto.chunk.constants[descriptor.returnProtoIdx];
+          if (returnProtoConst.kind !== 'prototype') throw new VMError('Expected return handler prototype', getStackTrace(vm, frame));
+          returnClosure = createClosureFromProto(frame, returnProtoConst.proto);
+        }
+
+        // Run body with handler installed
+        let result = runWithHandler(vm, { handlers, returnHandler: returnClosure }, bodyClosure, []);
+
+        // Apply return handler to the final result
+        if (returnClosure) {
+          result = callClosure(vm, returnClosure, [result]);
+        }
+
+        push(vm, result);
+        break;
+      }
+
+      case Op.POP_HANDLER: {
+        // Currently unused — handler cleanup is managed by runWithHandler
+        break;
+      }
 
       case Op.PERFORM: {
         const nameConst = frame.closure.proto.chunk.constants[inst.operand!];
@@ -546,13 +661,44 @@ function run(vm: VM): VMValue {
         const arity = inst.operand2!;
         const opName = nameConst.value;
 
-        // Collect arguments
         const args: VMValue[] = [];
         for (let i = arity - 1; i >= 0; i--) {
           args[i] = pop(vm);
         }
 
-        // Check for default handlers (IO operations)
+        // Walk handler stack to find a matching handler
+        for (let i = vm.handlerStack.length - 1; i >= 0; i--) {
+          const hframe = vm.handlerStack[i];
+          if (hframe.handlers.has(opName)) {
+            // Capture continuation: frames and stack from handler's capture point to current
+            const capturedFrames: CallFrame[] = [];
+            for (let f = hframe.captureFrameStart; f < vm.frameCount; f++) {
+              const fr = vm.frames[f];
+              capturedFrames.push({ closure: fr.closure, ip: fr.ip, locals: [...fr.locals] });
+            }
+            const capturedStack = vm.stack.slice(hframe.captureStackStart, vm.stackTop);
+
+            // Capture nested handler frames (between this handler and top of stack)
+            const capturedHandlers = vm.handlerStack.slice(i + 1);
+
+            const continuation: VMContinuation = {
+              kind: 'vm-continuation',
+              frames: capturedFrames,
+              stack: capturedStack,
+              handlerStack: capturedHandlers,
+              resumed: false,
+            };
+
+            // Unwind VM state to handler's installation point
+            vm.frameCount = hframe.unwindFrameCount;
+            vm.stackTop = hframe.unwindStackTop;
+            vm.handlerStack.length = i; // remove this handler and everything above
+
+            throw new EffectSignal(opName, args, continuation, hframe);
+          }
+        }
+
+        // No user handler found — try default handlers
         const defaultResult = tryDefaultHandler(opName, args);
         if (defaultResult !== undefined) {
           push(vm, defaultResult);
@@ -562,14 +708,62 @@ function run(vm: VM): VMValue {
         throw new VMError(`Unhandled effect: ${opName}`, getStackTrace(vm, frame));
       }
 
-      case Op.PUSH_HANDLER:
-      case Op.POP_HANDLER:
       case Op.RESUME: {
-        throw new VMError('Effects not yet implemented in VM', getStackTrace(vm, frame));
+        const value = pop(vm);
+        const cont = pop(vm);
+
+        if (cont.kind !== 'vm-continuation') {
+          throw new VMError('resume expects a continuation', getStackTrace(vm, frame));
+        }
+
+        if (cont.resumed) {
+          throw new VMError('Continuation already resumed (one-shot)', getStackTrace(vm, frame));
+        }
+        cont.resumed = true;
+
+        // Update the current (top) handler frame's capture start so that
+        // if the body performs again, only body frames are captured
+        const topHandler = vm.handlerStack[vm.handlerStack.length - 1];
+        if (topHandler) {
+          topHandler.captureFrameStart = vm.frameCount;
+          topHandler.captureStackStart = vm.stackTop;
+        }
+
+        // Restore continuation frames
+        const resumeBase = vm.frameCount;
+        for (const f of cont.frames) {
+          vm.frames[vm.frameCount++] = {
+            closure: f.closure,
+            ip: f.ip,
+            locals: [...f.locals],
+          };
+        }
+
+        // Restore continuation stack
+        for (const v of cont.stack) {
+          push(vm, v);
+        }
+
+        // Push the resume value (this is what PERFORM "returns" to the body)
+        push(vm, value);
+
+        // Restore nested handlers from the continuation
+        const savedHandlerLen = vm.handlerStack.length;
+        for (const h of cont.handlerStack as VMHandlerFrame[]) {
+          vm.handlerStack.push(h);
+        }
+
+        // Continue execution of the body
+        const result = run(vm, resumeBase);
+
+        // Clean up any restored handlers that remain
+        vm.handlerStack.length = savedHandlerLen;
+
+        push(vm, result);
+        break;
       }
 
       case Op.HALT: {
-        // Check if there's an error message on the stack
         const msg = pop(vm);
         if (msg.kind === 'string') {
           throw new VMError(msg.value, getStackTrace(vm, frame));
@@ -606,7 +800,6 @@ function tryDefaultHandler(opName: string, args: VMValue[]): VMValue | undefined
       return NIL;
     }
     case 'read-line': {
-      // Synchronous readline not easily available; return empty string for now
       return { kind: 'string', value: '' };
     }
     default:
@@ -669,6 +862,7 @@ export function formatVMValue(value: VMValue): string {
     case 'adt-constructor': return `#<constructor ${value.name}/${value.arity}>`;
     case 'vm-closure': return `#<vm-closure ${value.proto.name}>`;
     case 'vm-builtin': return `#<vm-builtin ${value.name}>`;
+    case 'vm-continuation': return '#<continuation>';
   }
 }
 
@@ -685,5 +879,6 @@ function toRuntimeValue(v: VMValue): RuntimeValue {
     case 'adt-constructor': return v;
     case 'vm-closure': return { kind: 'function', params: [], body: [], closure: { bindings: new Map(), parent: null } };
     case 'vm-builtin': return { kind: 'builtin', name: v.name, fn: () => ({ kind: 'nil' }) };
+    case 'vm-continuation': return { kind: 'nil' };
   }
 }

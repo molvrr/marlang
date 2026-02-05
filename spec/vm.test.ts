@@ -248,6 +248,131 @@ describe('VM - ADTs and Pattern Matching', () => {
   });
 });
 
+describe('VM - Effects', () => {
+  test('handle returns body value when no effects performed', () => {
+    expect(run(`
+      (handle 42
+        ((op k) -> 0))
+    `)).toBe('42');
+  });
+
+  test('handle with return handler transforms result', () => {
+    expect(run(`
+      (handle 42
+        ((return x) -> (+ x 1)))
+    `)).toBe('43');
+  });
+
+  test('simple perform and handle with resume', () => {
+    expect(run(`
+      (handle
+        (+ 1 (perform get))
+        ((get k) -> (resume k 10)))
+    `)).toBe('11');
+  });
+
+  test('perform with argument', () => {
+    expect(run(`
+      (handle
+        (perform put 42)
+        ((put x k) -> x))
+    `)).toBe('42');
+  });
+
+  test('handler not resuming discards continuation', () => {
+    expect(run(`
+      (handle
+        (begin
+          (perform abort)
+          100)
+        ((abort k) -> 0))
+    `)).toBe('0');
+  });
+
+  test('multiple performs handled sequentially', () => {
+    expect(run(`
+      (handle
+        (+ (perform get) (perform get))
+        ((get k) -> (resume k 5)))
+    `)).toBe('10');
+  });
+
+  test('perform in function call', () => {
+    expect(run(`
+      (define double (lambda (x) (* x 2)))
+      (handle
+        (double (perform get))
+        ((get k) -> (resume k 7)))
+    `)).toBe('14');
+  });
+
+  test('conditional with perform', () => {
+    expect(run(`
+      (handle
+        (if (perform ask)
+          100
+          0)
+        ((ask k) -> (resume k #t)))
+    `)).toBe('100');
+  });
+
+  test('perform in let binding', () => {
+    expect(run(`
+      (handle
+        (let ((x (perform get)))
+          (* x x))
+        ((get k) -> (resume k 4)))
+    `)).toBe('16');
+  });
+
+  test('return handler with perform', () => {
+    expect(run(`
+      (handle
+        (perform get)
+        ((get k) -> (resume k 10))
+        ((return x) -> (* x 2)))
+    `)).toBe('20');
+  });
+
+  test('nested handle with different effects', () => {
+    expect(run(`
+      (handle
+        (handle
+          (+ (perform get) (perform inc))
+          ((get k) -> (resume k 5)))
+        ((inc k) -> (resume k 1)))
+    `)).toBe('6');
+  });
+
+  test('unhandled effect throws error', () => {
+    expect(() => run(`
+      (handle
+        (perform unhandled)
+        ((other k) -> 0))
+    `)).toThrow('Unhandled effect');
+  });
+
+  test('handler with no continuation param still works', () => {
+    expect(run(`
+      (handle
+        (begin (perform log) 42)
+        ((log k) -> 0))
+    `)).toBe('0');
+  });
+
+  test('effect declaration returns nil', () => {
+    expect(run(`
+      (effect Console
+        (print (-> String Unit)))
+    `)).toBe('nil');
+  });
+
+  test('perform outside handle with default handler works', () => {
+    // print has a default handler
+    expect(run('(perform print "hello")')).toBe('nil');
+  });
+});
+
 describe('VM - Disassembly', () => {
   test('disassemble simple program', () => {
     const tokens = Lexer.lex(Lexer.empty('(+ 1 2)'));
