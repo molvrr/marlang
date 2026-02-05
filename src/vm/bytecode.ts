@@ -78,6 +78,7 @@ export type Chunk = {
   constants: ConstantValue[];
   localCount: number;
   sourceFile?: string;
+  vmConstants?: VMValue[];  // Pre-converted constants for fast PUSH_CONST
 };
 
 export type FunctionPrototype = {
@@ -120,8 +121,9 @@ export type VMContinuation = {
   resumed: boolean;
 };
 
-export type VMValue =
-  | { kind: 'number'; value: number }
+// Unboxed numbers: raw JS numbers avoid heap allocation.
+// JS engines (V8, JSC) optimize `typeof x === 'number'` into a single type-tag check.
+export type VMObject =
   | { kind: 'boolean'; value: boolean }
   | { kind: 'nil' }
   | { kind: 'string'; value: string }
@@ -132,6 +134,29 @@ export type VMValue =
   | VMBuiltin
   | VMContinuation;
 
-export const NIL: VMValue = { kind: 'nil' };
-export const TRUE: VMValue = { kind: 'boolean', value: true };
-export const FALSE: VMValue = { kind: 'boolean', value: false };
+export type VMValue = number | VMObject;
+
+export const NIL: VMObject = { kind: 'nil' };
+export const TRUE: VMObject = { kind: 'boolean', value: true };
+export const FALSE: VMObject = { kind: 'boolean', value: false };
+
+/** Get a displayable kind string for error messages */
+export function vmKind(v: VMValue): string {
+  return typeof v === 'number' ? 'number' : v.kind;
+}
+
+/** Pre-convert a constant pool to VMValues (numbers become raw JS numbers) */
+export function preconvertConstants(constants: ConstantValue[]): VMValue[] {
+  const out: VMValue[] = new Array(constants.length);
+  for (let i = 0; i < constants.length; i++) {
+    const c = constants[i];
+    switch (c.kind) {
+      case 'number': out[i] = c.value; break;
+      case 'string': out[i] = { kind: 'string', value: c.value }; break;
+      case 'boolean': out[i] = c.value ? TRUE : FALSE; break;
+      case 'nil': out[i] = NIL; break;
+      case 'prototype': out[i] = NIL; break; // placeholder — prototypes accessed via constants[]
+    }
+  }
+  return out;
+}

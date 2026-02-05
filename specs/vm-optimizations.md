@@ -2,19 +2,19 @@
 
 ## Tier 1 — High Impact
 
-### 1. NaN-Boxing / Flat Value Encoding
-**Location:** `src/vm/bytecode.ts`, `src/vm/vm.ts`
+### 1. ~~NaN-Boxing / Flat Value Encoding~~ Unboxed Numbers (DONE)
+**Location:** `src/vm/bytecode.ts`, `src/vm/vm.ts`, `src/vm/builtins.ts`
 
 **Problem:** Every VMValue is a heap-allocated JS object (`{kind: 'number', value: 42}`). Every arithmetic op, comparison, and constant load allocates a new object. For `fib(40)` (~331M operations), this means ~331M short-lived objects causing massive GC pressure.
 
-**Solution:** Encode all values in a 64-bit float using NaN-boxing:
-- Regular numbers stored as-is (no boxing)
-- Non-number types encoded in NaN payload bits:
-  - Booleans, nil: specific NaN bit patterns
-  - Pointers (closures, strings, ADTs): NaN with pointer in lower 48 bits
-- Alternative: dual-stack approach with `Float64Array` for values + `Uint8Array` for type tags
+**Implemented:** `VMValue = number | VMObject` — raw JS numbers avoid heap allocation. JS engines (V8, JSC/Bun) optimize `typeof x === 'number'` into a single type-tag check, giving us the same benefit as NaN-boxing without DataView overhead. Non-number types remain tagged objects (`VMObject`).
 
-**Impact:** Eliminates all allocation for number arithmetic. Estimated 3-10x speedup on numeric benchmarks.
+**Learnings:**
+- Simpler than full NaN-boxing and still eliminates all number allocation
+- `typeof` fast-path must come first in every function that touches VMValue (isTruthy, valuesEqual, formatVMValue, toRuntimeValue)
+- Every `.kind` access on VMValue must be guarded with `typeof v !== 'number'` first
+- `toRuntimeValue()` re-boxes numbers to `{kind:'number', value:n}` so existing tests and tree-walker interop continue working unchanged
+- All 438 tests pass with zero changes to test code
 
 ---
 
@@ -32,39 +32,31 @@
 
 ---
 
-### 3. Pre-Convert Constant Pool
-**Location:** `src/vm/vm.ts` lines 206-216 (`PUSH_CONST` handler)
+### 3. Pre-Convert Constant Pool (DONE)
+**Location:** `src/vm/bytecode.ts`, `src/vm/vm.ts`
 
-**Problem:** Every `PUSH_CONST` creates a new VMValue object by copying from the ConstantValue in the constant pool:
-```typescript
-case 'number': push(vm, { kind: 'number', value: constant.value }); break;
-```
+**Problem:** Every `PUSH_CONST` creates a new VMValue object by copying from the ConstantValue in the constant pool.
 
-**Solution:** Pre-convert the constant pool from `ConstantValue[]` to `VMValue[]` at load time. Then `PUSH_CONST` becomes:
-```typescript
-push(vm, preconvertedConstants[inst.operand!]); // zero allocation
-```
+**Implemented:** Added `preconvertConstants()` in bytecode.ts and `vmConstants?: VMValue[]` field on `Chunk`. `ensureVmConstants()` recursively pre-converts all chunks (including nested prototypes) before execution. `PUSH_CONST` is now a single array index: `push(vm, chunk.vmConstants![inst.operand!])`.
 
-**Impact:** Eliminates one allocation per constant load. Easy win, minimal code change.
+**Learnings:**
+- Must recurse through prototype constants to pre-convert nested function chunks
+- Prototype slots in vmConstants get NIL placeholders — prototypes are only accessed via the original `constants[]` array (for CLOSURE, PUSH_HANDLER)
+- Bundled naturally with unboxed numbers (#1) since both change how values flow through PUSH_CONST
 
 ---
 
-### 4. Use TRUE/FALSE Singletons
-**Location:** `src/vm/vm.ts` (all comparison opcodes), `src/vm/bytecode.ts` lines 136-137
+### 4. Use TRUE/FALSE Singletons (DONE)
+**Location:** `src/vm/vm.ts`, `src/vm/builtins.ts`, `src/vm/bytecode.ts`
 
-**Problem:** `TRUE` and `FALSE` constants are defined in `bytecode.ts` but never used. Every comparison allocates a new boolean object:
-```typescript
-push(vm, { kind: 'boolean', value: a.value < b.value }); // new object every time
-```
+**Problem:** Every comparison allocated a new boolean object despite TRUE/FALSE singletons existing.
 
-**Solution:**
-```typescript
-push(vm, a.value < b.value ? TRUE : FALSE); // reuse singletons
-```
+**Implemented:** All comparison opcodes (EQ, LT, GT, LE, GE, NOT) now push `TRUE`/`FALSE` singletons. Builtin comparison functions also return singletons. Boolean globals (`#t`, `#f`) use the shared singletons. `NIL`/`TRUE`/`FALSE` typed as `VMObject` (not `VMValue`) for type safety.
 
-Apply to: `LT`, `GT`, `EQ`, `LTE`, `GTE` opcodes, and anywhere else booleans are pushed.
-
-**Impact:** Eliminates one allocation per comparison. Trivial fix.
+**Learnings:**
+- Typed singletons as `VMObject` (not `VMValue`) so they're clearly non-number objects
+- Also applied to builtin comparison functions, not just opcodes — easy to miss those
+- `preconvertConstants` maps boolean constants to the singletons too
 
 ---
 
@@ -122,40 +114,19 @@ let constants = frame.closure.proto.chunk.constants;
 
 ---
 
-### 8. Numeric Type Tags Instead of Strings
+### 8. Numeric Type Tags Instead of Strings (PARTIALLY SUPERSEDED)
 **Location:** `src/vm/bytecode.ts` (VMValue type), `src/vm/vm.ts` (all kind checks)
 
 **Problem:** Every `.kind` check is a string comparison (`value.kind === 'number'`). With 10 different VMValue shapes, V8's inline caches become megamorphic.
 
-**Solution:** Use numeric tag constants:
-```typescript
-const TAG_NUMBER = 0;
-const TAG_BOOLEAN = 1;
-const TAG_NIL = 2;
-const TAG_STRING = 3;
-// etc.
-type VMValue = { tag: number; value: any; /* extra fields */ };
-```
-
-**Impact:** Faster type checks, better V8 optimization. Pairs well with NaN-boxing (Tier 1 #1).
+**Status:** The most critical case (numbers) is now handled by `typeof x === 'number'` which is faster than any string or numeric tag check. Remaining object types still use string `.kind` tags. Could still apply numeric tags to `VMObject` variants, but diminishing returns since the hot path (numbers) is already optimized.
 
 ---
 
-### 9. Reorder valuesEqual for Common Case
+### 9. ~~Reorder valuesEqual for Common Case~~ (DONE — via #1)
 **Location:** `src/vm/vm.ts` `valuesEqual()` function
 
-**Problem:** Checks nil equality before number equality. In numeric benchmarks (fib, sum), numbers are the common case.
-
-**Solution:** Check numbers first:
-```typescript
-function valuesEqual(a: VMValue, b: VMValue): boolean {
-  if (a.kind === 'number' && b.kind === 'number') return a.value === b.value;
-  if (a.kind === 'nil' && b.kind === 'nil') return true;
-  // ...rest
-}
-```
-
-**Impact:** Small but consistent improvement on numeric workloads.
+**Implemented:** Numbers are now checked first via `typeof a === 'number'` fast path, which is even faster than the proposed `.kind` reorder. Falls through to object comparisons only for non-numbers.
 
 ---
 

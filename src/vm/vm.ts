@@ -1,6 +1,6 @@
 // Stack-based VM for Marlang
 
-import { Op, OpName, type Chunk, type FunctionPrototype, type VMValue, type VMClosure, type VMBuiltin, type VMContinuation, type CallFrame, NIL } from './bytecode';
+import { Op, OpName, type Chunk, type FunctionPrototype, type VMValue, type VMObject, type VMClosure, type VMBuiltin, type VMContinuation, type CallFrame, NIL, TRUE, FALSE, vmKind, preconvertConstants } from './bytecode';
 import type { RuntimeValue } from '../core/types';
 import { createBuiltinGlobals } from './builtins';
 
@@ -61,6 +61,7 @@ function peek(vm: VM, distance: number = 0): VMValue {
 // --- Truthiness ---
 
 function isTruthy(value: VMValue): boolean {
+  if (typeof value === 'number') return true;
   if (value.kind === 'nil') return false;
   if (value.kind === 'boolean' && !value.value) return false;
   return true;
@@ -69,9 +70,10 @@ function isTruthy(value: VMValue): boolean {
 // --- Equality ---
 
 function valuesEqual(a: VMValue, b: VMValue): boolean {
+  if (typeof a === 'number') return typeof b === 'number' && a === b;
+  if (typeof b === 'number') return false;
   if (a.kind === 'nil' && b.kind === 'nil') return true;
   if (a.kind === 'boolean' && b.kind === 'boolean') return a.value === b.value;
-  if (a.kind === 'number' && b.kind === 'number') return a.value === b.value;
   if (a.kind === 'string' && b.kind === 'string') return a.value === b.value;
   if (a.kind === 'adt-value' && b.kind === 'adt-value') {
     if (a.constructor !== b.constructor) return false;
@@ -167,7 +169,20 @@ function runWithHandler(
 
 // --- Interpret ---
 
+/** Recursively pre-convert constant pools to VMValues */
+function ensureVmConstants(chunk: Chunk): void {
+  if (chunk.vmConstants) return;
+  chunk.vmConstants = preconvertConstants(chunk.constants);
+  for (const c of chunk.constants) {
+    if (c.kind === 'prototype') {
+      ensureVmConstants(c.proto.chunk);
+    }
+  }
+}
+
 export function interpret(vm: VM, chunk: Chunk): RuntimeValue {
+  ensureVmConstants(chunk);
+
   const scriptProto: FunctionPrototype = {
     name: '<script>',
     arity: 0,
@@ -204,15 +219,7 @@ function run(vm: VM, baseFrameCount: number): VMValue {
 
     switch (inst.op) {
       case Op.PUSH_CONST: {
-        const constant = frame.closure.proto.chunk.constants[inst.operand!];
-        switch (constant.kind) {
-          case 'number': push(vm, { kind: 'number', value: constant.value }); break;
-          case 'string': push(vm, { kind: 'string', value: constant.value }); break;
-          case 'boolean': push(vm, { kind: 'boolean', value: constant.value }); break;
-          case 'nil': push(vm, NIL); break;
-          case 'prototype':
-            throw new VMError('Cannot push prototype as value', getStackTrace(vm, frame));
-        }
+        push(vm, frame.closure.proto.chunk.vmConstants![inst.operand!]);
         break;
       }
 
@@ -247,7 +254,7 @@ function run(vm: VM, baseFrameCount: number): VMValue {
         if (name.kind !== 'string') throw new VMError('Global name must be string', getStackTrace(vm, frame));
         const value = pop(vm);
 
-        if (value.kind === 'string' && value.value.startsWith('\0ctor:')) {
+        if (typeof value !== 'number' && value.kind === 'string' && value.value.startsWith('\0ctor:')) {
           const parts = value.value.substring(6).split(':');
           const ctorName = parts[0];
           const arity = parseInt(parts[1], 10);
@@ -274,12 +281,12 @@ function run(vm: VM, baseFrameCount: number): VMValue {
       case Op.ADD: {
         const b = pop(vm);
         const a = pop(vm);
-        if (a.kind === 'number' && b.kind === 'number') {
-          push(vm, { kind: 'number', value: a.value + b.value });
-        } else if (a.kind === 'string' && b.kind === 'string') {
+        if (typeof a === 'number' && typeof b === 'number') {
+          push(vm, a + b);
+        } else if (typeof a !== 'number' && typeof b !== 'number' && a.kind === 'string' && b.kind === 'string') {
           push(vm, { kind: 'string', value: a.value + b.value });
         } else {
-          throw new VMError(`Cannot add ${a.kind} and ${b.kind}`, getStackTrace(vm, frame));
+          throw new VMError(`Cannot add ${vmKind(a)} and ${vmKind(b)}`, getStackTrace(vm, frame));
         }
         break;
       }
@@ -287,37 +294,37 @@ function run(vm: VM, baseFrameCount: number): VMValue {
       case Op.SUB: {
         const b = pop(vm);
         const a = pop(vm);
-        if (a.kind !== 'number' || b.kind !== 'number') {
+        if (typeof a !== 'number' || typeof b !== 'number') {
           throw new VMError('Subtraction requires numbers', getStackTrace(vm, frame));
         }
-        push(vm, { kind: 'number', value: a.value - b.value });
+        push(vm, a - b);
         break;
       }
 
       case Op.MUL: {
         const b = pop(vm);
         const a = pop(vm);
-        if (a.kind !== 'number' || b.kind !== 'number') {
+        if (typeof a !== 'number' || typeof b !== 'number') {
           throw new VMError('Multiplication requires numbers', getStackTrace(vm, frame));
         }
-        push(vm, { kind: 'number', value: a.value * b.value });
+        push(vm, a * b);
         break;
       }
 
       case Op.DIV: {
         const b = pop(vm);
         const a = pop(vm);
-        if (a.kind !== 'number' || b.kind !== 'number') {
+        if (typeof a !== 'number' || typeof b !== 'number') {
           throw new VMError('Division requires numbers', getStackTrace(vm, frame));
         }
-        push(vm, { kind: 'number', value: a.value / b.value });
+        push(vm, a / b);
         break;
       }
 
       case Op.NEG: {
         const a = pop(vm);
-        if (a.kind !== 'number') throw new VMError('Negate requires number', getStackTrace(vm, frame));
-        push(vm, { kind: 'number', value: -a.value });
+        if (typeof a !== 'number') throw new VMError('Negate requires number', getStackTrace(vm, frame));
+        push(vm, -a);
         break;
       }
 
@@ -326,53 +333,53 @@ function run(vm: VM, baseFrameCount: number): VMValue {
       case Op.EQ: {
         const b = pop(vm);
         const a = pop(vm);
-        push(vm, { kind: 'boolean', value: valuesEqual(a, b) });
+        push(vm, valuesEqual(a, b) ? TRUE : FALSE);
         break;
       }
 
       case Op.LT: {
         const b = pop(vm);
         const a = pop(vm);
-        if (a.kind !== 'number' || b.kind !== 'number') {
+        if (typeof a !== 'number' || typeof b !== 'number') {
           throw new VMError('< requires numbers', getStackTrace(vm, frame));
         }
-        push(vm, { kind: 'boolean', value: a.value < b.value });
+        push(vm, a < b ? TRUE : FALSE);
         break;
       }
 
       case Op.GT: {
         const b = pop(vm);
         const a = pop(vm);
-        if (a.kind !== 'number' || b.kind !== 'number') {
+        if (typeof a !== 'number' || typeof b !== 'number') {
           throw new VMError('> requires numbers', getStackTrace(vm, frame));
         }
-        push(vm, { kind: 'boolean', value: a.value > b.value });
+        push(vm, a > b ? TRUE : FALSE);
         break;
       }
 
       case Op.LE: {
         const b = pop(vm);
         const a = pop(vm);
-        if (a.kind !== 'number' || b.kind !== 'number') {
+        if (typeof a !== 'number' || typeof b !== 'number') {
           throw new VMError('<= requires numbers', getStackTrace(vm, frame));
         }
-        push(vm, { kind: 'boolean', value: a.value <= b.value });
+        push(vm, a <= b ? TRUE : FALSE);
         break;
       }
 
       case Op.GE: {
         const b = pop(vm);
         const a = pop(vm);
-        if (a.kind !== 'number' || b.kind !== 'number') {
+        if (typeof a !== 'number' || typeof b !== 'number') {
           throw new VMError('>= requires numbers', getStackTrace(vm, frame));
         }
-        push(vm, { kind: 'boolean', value: a.value >= b.value });
+        push(vm, a >= b ? TRUE : FALSE);
         break;
       }
 
       case Op.NOT: {
         const a = pop(vm);
-        push(vm, { kind: 'boolean', value: !isTruthy(a) });
+        push(vm, isTruthy(a) ? FALSE : TRUE);
         break;
       }
 
@@ -409,6 +416,10 @@ function run(vm: VM, baseFrameCount: number): VMValue {
       case Op.CALL: {
         const arity = inst.operand!;
         const callee = peek(vm, arity);
+
+        if (typeof callee === 'number') {
+          throw new VMError(`Cannot call number`, getStackTrace(vm, frame));
+        }
 
         if (callee.kind === 'vm-closure') {
           if (arity !== callee.proto.arity) {
@@ -460,6 +471,10 @@ function run(vm: VM, baseFrameCount: number): VMValue {
       case Op.TAIL_CALL: {
         const arity = inst.operand!;
         const callee = peek(vm, arity);
+
+        if (typeof callee === 'number') {
+          throw new VMError(`Cannot call number`, getStackTrace(vm, frame));
+        }
 
         if (callee.kind === 'vm-closure') {
           if (arity !== callee.proto.arity) {
@@ -556,6 +571,10 @@ function run(vm: VM, baseFrameCount: number): VMValue {
         const fieldIdx = inst.operand!;
         const value = peek(vm);
 
+        if (typeof value === 'number') {
+          throw new VMError(`GET_FIELD on number`, getStackTrace(vm, frame));
+        }
+
         if (value.kind === 'adt-value') {
           if (fieldIdx >= value.args.length) {
             throw new VMError(`Field index ${fieldIdx} out of bounds for ${value.constructor}`, getStackTrace(vm, frame));
@@ -583,6 +602,11 @@ function run(vm: VM, baseFrameCount: number): VMValue {
         if (nameConst.kind !== 'string') throw new VMError('MATCH_TAG name must be string', getStackTrace(vm, frame));
         const target = inst.operand2!;
         const value = peek(vm);
+
+        if (typeof value === 'number') {
+          frame.ip = target; // numbers never match a tag
+          break;
+        }
 
         let matches = false;
         if (value.kind === 'adt-value' && value.constructor === nameConst.value) {
@@ -712,7 +736,7 @@ function run(vm: VM, baseFrameCount: number): VMValue {
         const value = pop(vm);
         const cont = pop(vm);
 
-        if (cont.kind !== 'vm-continuation') {
+        if (typeof cont === 'number' || cont.kind !== 'vm-continuation') {
           throw new VMError('resume expects a continuation', getStackTrace(vm, frame));
         }
 
@@ -765,7 +789,7 @@ function run(vm: VM, baseFrameCount: number): VMValue {
 
       case Op.HALT: {
         const msg = pop(vm);
-        if (msg.kind === 'string') {
+        if (typeof msg !== 'number' && msg.kind === 'string') {
           throw new VMError(msg.value, getStackTrace(vm, frame));
         }
         throw new VMError('HALT', getStackTrace(vm, frame));
@@ -783,7 +807,7 @@ function tryDefaultHandler(opName: string, args: VMValue[]): VMValue | undefined
   switch (opName) {
     case 'print': {
       const msg = args[0];
-      if (msg?.kind === 'string') {
+      if (msg !== undefined && typeof msg !== 'number' && msg.kind === 'string') {
         process.stdout.write(msg.value);
       } else {
         process.stdout.write(formatVMValue(msg ?? NIL));
@@ -792,7 +816,7 @@ function tryDefaultHandler(opName: string, args: VMValue[]): VMValue | undefined
     }
     case 'println': {
       const msg = args[0];
-      if (msg?.kind === 'string') {
+      if (msg !== undefined && typeof msg !== 'number' && msg.kind === 'string') {
         console.log(msg.value);
       } else {
         console.log(formatVMValue(msg ?? NIL));
@@ -850,8 +874,8 @@ export class VMError extends Error {
 // --- Value Formatting ---
 
 export function formatVMValue(value: VMValue): string {
+  if (typeof value === 'number') return String(value);
   switch (value.kind) {
-    case 'number': return String(value.value);
     case 'boolean': return value.value ? '#t' : '#f';
     case 'nil': return 'nil';
     case 'string': return `"${value.value}"`;
@@ -869,8 +893,8 @@ export function formatVMValue(value: VMValue): string {
 // --- Value Conversion ---
 
 function toRuntimeValue(v: VMValue): RuntimeValue {
+  if (typeof v === 'number') return { kind: 'number', value: v };
   switch (v.kind) {
-    case 'number': return v;
     case 'boolean': return v;
     case 'nil': return v;
     case 'string': return v;

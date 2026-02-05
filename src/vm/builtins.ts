@@ -1,7 +1,7 @@
 // Builtin functions and globals for the Marlang VM
 
 import type { VMValue } from './bytecode';
-import { NIL } from './bytecode';
+import { NIL, TRUE, FALSE } from './bytecode';
 import { formatVMValue } from './vm';
 
 export function createBuiltinGlobals(): Map<string, VMValue> {
@@ -9,8 +9,8 @@ export function createBuiltinGlobals(): Map<string, VMValue> {
 
   // --- Builtin values ---
   globals.set('nil', NIL);
-  globals.set('#t', { kind: 'boolean', value: true });
-  globals.set('#f', { kind: 'boolean', value: false });
+  globals.set('#t', TRUE);
+  globals.set('#f', FALSE);
 
   // --- Built-in ADT constructors ---
   globals.set('None', { kind: 'adt-value', constructor: 'None', args: [] });
@@ -29,69 +29,75 @@ export function createBuiltinGlobals(): Map<string, VMValue> {
 
   // Arithmetic (variadic versions for when direct opcodes aren't used)
   builtin('+', (args) => {
-    const nums = args.map(a => {
-      if (a.kind !== 'number') throw new Error('+ expects numbers');
-      return a.value;
-    });
-    return { kind: 'number', value: nums.reduce((a, b) => a + b, 0) };
+    let sum = 0;
+    for (const a of args) {
+      if (typeof a !== 'number') throw new Error('+ expects numbers');
+      sum += a;
+    }
+    return sum;
   });
 
   builtin('-', (args) => {
     if (args.length === 0) throw new Error('- expects at least one argument');
-    const nums = args.map(a => {
-      if (a.kind !== 'number') throw new Error('- expects numbers');
-      return a.value;
-    });
-    if (nums.length === 1) return { kind: 'number', value: -nums[0] };
-    return { kind: 'number', value: nums.slice(1).reduce((a, b) => a - b, nums[0]) };
+    if (typeof args[0] !== 'number') throw new Error('- expects numbers');
+    if (args.length === 1) return -args[0];
+    let result = args[0];
+    for (let i = 1; i < args.length; i++) {
+      if (typeof args[i] !== 'number') throw new Error('- expects numbers');
+      result -= args[i] as number;
+    }
+    return result;
   });
 
   builtin('*', (args) => {
-    const nums = args.map(a => {
-      if (a.kind !== 'number') throw new Error('* expects numbers');
-      return a.value;
-    });
-    return { kind: 'number', value: nums.reduce((a, b) => a * b, 1) };
+    let product = 1;
+    for (const a of args) {
+      if (typeof a !== 'number') throw new Error('* expects numbers');
+      product *= a;
+    }
+    return product;
   });
 
   builtin('/', (args) => {
     if (args.length < 2) throw new Error('/ expects at least two arguments');
-    const nums = args.map(a => {
-      if (a.kind !== 'number') throw new Error('/ expects numbers');
-      return a.value;
-    });
-    return { kind: 'number', value: nums.slice(1).reduce((a, b) => a / b, nums[0]) };
+    if (typeof args[0] !== 'number') throw new Error('/ expects numbers');
+    let result = args[0];
+    for (let i = 1; i < args.length; i++) {
+      if (typeof args[i] !== 'number') throw new Error('/ expects numbers');
+      result /= args[i] as number;
+    }
+    return result;
   });
 
   builtin('negate', (args) => {
-    if (args.length !== 1 || args[0]?.kind !== 'number') throw new Error('negate expects one number');
-    return { kind: 'number', value: -args[0].value };
+    if (args.length !== 1 || typeof args[0] !== 'number') throw new Error('negate expects one number');
+    return -args[0];
   });
 
   // Comparison (for non-binary calls)
   builtin('<', (args) => {
-    if (args.length !== 2 || args[0]?.kind !== 'number' || args[1]?.kind !== 'number') throw new Error('< expects two numbers');
-    return { kind: 'boolean', value: args[0].value < args[1].value };
+    if (args.length !== 2 || typeof args[0] !== 'number' || typeof args[1] !== 'number') throw new Error('< expects two numbers');
+    return args[0] < args[1] ? TRUE : FALSE;
   });
 
   builtin('>', (args) => {
-    if (args.length !== 2 || args[0]?.kind !== 'number' || args[1]?.kind !== 'number') throw new Error('> expects two numbers');
-    return { kind: 'boolean', value: args[0].value > args[1].value };
+    if (args.length !== 2 || typeof args[0] !== 'number' || typeof args[1] !== 'number') throw new Error('> expects two numbers');
+    return args[0] > args[1] ? TRUE : FALSE;
   });
 
   builtin('=', (args) => {
-    if (args.length !== 2 || args[0]?.kind !== 'number' || args[1]?.kind !== 'number') throw new Error('= expects two numbers');
-    return { kind: 'boolean', value: args[0].value === args[1].value };
+    if (args.length !== 2 || typeof args[0] !== 'number' || typeof args[1] !== 'number') throw new Error('= expects two numbers');
+    return args[0] === args[1] ? TRUE : FALSE;
   });
 
   builtin('<=', (args) => {
-    if (args.length !== 2 || args[0]?.kind !== 'number' || args[1]?.kind !== 'number') throw new Error('<= expects two numbers');
-    return { kind: 'boolean', value: args[0].value <= args[1].value };
+    if (args.length !== 2 || typeof args[0] !== 'number' || typeof args[1] !== 'number') throw new Error('<= expects two numbers');
+    return args[0] <= args[1] ? TRUE : FALSE;
   });
 
   builtin('>=', (args) => {
-    if (args.length !== 2 || args[0]?.kind !== 'number' || args[1]?.kind !== 'number') throw new Error('>= expects two numbers');
-    return { kind: 'boolean', value: args[0].value >= args[1].value };
+    if (args.length !== 2 || typeof args[0] !== 'number' || typeof args[1] !== 'number') throw new Error('>= expects two numbers');
+    return args[0] >= args[1] ? TRUE : FALSE;
   });
 
   // List
