@@ -1,0 +1,9 @@
+; Effect-heavy benchmark: many perform/resume cycles
+(define loop (lambda (n acc)
+  (if (= n 0)
+    acc
+    (loop (- n 1) (+ acc (perform tick))))))
+
+(handle
+  (loop 1000 0)
+  ((tick k) -> (resume k 1)))

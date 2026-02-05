@@ -1,0 +1,15 @@
+; Pattern matching benchmark
+(data Tree Leaf (Node Tree Tree))
+
+(define build (lambda (depth)
+  (if (= depth 0)
+    Leaf
+    (let ((sub (build (- depth 1))))
+      (Node sub sub)))))
+
+(define count-leaves (lambda (t)
+  (match t
+    (Leaf 1)
+    ((Node l r) (+ (count-leaves l) (count-leaves r))))))
+
+(count-leaves (build 15))

@@ -3,11 +3,14 @@
 ## Running
 
 ```bash
-bun index.ts run <file.mar>              # Run with type checking
+bun index.ts run <file.mar>              # Run with type checking (tree-walker)
+bun index.ts run <file.mar> --vm         # Run with bytecode VM (faster)
 bun index.ts run <file.mar> --no-typecheck  # Skip type checking
 bun index.ts repl                        # Interactive REPL
 bun index.ts typecheck <file.mar>        # Type check only
 bun index.ts typecheck <file.mar> --verbose  # Type check with inferred types
+bun index.ts disasm <file.mar>           # Disassemble to bytecode
+bun bench/run.ts                         # Run benchmarks
 ```
 
 ## Testing
@@ -23,12 +26,14 @@ Tests are in `spec/` directory using bun:test.
 
 ```
 src/
-  core/       - Core pipeline
+  core/       - Core pipeline (lexer, parser, tree-walker interpreter)
+  vm/         - Bytecode VM (compiler, VM, builtins, debug)
   types/      - Type system
   modules/    - Module system
 lsp/          - Language server
 spec/         - Tests
 stdlib/       - Standard library
+bench/        - Benchmarks (tree-walker vs VM)
 web/          - Web playground
 ```
 
@@ -47,6 +52,14 @@ web/          - Web playground
 - `type-builtins.ts` - Built-in types (Int, Float, Bool, String) and typeclasses (Num, Eq, Ord)
 - `type-checker.ts` - Main entry point for type checking
 - `type-errors.ts` - Error types and formatting
+
+### Bytecode VM (`src/vm/`)
+- `bytecode.ts` - Opcodes, instructions, chunks, VM value types (VMValue, VMClosure, VMContinuation)
+- `compiler.ts` - AST → bytecode compiler with flat closures and upvalue capture
+- `vm.ts` - Stack-based VM with algebraic effect system (handler frames, continuations)
+- `builtins.ts` - Built-in globals for the VM (arithmetic, comparison, list, show, ADT constructors)
+- `debug.ts` - Bytecode disassembler (formatInstruction, getAnnotation)
+- `index.ts` - Public API exports (compileProgram, createVM, interpret, etc.)
 
 ### Module System (`src/modules/`)
 - `module-loader.ts` - Path resolution and file loading

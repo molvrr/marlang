@@ -1,9 +1,10 @@
 # Marlang
 
-A Lisp-like interpreter written in TypeScript, running on Bun. Features include a Haskell-style static type system, algebraic data types, pattern matching, closures, tail call optimization, and a Foreign Function Interface (FFI) for calling native C libraries.
+A Lisp-like language written in TypeScript, running on Bun. Features include a bytecode VM, a Haskell-style static type system, algebraic data types, pattern matching, algebraic effects with delimited continuations, closures, tail call optimization, and a Foreign Function Interface (FFI) for calling native C libraries.
 
 ## Features
 
+- **Bytecode VM**: Stack-based bytecode compiler and virtual machine (2-70x faster than tree-walker)
 - **Type System**: Static type checking with local inference, parametric polymorphism, and typeclasses
 - **Algebraic Data Types**: Define sum types with constructors
 - **Pattern Matching**: Destructure values with `match` expressions
@@ -32,10 +33,22 @@ Run a Marlang file:
 bun index.ts run <filename.mar>
 ```
 
+Run with the bytecode VM (faster execution):
+
+```bash
+bun index.ts run <filename.mar> --vm
+```
+
 Run without type checking:
 
 ```bash
 bun index.ts run <filename.mar> --no-typecheck
+```
+
+Disassemble a file to view bytecode:
+
+```bash
+bun index.ts disasm <filename.mar>
 ```
 
 Type check without running:
@@ -61,6 +74,12 @@ Run the test suite:
 
 ```bash
 bun test
+```
+
+Run benchmarks (tree-walker vs VM):
+
+```bash
+bun bench/run.ts
 ```
 
 ## Language Reference
@@ -623,12 +642,21 @@ lspconfig.marlang.setup({})
 
 ## Architecture
 
-The interpreter follows a classic pipeline:
+Marlang has two execution backends:
 
 1. **Lexer** (`lexer.ts`) - tokenizes source code into tokens
 2. **Parser** (`parser.ts`) - builds an AST of S-expressions
 3. **Type Checker** (`type-checker.ts`) - validates types statically
-4. **Interpreter** (`interpreter.ts`) - evaluates the AST with tail call optimization
+4. **Tree-walker** (`interpreter.ts`) - evaluates the AST directly (default)
+5. **Bytecode VM** (`src/vm/`) - compiles to bytecode and runs on a stack-based VM (`--vm` flag)
+
+### Bytecode VM (`src/vm/`)
+
+- **`bytecode.ts`** - Bytecode IR: opcodes, instructions, chunks, VM value types
+- **`compiler.ts`** - Compiles AST to bytecode with flat closures and upvalue capture
+- **`vm.ts`** - Stack-based virtual machine with algebraic effect support
+- **`builtins.ts`** - Built-in globals for the VM (arithmetic, comparison, ADT constructors)
+- **`debug.ts`** - Bytecode disassembler
 
 ### Type System Architecture
 
@@ -643,38 +671,49 @@ The interpreter follows a classic pipeline:
 
 ```
 marlang/
-├── index.ts           # CLI entry point
-├── lexer.ts           # Tokenizer with position tracking
-├── parser.ts          # S-expression parser
-├── types.ts           # AST and runtime value types
-├── interpreter.ts     # Tree-walking interpreter with TCO
-├── module-loader.ts   # Module path resolution and loading
-├── module-types.ts    # Module system types
-├── type-*.ts          # Type system modules
-├── stdlib/            # Standard library
-│   ├── option.mar     # Option type utilities
-│   ├── result.mar     # Result type and utilities
-│   └── io.mar         # IO effect and operations
-├── lsp/               # Language Server Protocol
-│   ├── server.ts      # LSP server entry point
-│   ├── protocol.ts    # JSON-RPC message handling
-│   ├── document.ts    # Open document management
-│   ├── analyzer.ts    # Analysis pipeline
-│   └── handlers/      # LSP request handlers
-│       ├── diagnostics.ts
-│       ├── hover.ts
-│       ├── definition.ts
-│       └── completion.ts
-├── spec/              # Test suite
-│   ├── lexer.test.ts
-│   ├── parser.test.ts
+├── index.ts              # CLI entry point
+├── src/
+│   ├── core/             # Core pipeline
+│   │   ├── lexer.ts      # Tokenizer with position tracking
+│   │   ├── parser.ts     # S-expression parser
+│   │   ├── types.ts      # AST and runtime value types
+│   │   ├── interpreter.ts # Tree-walking interpreter with TCO
+│   │   └── io-handlers.ts # Native IO effect handlers
+│   ├── vm/               # Bytecode VM
+│   │   ├── bytecode.ts   # Opcodes, instructions, VM value types
+│   │   ├── compiler.ts   # AST → bytecode compiler
+│   │   ├── vm.ts         # Stack-based VM with effect system
+│   │   ├── builtins.ts   # VM built-in globals
+│   │   ├── debug.ts      # Bytecode disassembler
+│   │   └── index.ts      # Public API exports
+│   ├── types/            # Type system modules
+│   └── modules/          # Module system
+├── stdlib/               # Standard library
+│   ├── option.mar        # Option type utilities
+│   ├── result.mar        # Result type and utilities
+│   └── io.mar            # IO effect and operations
+├── lsp/                  # Language Server Protocol
+│   ├── server.ts         # LSP server entry point
+│   ├── protocol.ts       # JSON-RPC message handling
+│   ├── document.ts       # Open document management
+│   ├── analyzer.ts       # Analysis pipeline
+│   └── handlers/         # LSP request handlers
+├── bench/                # Benchmarks (tree-walker vs VM)
+│   ├── run.ts            # Benchmark runner
+│   ├── fib.mar           # Recursive fibonacci
+│   ├── fib-tail.mar      # Tail-recursive fibonacci
+│   ├── sum-loop.mar      # Sum 1 to N
+│   ├── pattern.mar       # ADT pattern matching
+│   └── effects.mar       # Effect perform/resume cycles
+├── spec/                 # Test suite
+│   ├── vm.test.ts        # Bytecode VM tests
 │   ├── interpreter.test.ts
-│   ├── tco.test.ts
+│   ├── effects.test.ts
 │   ├── type-system.test.ts
-│   ├── stdlib.test.ts
-│   └── lsp.test.ts
+│   └── ...
 └── examples/
-    ├── types.mar      # Type system demo
-    ├── effects.mar    # Algebraic effects demo
-    └── raylib.mar     # Raylib graphics bindings
+    ├── types.mar         # Type system demo
+    ├── effects.mar       # Algebraic effects demo
+    ├── factorial.mar     # Factorial example
+    └── raylib.mar        # Raylib graphics bindings
 ```

@@ -1,0 +1,7 @@
+; Tail-recursive fibonacci with accumulator
+(define fib-tail (lambda (n a b)
+  (if (= n 0)
+    a
+    (fib-tail (- n 1) b (+ a b)))))
+
+(fib-tail 30 0 1)

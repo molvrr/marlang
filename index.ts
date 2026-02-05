@@ -5,6 +5,7 @@ import * as Lexer from './src/core/lexer';
 import * as Parser from './src/core/parser';
 import * as Interpreter from './src/core/interpreter';
 import { typeCheck, formatError, formatTypes } from './src/types/type-checker';
+import { compileProgram, createVM, interpret, formatVMValue, VMError, disassemble } from './src/vm';
 
 // Register native IO handlers
 import './src/core/io-handlers';
@@ -15,27 +16,30 @@ const printUsage = () => {
   console.log(`Usage: mar <command> [options]
 
 Commands:
-  run <file.mar> [--no-typecheck]  Run a Marlang file
-  repl                             Start interactive REPL
-  typecheck <file.mar> [--verbose] Type check a file without running
-  lsp                              Start the Language Server Protocol server
+  run <file.mar> [--vm] [--no-typecheck]  Run a Marlang file
+  repl                                     Start interactive REPL
+  typecheck <file.mar> [--verbose]         Type check a file without running
+  disasm <file.mar>                        Disassemble bytecode
+  lsp                                      Start the Language Server Protocol server
 
 Examples:
   mar run examples/factorial.mar
+  mar run examples/factorial.mar --vm
   mar run examples/factorial.mar --no-typecheck
   mar repl
   mar typecheck examples/factorial.mar
-  mar typecheck examples/factorial.mar --verbose
+  mar disasm examples/factorial.mar
   mar lsp`);
 };
 
 const runFile = async () => {
   const filename = process.argv[3];
   const noTypecheck = process.argv.includes('--no-typecheck');
+  const useVM = process.argv.includes('--vm');
 
   if (!filename) {
     console.error('Error: Missing filename');
-    console.error('Usage: mar run <file.mar> [--no-typecheck]');
+    console.error('Usage: mar run <file.mar> [--vm] [--no-typecheck]');
     process.exit(1);
   }
 
@@ -56,13 +60,28 @@ const runFile = async () => {
       }
     }
 
-    const result = Interpreter.evalMany(Interpreter.empty(absolutePath), parsed.exprs);
+    if (useVM) {
+      const chunk = compileProgram(parsed.exprs);
+      const vm = createVM();
+      const result = interpret(vm, chunk);
 
-    // Print the final result if it's not nil
-    if (result.value.kind !== 'nil') {
-      console.log(Interpreter.formatValue(result.value));
+      if (result.kind !== 'nil') {
+        const { formatValue } = require('./src/core/interpreter');
+        console.log(formatValue(result));
+      }
+    } else {
+      const result = Interpreter.evalMany(Interpreter.empty(absolutePath), parsed.exprs);
+
+      if (result.value.kind !== 'nil') {
+        console.log(Interpreter.formatValue(result.value));
+      }
     }
   } catch (e) {
+    if (e instanceof VMError) {
+      console.error(`VM Error: ${e.message}`);
+      console.error(e.formatTrace());
+      process.exit(1);
+    }
     console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
   }
@@ -148,6 +167,29 @@ const typecheckFile = async () => {
   }
 };
 
+const disasmFile = async () => {
+  const filename = process.argv[3];
+
+  if (!filename) {
+    console.error('Error: Missing filename');
+    console.error('Usage: mar disasm <file.mar>');
+    process.exit(1);
+  }
+
+  const file = Bun.file(filename);
+  const code = await file.text();
+
+  try {
+    const tokens = Lexer.lex(Lexer.empty(code));
+    const parsed = Parser.parse(Parser.empty(tokens));
+    const chunk = compileProgram(parsed.exprs);
+    console.log(disassemble(chunk));
+  } catch (e) {
+    console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
+};
+
 switch (command) {
   case 'run':
     await runFile();
@@ -157,6 +199,9 @@ switch (command) {
     break;
   case 'typecheck':
     await typecheckFile();
+    break;
+  case 'disasm':
+    await disasmFile();
     break;
   case 'lsp':
     await import('./lsp/server');

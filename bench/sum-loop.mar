@@ -1,0 +1,7 @@
+; Sum 1 to N using tail recursion
+(define sum (lambda (n acc)
+  (if (= n 0)
+    acc
+    (sum (- n 1) (+ acc n)))))
+
+(sum 100000 0)
