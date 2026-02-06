@@ -48,10 +48,17 @@ Rust eliminates all four. The language is a natural fit: Marlang's VM is already
 | Peak RSS (`fib(40)`) | ~45 MB | < 15 MB | ≥ 3× |
 | Binary size | N/A (needs Bun) | < 10 MB | standalone |
 
+### Concurrency Target
+
+| Metric | TypeScript (Bun) | Rust Target | Improvement |
+|--------|------------------|-------------|-------------|
+| `fib(40)` parallel × N cores | N/A (single-threaded) | Near-linear scaling | multi-core |
+| Fiber spawn overhead | ~2 μs | < 0.5 μs | ≥ 4× |
+| Cross-thread message latency | N/A | < 1 μs | native threads |
+
 ### Non-Goals (for initial port)
 
 - JIT compilation — the bytecode interpreter is sufficient
-- Multi-threaded VM — keep single-threaded execution with async I/O
 
 ---
 
@@ -175,24 +182,52 @@ impl LineMap {
 
 ### 3.2 String Interning
 
-Symbols, identifiers, and global names appear repeatedly. Intern them once:
+Symbols, identifiers, and global names appear repeatedly. Intern them once. The interner is **thread-safe** — shared across all scheduler threads via `Arc`:
 
 ```rust
 /// Interned string handle — 4 bytes, Copy, Eq, Hash.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Symbol(u32);
 
-/// Global interner. Single-threaded — no locking needed.
+/// Thread-safe global interner — shared across all scheduler threads.
+/// Read-heavy, write-rare: RwLock allows concurrent resolution with
+/// infrequent contention during compilation/loading.
+/// Strings are leaked to 'static — safe because interning is append-only
+/// and the interner lives for the process lifetime.
 pub struct Interner {
-    map: HashMap<&'static str, Symbol>,
-    strings: Vec<&'static str>,
+    map: RwLock<HashMap<&'static str, Symbol>>,
+    strings: RwLock<Vec<&'static str>>,
 }
 
 impl Interner {
-    pub fn intern(&mut self, s: &str) -> Symbol { /* ... */ }
-    pub fn resolve(&self, sym: Symbol) -> &str { /* ... */ }
+    /// Intern a string. Takes write lock only if the string is new.
+    pub fn intern(&self, s: &str) -> Symbol {
+        // Fast path: read lock
+        if let Some(&sym) = self.map.read().unwrap().get(s) {
+            return sym;
+        }
+        // Slow path: write lock, double-check
+        let mut map = self.map.write().unwrap();
+        if let Some(&sym) = map.get(s) {
+            return sym;
+        }
+        let mut strings = self.strings.write().unwrap();
+        let leaked: &'static str = Box::leak(s.to_string().into_boxed_str());
+        let sym = Symbol(strings.len() as u32);
+        strings.push(leaked);
+        map.insert(leaked, sym);
+        sym
+    }
+
+    /// Resolve a symbol to its string. Lock-free on the common path via
+    /// indexing into the append-only strings vector.
+    pub fn resolve(&self, sym: Symbol) -> &str {
+        self.strings.read().unwrap()[sym.0 as usize]
+    }
 }
 ```
+
+> **Note:** The interner is wrapped in `Arc<Interner>` and shared across all scheduler threads. Since symbol resolution dominates (during VM execution) and interning is rare (only during compilation/loading), the `RwLock` contention is negligible. An alternative is `DashMap`, but the read-heavy pattern favors `RwLock`.
 
 ### 3.3 AST (Expr)
 
@@ -936,15 +971,33 @@ fn compile_pattern(&mut self, pattern: &Expr) -> Vec<FailPatch> {
 
 ### VM State
 
+Each scheduler thread owns its own `VM` instance. The VM is **not** `Send` or `Sync` — it is thread-local. Shared state (interner, globals, process registry) is accessed through `Arc`-wrapped structures:
+
 ```rust
+/// Per-thread VM state. Each scheduler thread owns one.
+/// NOT Send/Sync — exclusively owned by its scheduler thread.
 pub struct VM {
     pub stack: Vec<Value>,
     pub stack_top: usize,
     pub frames: Vec<CallFrame>,
     pub frame_count: usize,
-    pub globals: HashMap<Symbol, Value>,
     pub handler_stack: Vec<VMHandlerFrame>,
+
+    /// Thread-local copy of globals. Populated at startup from SharedState.
+    /// Fibers running on this thread see this snapshot. New defines are
+    /// broadcast to other schedulers via the shared globals (eventual consistency).
+    pub globals: HashMap<Symbol, Value>,
+
+    /// Shared state — Arc-cloned from the runtime.
+    pub shared: Arc<SharedState>,
+}
+
+/// State shared across all scheduler threads (read-heavy, write-rare).
+pub struct SharedState {
     pub interner: Interner,
+    pub globals: RwLock<HashMap<Symbol, Value>>,
+    pub process_registry: ProcessRegistry,
+    pub channel_registry: ChannelRegistry,
 }
 ```
 
@@ -1116,7 +1169,7 @@ Built-in IO effects that work without an explicit `handle` block (matching `tryD
 
 ```rust
 fn try_default_handler(vm: &mut VM, op_name: Symbol, args: &[Value]) -> Option<Value> {
-    let name = vm.interner.resolve(op_name);
+    let name = vm.shared.interner.resolve(op_name);
     match name {
         "print"      => { print!("{}", format_value(args[0])); Some(Value::NIL) }
         "println"    => { println!("{}", format_value(args[0])); Some(Value::NIL) }
@@ -1132,38 +1185,116 @@ fn try_default_handler(vm: &mut VM, op_name: Symbol, args: &[Value]) -> Option<V
 
 ## 8. Concurrency
 
-### Architecture
+### Architecture: BEAM-Inspired Multi-Scheduler
 
-The TypeScript scheduler (`src/vm/scheduler.ts`) is an async trampoline that:
-1. Runs fibers cooperatively (sync phase)
-2. Awaits pending IO (drain phase via `Promise.race`)
-3. Loops until all fibers complete and no IO is pending
+The TypeScript scheduler (`src/vm/scheduler.ts`) is a single-threaded async trampoline. The Rust port goes further: a **multi-scheduler architecture** inspired by Erlang/BEAM, where N scheduler threads each own a VM instance and cooperatively execute fibers across all available cores.
 
-In Rust, use **Tokio** with a `LocalSet` for the same single-threaded cooperative model:
+```
+┌──────────────────────────────────────────────────────────┐
+│                    SharedState (Arc)                       │
+│  ┌───────────┐ ┌─────────────────┐ ┌──────────────────┐ │
+│  │ Interner  │ │ ProcessRegistry │ │ ChannelRegistry  │ │
+│  │ (RwLock)  │ │   (DashMap)     │ │   (DashMap)      │ │
+│  └───────────┘ └─────────────────┘ └──────────────────┘ │
+│  ┌────────────────────┐ ┌──────────────────────────────┐ │
+│  │ Globals (RwLock)   │ │ Global PID Counter (AtomicU64)│ │
+│  └────────────────────┘ └──────────────────────────────┘ │
+└──────────────────────────────────────────────────────────┘
+        │              │              │              │
+  ┌─────┴─────┐  ┌─────┴─────┐  ┌─────┴─────┐     │
+  │ Sched #0  │  │ Sched #1  │  │ Sched #N  │  (one per core)
+  │ ┌───────┐ │  │ ┌───────┐ │  │ ┌───────┐ │
+  │ │ VM #0 │ │  │ │ VM #1 │ │  │ │ VM #N │ │
+  │ └───────┘ │  │ └───────┘ │  │ └───────┘ │
+  │ ┌───────┐ │  │ ┌───────┐ │  │ ┌───────┐ │
+  │ │ Ready │ │  │ │ Ready │ │  │ │ Ready │ │
+  │ │ Queue │ │  │ │ Queue │ │  │ │ Queue │ │
+  │ └───────┘ │  │ └───────┘ │  │ └───────┘ │
+  │ ┌───────┐ │  │ ┌───────┐ │  │ ┌───────┐ │
+  │ │ Steal │ │  │ │ Steal │ │  │ │ Steal │ │
+  │ │ Deque │ │  │ │ Deque │ │  │ │ Deque │ │
+  │ └───────┘ │  │ └───────┘ │  │ └───────┘ │
+  │  inbox ◄──┼──┼───────────┼──┼───────────│
+  └───────────┘  └───────────┘  └───────────┘
+```
+
+**Key design principles:**
+
+1. **Shared-nothing VM execution** — each scheduler thread owns a `VM` exclusively (`&mut self`). No locks during bytecode execution.
+2. **Message passing between threads** — actor sends and channel operations crossing thread boundaries go through lock-free MPSC queues.
+3. **Work stealing** — idle schedulers steal fibers from busy ones via `crossbeam-deque`.
+4. **Cooperative within each thread** — fibers yield at effect boundaries (same as TypeScript). No preemption.
+5. **Values are `Send`** — `Arc<VMObject>` is `Send + Sync`, so values can safely cross thread boundaries in messages.
+
+### Scheduler Thread
 
 ```rust
-use tokio::task::LocalSet;
-
+/// One scheduler thread — owns a VM and runs fibers cooperatively.
+/// N of these run in parallel (one per core).
 pub struct Scheduler {
+    id: usize,
     vm: VM,
+
+    /// Local ready queue — LIFO for cache locality.
     ready_queue: VecDeque<Fiber>,
+    /// Work-stealing deque — other schedulers steal from here.
+    steal_deque: crossbeam_deque::Worker<Fiber>,
+    /// Stealers for all other schedulers (read-only after init).
+    other_stealers: Vec<crossbeam_deque::Stealer<Fiber>>,
+
+    /// Inbox for cross-thread messages (fibers migrated from other threads,
+    /// actor messages, channel wakeups).
+    inbox: crossbeam_channel::Receiver<SchedulerMessage>,
+    /// Sender cloned and given to SharedState for routing.
+    inbox_sender: crossbeam_channel::Sender<SchedulerMessage>,
+
+    /// Pending async IO for this scheduler's fibers.
     pending_io: HashMap<u64, PendingIO>,
     active_servers: usize,
-    waker: Option<tokio::sync::oneshot::Sender<()>>,
 
-    // Actor state
+    /// Parked fibers waiting on actor receive, channel recv, TCP accept, etc.
+    parked: HashMap<u64, ParkedFiber>,
+
+    /// Local actor state (mailboxes for PIDs owned by this scheduler).
     mailboxes: HashMap<u64, VecDeque<Value>>,
     monitors: HashMap<u64, Vec<u64>>,
     links: HashMap<u64, HashSet<u64>>,
     trap_exit: HashSet<u64>,
 
-    // Channel state
-    channels: HashMap<u64, ChannelState>,
+    /// Result of the main fiber (scheduler 0 only).
+    result: Option<Value>,
 }
 
+/// A fiber — must be `Send` so it can be stolen by another scheduler thread.
+/// This is guaranteed because:
+///   - `Arc<Closure>` is Send (Arc<T> is Send when T: Send + Sync)
+///   - `VMContinuation` contains Vec<CallFrame>, Vec<Value>, Vec<VMHandlerFrame> — all Send
+///   - `Value` (u64 NaN-boxed) is Send; object pointers are Arc<VMObject> which is Send
 pub enum Fiber {
     New { closure: Arc<Closure>, pid: u64 },
     Suspended { continuation: VMContinuation, resume_value: Value, pid: u64 },
+}
+
+impl Fiber {
+    pub fn pid(&self) -> u64 {
+        match self {
+            Fiber::New { pid, .. } | Fiber::Suspended { pid, .. } => *pid,
+        }
+    }
+}
+
+/// Messages sent between scheduler threads.
+pub enum SchedulerMessage {
+    /// A fiber migrated to this scheduler (from work stealing or spawn).
+    Fiber(Fiber),
+    /// An actor message delivered to a PID on this scheduler.
+    ActorMessage { target_pid: u64, message: Value },
+    /// A channel send to a channel with a parked receiver on this scheduler.
+    ChannelWake { channel_id: u64, value: Value },
+    /// A fiber's IO completed — wake it with the result.
+    IoComplete { fiber_pid: u64, result: Value },
+    /// Shutdown signal.
+    Shutdown,
 }
 
 pub enum PendingIO {
@@ -1173,33 +1304,121 @@ pub enum PendingIO {
 }
 ```
 
+### Shared Registries
+
+```rust
+/// Maps PID → scheduler ID. Used to route actor messages and monitor notifications.
+pub struct ProcessRegistry {
+    /// PID → (scheduler_id, is_alive)
+    pids: DashMap<u64, ProcessEntry>,
+    next_pid: AtomicU64,
+}
+
+struct ProcessEntry {
+    scheduler_id: usize,
+    alive: bool,
+}
+
+impl ProcessRegistry {
+    /// Register a new process on a scheduler. Returns the PID.
+    pub fn spawn(&self, scheduler_id: usize) -> u64 {
+        let pid = self.next_pid.fetch_add(1, Ordering::Relaxed);
+        self.pids.insert(pid, ProcessEntry { scheduler_id, alive: true });
+        pid
+    }
+
+    /// Look up which scheduler owns a PID.
+    pub fn lookup(&self, pid: u64) -> Option<usize> {
+        self.pids.get(&pid).map(|e| e.scheduler_id)
+    }
+
+    /// Mark a process as dead (for monitors/links).
+    pub fn mark_dead(&self, pid: u64) {
+        if let Some(mut entry) = self.pids.get_mut(&pid) {
+            entry.alive = false;
+        }
+    }
+}
+
+/// Global channel state — channels may span scheduler threads.
+pub struct ChannelRegistry {
+    channels: DashMap<u64, ChannelState>,
+    next_id: AtomicU64,
+}
+
+pub struct ChannelState {
+    buffer: VecDeque<Value>,
+    /// Scheduler ID of a parked receiver (if any).
+    parked_receiver: Option<(usize, u64)>, // (scheduler_id, fiber_pid)
+    /// Scheduler ID of a parked sender (if any, for bounded channels).
+    parked_sender: Option<(usize, u64)>,
+    closed: bool,
+}
+```
+
 ### Main Scheduler Loop
+
+Each scheduler thread runs this loop independently:
 
 ```rust
 impl Scheduler {
-    pub async fn run_fibers(mut self, closure: Arc<Closure>) -> Value {
-        let main_pid = self.spawn_fiber(closure);
-
+    pub async fn run(mut self) {
         loop {
-            // SYNC PHASE: run all ready fibers
+            // 1. DRAIN INBOX: process cross-thread messages
+            self.drain_inbox();
+
+            // 2. SYNC PHASE: run all ready fibers (cooperative, no preemption)
             while let Some(fiber) = self.ready_queue.pop_front() {
                 self.run_fiber(fiber);
+                // After each fiber, check inbox for urgent messages
+                self.drain_inbox();
             }
 
-            // Termination check
-            if self.pending_io.is_empty() && self.active_servers == 0 {
-                break;
+            // 3. CHECK TERMINATION
+            if self.is_idle() {
+                // Notify runtime we're idle (for global termination detection)
+                if self.try_steal() {
+                    continue; // Stole work — keep going
+                }
+                // No work anywhere — wait for inbox or IO
             }
 
-            // DRAIN PHASE: await IO completion
-            self.drain_pending_io().await;
+            // 4. DRAIN PHASE: await IO completion or inbox messages
+            if !self.pending_io.is_empty() || self.active_servers > 0 {
+                self.drain_pending_io().await;
+            } else {
+                // Park until inbox has a message
+                self.wait_for_inbox().await;
+            }
         }
+    }
 
-        self.result.unwrap_or(Value::NIL)
+    fn drain_inbox(&mut self) {
+        while let Ok(msg) = self.inbox.try_recv() {
+            match msg {
+                SchedulerMessage::Fiber(fiber) => {
+                    self.ready_queue.push_back(fiber);
+                }
+                SchedulerMessage::ActorMessage { target_pid, message } => {
+                    self.deliver_actor_message(target_pid, message);
+                }
+                SchedulerMessage::ChannelWake { channel_id, value } => {
+                    self.wake_channel_receiver(channel_id, value);
+                }
+                SchedulerMessage::IoComplete { fiber_pid, result } => {
+                    self.wake_fiber(fiber_pid, result);
+                }
+                SchedulerMessage::Shutdown => return,
+            }
+        }
     }
 
     fn run_fiber(&mut self, fiber: Fiber) {
-        // Save VM state, run fiber, handle RunResult
+        let pid = fiber.pid();
+        // Save/restore VM state for fiber isolation
+        let saved_frame_count = self.vm.frame_count;
+        let saved_stack_top = self.vm.stack_top;
+
         let result = match fiber {
             Fiber::New { closure, .. } => self.vm.call_closure(&closure, &[]),
             Fiber::Suspended { mut continuation, resume_value, .. } => {
@@ -1208,48 +1427,252 @@ impl Scheduler {
         };
 
         match result {
-            RunResult::Ok(value) => { /* fiber completed */ }
+            RunResult::Ok(value) => {
+                self.fiber_completed(pid, value);
+            }
             RunResult::Effect(signal) => {
-                self.handle_effect(signal);
+                self.handle_effect(pid, signal);
             }
         }
+
+        // Restore VM state
+        self.vm.frame_count = saved_frame_count;
+        self.vm.stack_top = saved_stack_top;
     }
+}
+```
 
-    fn handle_effect(&mut self, signal: EffectSignal) {
-        let name = self.vm.interner.resolve(signal.op_name);
+### Work Stealing
+
+When a scheduler's ready queue is empty, it tries to steal fibers from other schedulers:
+
+```rust
+impl Scheduler {
+    fn try_steal(&self) -> bool {
+        // Try each other scheduler in random order
+        let start = fastrand::usize(..self.other_stealers.len());
+        for i in 0..self.other_stealers.len() {
+            let idx = (start + i) % self.other_stealers.len();
+            match self.other_stealers[idx].steal_batch_and_pop(&self.steal_deque) {
+                crossbeam_deque::Steal::Success(fiber) => {
+                    self.ready_queue.push_back(fiber);
+                    // Drain any batch-stolen fibers from our deque
+                    while let Some(f) = self.steal_deque.pop() {
+                        self.ready_queue.push_back(f);
+                    }
+                    return true;
+                }
+                _ => continue,
+            }
+        }
+        false
+    }
+}
+```
+
+> **Fiber migration:** When a fiber is stolen, its `VMContinuation` (captured frames, stack, handler stack) moves to the new scheduler. Since `Value` uses `Arc<VMObject>` (which is `Send`), the continuation is safe to send across threads. The stealing scheduler resumes the fiber on its own `VM` instance.
+
+### Effect Handling (Multi-Threaded)
+
+```rust
+impl Scheduler {
+    fn handle_effect(&mut self, pid: u64, signal: EffectSignal) {
+        let name = self.vm.shared.interner.resolve(signal.op_name);
         match name {
-            // Layer 1: Fibers + Channels
-            "fiber-spawn" => { /* create new fiber, resume parent first */ }
-            "fiber-yield" => { /* re-queue current fiber */ }
-            "fiber-self"  => { /* resume with current PID */ }
-            "chan-new"    => { /* create channel, resume with ID */ }
-            "chan-send"   => { /* send to channel, wake receiver if parked */ }
-            "chan-recv"   => { /* receive or park */ }
-            "chan-close"  => { /* close channel */ }
+            // === Layer 1: Fibers + Channels ===
 
-            // Layer 2: Actors
-            "actor-send"          => { /* deliver to mailbox */ }
-            "actor-receive"       => { /* pop from mailbox or park */ }
-            "actor-receive-match" => { /* selective receive */ }
-            "actor-monitor"       => { /* register monitor */ }
-            "actor-link"          => { /* bidirectional link */ }
-            "actor-unlink"        => { /* remove link */ }
-            "actor-trap-exit"     => { /* enable exit trapping */ }
+            "fiber-spawn" => {
+                // Extract closure from args
+                let closure = extract_closure(&signal.args[0]);
+                let child_pid = self.vm.shared.process_registry.spawn(self.id);
 
-            // Layer 3: IO
-            "print" | "println" | "read-line" | "read-file" | "write-file" => {
-                /* synchronous IO, resume immediately */
+                // Resume parent FIRST (critical for monitor/link setup)
+                self.ready_queue.push_back(Fiber::Suspended {
+                    continuation: signal.continuation,
+                    resume_value: Value::from_object(Arc::new(VMObject::Pid(child_pid))),
+                    pid,
+                });
+
+                // Distribute child to least-loaded scheduler (or self)
+                let target = self.pick_scheduler_for_spawn();
+                if target == self.id {
+                    self.ready_queue.push_back(Fiber::New { closure, pid: child_pid });
+                } else {
+                    self.send_to_scheduler(target, SchedulerMessage::Fiber(
+                        Fiber::New { closure, pid: child_pid }
+                    ));
+                }
             }
 
-            // Layer 4: Networking
-            "tcp-connect" => { /* spawn Tokio task, add to pending_io */ }
+            "fiber-yield" => {
+                // Re-queue at back
+                self.ready_queue.push_back(Fiber::Suspended {
+                    continuation: signal.continuation,
+                    resume_value: Value::NIL,
+                    pid,
+                });
+            }
+
+            "fiber-self" => {
+                self.ready_queue.push_back(Fiber::Suspended {
+                    continuation: signal.continuation,
+                    resume_value: Value::from_object(Arc::new(VMObject::Pid(pid))),
+                    pid,
+                });
+            }
+
+            "chan-new" => {
+                let id = self.vm.shared.channel_registry.create();
+                self.ready_queue.push_back(Fiber::Suspended {
+                    continuation: signal.continuation,
+                    resume_value: Value::from_object(Arc::new(VMObject::Channel(id))),
+                    pid,
+                });
+            }
+
+            "chan-send" => {
+                let chan_id = extract_channel_id(&signal.args[0]);
+                let value = signal.args[1].clone();
+                // Channel send may wake a receiver on ANOTHER scheduler
+                let wake_target = self.vm.shared.channel_registry.send(chan_id, value);
+                if let Some((sched_id, receiver_pid, val)) = wake_target {
+                    if sched_id == self.id {
+                        self.wake_fiber(receiver_pid, val);
+                    } else {
+                        self.send_to_scheduler(sched_id, SchedulerMessage::ChannelWake {
+                            channel_id: chan_id, value: val,
+                        });
+                    }
+                }
+                // Resume sender
+                self.ready_queue.push_back(Fiber::Suspended {
+                    continuation: signal.continuation,
+                    resume_value: Value::NIL,
+                    pid,
+                });
+            }
+
+            "chan-recv" => {
+                let chan_id = extract_channel_id(&signal.args[0]);
+                match self.vm.shared.channel_registry.try_recv(chan_id, self.id, pid) {
+                    Some(value) => {
+                        // Data available — resume immediately
+                        self.ready_queue.push_back(Fiber::Suspended {
+                            continuation: signal.continuation,
+                            resume_value: value,
+                            pid,
+                        });
+                    }
+                    None => {
+                        // Park until data arrives
+                        self.parked.insert(pid, ParkedFiber {
+                            continuation: signal.continuation,
+                            pid,
+                        });
+                    }
+                }
+            }
+
+            // === Layer 2: Actors ===
+
+            "actor-send" => {
+                let target_pid = extract_pid(&signal.args[0]);
+                let message = signal.args[1].clone();
+
+                // Route to the scheduler that owns the target PID
+                match self.vm.shared.process_registry.lookup(target_pid) {
+                    Some(sched_id) if sched_id == self.id => {
+                        self.deliver_actor_message(target_pid, message);
+                    }
+                    Some(sched_id) => {
+                        self.send_to_scheduler(sched_id, SchedulerMessage::ActorMessage {
+                            target_pid, message,
+                        });
+                    }
+                    None => { /* dead process — silently drop (Erlang semantics) */ }
+                }
+                // Resume sender immediately
+                self.ready_queue.push_back(Fiber::Suspended {
+                    continuation: signal.continuation,
+                    resume_value: Value::NIL,
+                    pid,
+                });
+            }
+
+            "actor-receive" | "actor-receive-match" => {
+                // Check local mailbox
+                if let Some(msg) = self.mailboxes.get_mut(&pid).and_then(|mb| mb.pop_front()) {
+                    self.ready_queue.push_back(Fiber::Suspended {
+                        continuation: signal.continuation,
+                        resume_value: msg,
+                        pid,
+                    });
+                } else {
+                    // Park until message arrives
+                    self.parked.insert(pid, ParkedFiber {
+                        continuation: signal.continuation,
+                        pid,
+                    });
+                }
+            }
+
+            "actor-monitor" => { /* register monitor in local + registry */ }
+            "actor-link"    => { /* bidirectional link — may cross schedulers */ }
+            "actor-unlink"  => { /* remove link */ }
+            "actor-trap-exit" => { /* enable exit trapping */ }
+
+            // === Layer 3: IO ===
+            "print" | "println" | "read-line" | "read-file" | "write-file" => {
+                let result = try_default_handler(&mut self.vm, signal.op_name, &signal.args)
+                    .unwrap_or(Value::NIL);
+                self.ready_queue.push_back(Fiber::Suspended {
+                    continuation: signal.continuation,
+                    resume_value: result,
+                    pid,
+                });
+            }
+
+            // === Layer 4: Networking ===
+            "tcp-connect" => {
+                let addr = extract_string(&signal.args[0]);
+                let port = extract_int(&signal.args[1]);
+                let io_id = self.next_io_id();
+                let sender = self.inbox_sender.clone();
+                // Spawn async IO on Tokio's thread pool (NOT on scheduler thread)
+                tokio::spawn(async move {
+                    let result = TcpStream::connect(format!("{}:{}", addr, port)).await;
+                    let _ = sender.send(SchedulerMessage::IoComplete {
+                        fiber_pid: pid,
+                        result: wrap_tcp_result(result),
+                    });
+                });
+                // Park fiber until IO completes
+                self.parked.insert(pid, ParkedFiber {
+                    continuation: signal.continuation, pid,
+                });
+            }
+
             "tcp-listen"  => { /* bind listener synchronously */ }
             "tcp-accept"  => { /* park fiber until connection arrives */ }
             "tcp-send"    => { /* write to socket */ }
             "tcp-recv"    => { /* park fiber until data arrives */ }
             "tcp-close"   => { /* close socket */ }
 
-            "http-fetch"        => { /* spawn reqwest task */ }
+            "http-fetch" => {
+                let url = extract_string(&signal.args[0]);
+                let sender = self.inbox_sender.clone();
+                tokio::spawn(async move {
+                    let result = reqwest::get(&url).await;
+                    let _ = sender.send(SchedulerMessage::IoComplete {
+                        fiber_pid: pid,
+                        result: wrap_http_result(result),
+                    });
+                });
+                self.parked.insert(pid, ParkedFiber {
+                    continuation: signal.continuation, pid,
+                });
+            }
+
             "http-serve"        => { /* bind Hyper server */ }
             "http-accept"       => { /* park until request arrives */ }
             "http-respond"      => { /* send HTTP response */ }
@@ -1258,38 +1681,199 @@ impl Scheduler {
             _ => panic!("unhandled effect: {}", name),
         }
     }
+
+    /// Pick which scheduler should run a newly spawned fiber.
+    /// Simple round-robin with bias toward self (cache locality).
+    fn pick_scheduler_for_spawn(&self) -> usize {
+        // Local bias: keep fiber on same scheduler ~70% of the time
+        // to maximize cache locality. Only distribute under load.
+        if self.ready_queue.len() < 4 {
+            self.id
+        } else {
+            // Round-robin across schedulers
+            self.vm.shared.process_registry.next_pid
+                .load(Ordering::Relaxed) as usize % self.num_schedulers()
+        }
+    }
+
+    fn send_to_scheduler(&self, sched_id: usize, msg: SchedulerMessage) {
+        self.scheduler_senders[sched_id].send(msg)
+            .expect("scheduler channel disconnected");
+    }
 }
 ```
 
-### Tokio Integration
+### Runtime Initialization
 
 ```rust
-/// Entry point — called from CLI when `run-fibers` builtin is invoked.
-pub async fn run_fibers_async(vm: VM, closure: Arc<Closure>) -> Value {
-    let local = LocalSet::new();
-    let scheduler = Scheduler::new(vm);
-    local.run_until(scheduler.run_fibers(closure)).await
+/// The top-level runtime — creates N scheduler threads and manages shutdown.
+pub struct Runtime {
+    shared: Arc<SharedState>,
+    scheduler_handles: Vec<std::thread::JoinHandle<()>>,
+    scheduler_senders: Vec<crossbeam_channel::Sender<SchedulerMessage>>,
+    num_schedulers: usize,
+}
+
+impl Runtime {
+    /// Create a runtime with N scheduler threads (default: number of CPU cores).
+    pub fn new(num_schedulers: Option<usize>) -> Self {
+        let n = num_schedulers.unwrap_or_else(num_cpus::get);
+        let shared = Arc::new(SharedState::new());
+
+        // Create crossbeam work-stealing deques
+        let workers: Vec<_> = (0..n).map(|_| crossbeam_deque::Worker::new_fifo()).collect();
+        let stealers: Vec<_> = workers.iter().map(|w| w.stealer()).collect();
+
+        // Create inbox channels
+        let channels: Vec<_> = (0..n)
+            .map(|_| crossbeam_channel::unbounded::<SchedulerMessage>())
+            .collect();
+        let senders: Vec<_> = channels.iter().map(|(s, _)| s.clone()).collect();
+
+        let mut handles = Vec::with_capacity(n);
+
+        for (i, (worker, (_, receiver))) in workers.into_iter().zip(channels).enumerate() {
+            let shared = shared.clone();
+            let other_stealers: Vec<_> = stealers.iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, s)| s.clone())
+                .collect();
+            let all_senders = senders.clone();
+
+            let handle = std::thread::Builder::new()
+                .name(format!("marlang-sched-{}", i))
+                .spawn(move || {
+                    // Each scheduler thread gets its own Tokio runtime
+                    // for driving async IO callbacks.
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    let mut vm = VM::new(shared.clone());
+                    register_builtins(&mut vm);
+
+                    let scheduler = Scheduler {
+                        id: i,
+                        vm,
+                        ready_queue: VecDeque::new(),
+                        steal_deque: worker,
+                        other_stealers,
+                        inbox: receiver,
+                        inbox_sender: all_senders[i].clone(),
+                        scheduler_senders: all_senders,
+                        pending_io: HashMap::new(),
+                        active_servers: 0,
+                        parked: HashMap::new(),
+                        mailboxes: HashMap::new(),
+                        monitors: HashMap::new(),
+                        links: HashMap::new(),
+                        trap_exit: HashSet::new(),
+                        result: None,
+                    };
+
+                    rt.block_on(scheduler.run());
+                })
+                .expect("failed to spawn scheduler thread");
+
+            handles.push(handle);
+        }
+
+        Runtime {
+            shared,
+            scheduler_handles: handles,
+            scheduler_senders: senders,
+            num_schedulers: n,
+        }
+    }
+
+    /// Run a Marlang program with fibers. The main closure runs on scheduler 0.
+    pub fn run_fibers(&self, closure: Arc<Closure>) -> Value {
+        let main_pid = self.shared.process_registry.spawn(0);
+        self.scheduler_senders[0].send(SchedulerMessage::Fiber(
+            Fiber::New { closure, pid: main_pid }
+        )).unwrap();
+
+        // Wait for completion (scheduler 0 sends result via a oneshot channel)
+        // ...
+    }
+
+    /// Shut down all scheduler threads.
+    pub fn shutdown(self) {
+        for sender in &self.scheduler_senders {
+            let _ = sender.send(SchedulerMessage::Shutdown);
+        }
+        for handle in self.scheduler_handles {
+            handle.join().ok();
+        }
+    }
 }
 ```
 
-**Why `LocalSet`?** The VM holds `&mut self` throughout execution — it cannot be shared across threads. `LocalSet` keeps all fiber execution on one OS thread (matching the TypeScript model of single-threaded cooperative scheduling) while still allowing Tokio's IO reactor for async networking callbacks. This is the Rust equivalent of Bun's event loop: one thread runs fibers, the runtime multiplexes IO.
+### Global Termination Detection
 
-### Networking
-
-TCP and HTTP use Tokio's async primitives directly:
+The runtime must detect when all fibers have completed and no IO is pending. This uses a distributed termination protocol:
 
 ```rust
-// TCP connect — spawns a local Tokio task
+impl Runtime {
+    /// All schedulers report idle status via an atomic counter.
+    /// When all N schedulers are idle AND no pending IO exists, the runtime terminates.
+    fn check_global_termination(&self) -> bool {
+        self.shared.idle_count.load(Ordering::SeqCst) == self.num_schedulers
+            && self.shared.pending_io_count.load(Ordering::SeqCst) == 0
+            && self.shared.active_server_count.load(Ordering::SeqCst) == 0
+    }
+}
+```
+
+Each scheduler increments `idle_count` when it has no ready fibers and no local pending IO, and decrements it when it gets new work (from inbox, work stealing, or IO completion).
+
+### Networking (Multi-Threaded)
+
+TCP and HTTP IO use Tokio's **multi-threaded runtime** features. Unlike the single-threaded design, async IO tasks are spawned with `tokio::spawn` (not `spawn_local`), which runs them on Tokio's thread pool. IO completion messages are routed back to the owning scheduler via its inbox:
+
+```rust
+// TCP connect — spawns on Tokio's thread pool, notifies scheduler on completion
 "tcp-connect" => {
     let addr = extract_string(&signal.args[0]);
     let port = extract_int(&signal.args[1]);
-    let handle = tokio::task::spawn_local(async move {
-        TcpStream::connect(format!("{}:{}", addr, port)).await
+    let sender = self.inbox_sender.clone();
+    let fiber_pid = pid;
+
+    tokio::spawn(async move {
+        let result = TcpStream::connect(format!("{}:{}", addr, port)).await;
+        let value = match result {
+            Ok(stream) => {
+                let socket_id = register_socket(stream);
+                Value::from_object(Arc::new(VMObject::TcpSocket(socket_id)))
+            }
+            Err(e) => make_error_value(e),
+        };
+        let _ = sender.send(SchedulerMessage::IoComplete { fiber_pid, result: value });
     });
-    self.pending_io.insert(io_id, PendingIO::TcpConnect(handle));
-    // Fiber stays parked until drain phase completes this IO
+
+    // Park the fiber until IO completes
+    self.parked.insert(pid, ParkedFiber { continuation: signal.continuation, pid });
 }
 ```
+
+> **Design rationale:** Each scheduler thread has its own `current_thread` Tokio runtime for driving its local `select!` loop (inbox + IO wakeups). Async IO tasks are spawned on the Tokio thread pool via `tokio::spawn`, and results flow back through the crossbeam inbox. This avoids the `LocalSet` limitation of the single-threaded design while keeping all fiber execution `&mut self` (no locks on the hot path).
+
+### Value Thread Safety
+
+`Value` (NaN-boxed `u64`) and `VMObject` (behind `Arc`) are `Send`:
+
+- **Numbers, bools, nil** — immediate values in the `u64`, trivially `Send`.
+- **Objects** (`Arc<VMObject>`) — `Arc` is `Send + Sync` when `VMObject: Send + Sync`.
+- **Closures** — `Arc<FunctionPrototype>` (immutable bytecode) + `Box<[Value]>` (captured upvalues, themselves `Send`).
+- **Continuations** — `Vec<CallFrame>` + `Vec<Value>` — all `Send`.
+
+Values can safely cross thread boundaries in actor messages, channel sends, and fiber migrations.
+
+### Single-Threaded Fallback
+
+For WASM and testing, the runtime supports `num_schedulers = 1`, which degrades to a single-threaded scheduler (equivalent to the TypeScript model). The crossbeam channels and work stealing deques still work but never actually cross threads, so the overhead is one extra indirection per message.
 
 ---
 
@@ -1688,27 +2272,38 @@ fn start_repl(vm: &mut VM) -> Result<(), Box<dyn Error>> {
 }
 ```
 
-### Async Runtime
+### Runtime Initialization
 
-The CLI initializes a Tokio runtime for commands that need async (concurrency, networking):
+The CLI creates a multi-scheduler `Runtime` for commands that use concurrency. Non-concurrent commands (typecheck, disasm) use a single VM directly:
 
 ```rust
 fn main() {
     let cli = Cli::parse();
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
     match cli.command {
         Command::Run { file, no_typecheck } => {
-            rt.block_on(run_file(&file, no_typecheck));
+            // Create multi-scheduler runtime (one scheduler per core)
+            let runtime = Runtime::new(None);
+            let chunk = compile_file(&file, &runtime.shared, no_typecheck);
+            let closure = Arc::new(Closure { proto: Arc::new(chunk.into_proto()), upvalues: Box::new([]) });
+            let result = runtime.run_fibers(closure);
+            runtime.shutdown();
         }
-        Command::Repl => start_repl(&mut VM::new()).unwrap(),
+        Command::Repl => {
+            // REPL uses single scheduler
+            let runtime = Runtime::new(Some(1));
+            start_repl(&runtime).unwrap();
+            runtime.shutdown();
+        }
         Command::Typecheck { file, verbose } => typecheck_file(&file, verbose),
         Command::Disasm { file } => disasm_file(&file),
-        Command::Lsp => rt.block_on(start_lsp()),
+        Command::Lsp => {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(start_lsp());
+        }
     }
 }
 ```
@@ -1934,32 +2529,50 @@ criterion_main!(benches);
 
 **Deliverable:** `cargo test -p marlang-modules` passes modules (18) + stdlib (69) = **87 tests**.
 
-### Phase 6: Concurrency (Weeks 9-11)
+### Phase 6: Concurrency — Single-Threaded (Weeks 9-11)
 
-**Goal:** Full fiber scheduler with channels, actors, and async IO.
+**Goal:** Full fiber scheduler with channels, actors, and async IO on a single scheduler thread.
 
-- [ ] Port `Scheduler` with ready queue and fiber types
+- [ ] Implement `Scheduler` struct with ready queue, fiber types, and inbox
+- [ ] Implement `SharedState`, `ProcessRegistry`, `ChannelRegistry`
+- [ ] Implement `Runtime` with `num_schedulers = 1` (single-threaded)
 - [ ] Port Layer 1: fiber-spawn, fiber-yield, fiber-self, channels
 - [ ] Port Layer 2: actors, mailboxes, monitors, links, supervision
-- [ ] Port Layer 3: async IO effects
-- [ ] Integrate with Tokio `LocalSet`
+- [ ] Port Layer 3: async IO effects (print, println, read-line, read-file, write-file)
+- [ ] Integrate with Tokio (`current_thread` runtime per scheduler)
 - [ ] Port `run-fibers` builtin
 
-**Deliverable:** `cargo test -p marlang-vm` passes concurrent (25) tests.
+**Deliverable:** `cargo test -p marlang-vm` passes concurrent (25) tests with a single scheduler.
 
-### Phase 7: Networking (Weeks 11-12)
+### Phase 6b: Concurrency — Multi-Threaded (Weeks 11-12)
 
-**Goal:** TCP and HTTP support via Tokio.
+**Goal:** Scale to N scheduler threads with work stealing and cross-thread messaging.
+
+- [ ] Add `crossbeam-deque` work-stealing deques
+- [ ] Add `crossbeam-channel` inboxes for inter-scheduler messaging
+- [ ] Implement `pick_scheduler_for_spawn()` with local bias
+- [ ] Implement work stealing (`try_steal()`)
+- [ ] Implement cross-thread actor message routing via `ProcessRegistry`
+- [ ] Implement cross-thread channel sends via `ChannelRegistry`
+- [ ] Implement global termination detection (atomic idle counter)
+- [ ] Runtime defaults to `num_cpus::get()` scheduler threads
+- [ ] Add multi-threaded concurrency tests (parallel fib, cross-thread actors)
+
+**Deliverable:** Multi-threaded runtime passes all 25 existing concurrent tests + new parallel scaling tests.
+
+### Phase 7: Networking (Weeks 12-13)
+
+**Goal:** TCP and HTTP support via Tokio's thread pool.
 
 - [ ] Port TCP: connect, listen, accept, send, recv, close
 - [ ] Port HTTP client (replace Bun fetch with `reqwest`)
 - [ ] Port HTTP server (replace Bun.serve with `hyper`)
-- [ ] Port waker mechanism
-- [ ] Port cleanup logic (shutdown servers, close sockets)
+- [ ] Async IO tasks via `tokio::spawn` (thread pool), results routed to scheduler inbox
+- [ ] Port cleanup logic (shutdown servers, close sockets on `Runtime::shutdown()`)
 
 **Deliverable:** Net (4) + HTTP (5) = **9 tests** pass.
 
-### Phase 8: LSP (Weeks 12-13)
+### Phase 8: LSP (Weeks 13-14)
 
 **Goal:** Language server with diagnostics, hover, definition, completion.
 
@@ -1973,7 +2586,7 @@ criterion_main!(benches);
 
 **Deliverable:** `cargo test -p marlang-lsp` passes editor-ops (25) tests.
 
-### Phase 9: CLI & Polish (Weeks 13-15)
+### Phase 9: CLI & Polish (Weeks 14-16)
 
 **Goal:** Standalone binary with all commands working.
 
@@ -1987,7 +2600,7 @@ criterion_main!(benches);
 
 **Deliverable:** `mar run file.mar`, `mar repl`, `mar typecheck file.mar`, `mar disasm file.mar`, `mar lsp` — all working as a single ~5-10 MB binary.
 
-### Phase 10: WASM & Web Editor (Weeks 15-17)
+### Phase 10: WASM & Web Editor (Weeks 16-18)
 
 **Goal:** Compile core+types+vm to WASM; web editor imports the WASM module instead of bundling TypeScript.
 
@@ -2050,7 +2663,7 @@ The `vm` crate uses feature flags to exclude native-only code from the WASM buil
 # crates/vm/Cargo.toml
 [features]
 default = ["native"]
-native = ["tokio", "reqwest", "hyper"]  # scheduler, networking
+native = ["tokio", "reqwest", "hyper", "crossbeam-deque", "crossbeam-channel", "num_cpus", "fastrand"]
 ```
 
 ```rust
@@ -2062,7 +2675,9 @@ pub mod builtins;
 pub mod debug;
 
 #[cfg(feature = "native")]
-pub mod scheduler;  // Fibers, channels, actors — Tokio-based
+pub mod scheduler;  // Multi-scheduler with work stealing — Tokio + crossbeam
+#[cfg(feature = "native")]
+pub mod runtime;    // Runtime initialization, thread management
 ```
 
 The WASM crate depends on `vm` without the `native` feature:
@@ -2252,17 +2867,22 @@ members = ["crates/*"]
 # Types
 # (no external deps — pure algorithms)
 
-# VM
-tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time"] }
+# VM + Scheduler
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time"] }
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 hyper = { version = "1", features = ["server", "http1"] }
+crossbeam-deque = "0.8"        # Work-stealing deques for multi-scheduler
+crossbeam-channel = "0.5"      # Lock-free MPSC for inter-scheduler messaging
+dashmap = "6"                  # Concurrent hashmap for ProcessRegistry, ChannelRegistry
+num_cpus = "1"                 # Detect core count for default scheduler count
+fastrand = "2"                 # Fast thread-local RNG for work-stealing randomization
 
 # Modules
 # (no external deps beyond std::fs)
 
 # LSP
 tower-lsp = "0.20"
-dashmap = "6"
+# dashmap — shared with VM (see above)
 
 # CLI
 clap = { version = "4", features = ["derive"] }
