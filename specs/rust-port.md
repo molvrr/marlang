@@ -474,11 +474,11 @@ pub enum VMObject {
     Pid(u64),
     Channel(u64),
 
-    // FFI (Phase 2)
-    // FfiLibrary(..),
-    // FfiPointer(..),
-    // FfiStructDef(..),
-    // FfiStruct(..),
+    // FFI (see Section 9.1)
+    FfiLibrary(Box<FfiLibrary>),
+    FfiPointer(*mut u8),
+    FfiStructDef(Arc<FfiStructDef>),
+    FfiStruct(Box<FfiStruct>),
 
     // Networking
     TcpSocket(u64),    // Socket ID, resolved by scheduler
@@ -1894,9 +1894,163 @@ For WASM and testing, the runtime supports `num_schedulers = 1`, which degrades 
 
 ## 9. FFI
 
-### Design: Rust Function Registration API
+The FFI system has two parts: **dlopen FFI** for calling C libraries from Marlang code (matching the TypeScript `ffi-open`/`ffi-call`/`ffi-close` builtins), and a **Rust function registration API** for embedding Marlang in Rust applications.
 
-Instead of the TypeScript `dlopen` approach (which uses `bun:ffi`), the Rust port provides a native embedding API. Host applications register Rust functions directly:
+### 9.1 dlopen FFI (`libloading` + `libffi`)
+
+Ports the TypeScript `bun:ffi`-based builtins (`ffi-open`, `ffi-call`, `ffi-close`, `ffi-struct`, `struct-new`, `struct-get`, `struct-set`) using the `libloading` crate for cross-platform shared library loading and `libffi` for calling convention marshalling:
+
+```rust
+/// Opened shared library with pre-parsed function signatures.
+pub struct FfiLibrary {
+    lib: libloading::Library,
+    signatures: HashMap<String, FfiSignature>,
+}
+
+pub struct FfiSignature {
+    args: Vec<FfiType>,
+    ret: FfiType,
+    /// Raw symbol pointer from libloading.
+    symbol: *const (),
+}
+
+#[derive(Debug, Clone)]
+pub enum FfiType {
+    Void, U8, I8, U16, I16, U32, I32, U64, I64,
+    F32, F64, Pointer, CString,
+    Struct(String), // name → lookup in struct registry
+}
+
+/// Struct definition for FFI struct types.
+pub struct FfiStructDef {
+    pub name: String,
+    pub fields: Vec<FfiStructField>,
+    pub size: usize,
+}
+
+pub struct FfiStructField {
+    pub name: String,
+    pub ffi_type: FfiType,
+    pub offset: usize,
+    pub size: usize,
+}
+
+/// A live FFI struct instance — raw byte buffer + definition.
+pub struct FfiStruct {
+    pub def: Arc<FfiStructDef>,
+    pub buffer: Vec<u8>,
+}
+```
+
+#### VMObject Variants
+
+```rust
+pub enum VMObject {
+    // ... existing variants ...
+
+    // FFI
+    FfiLibrary(Box<FfiLibrary>),
+    FfiPointer(*mut u8),
+    FfiStructDef(Arc<FfiStructDef>),
+    FfiStruct(Box<FfiStruct>),
+}
+```
+
+#### Builtin Functions
+
+Registered in `builtins.rs`, matching the TS API exactly:
+
+```rust
+/// Global struct definition registry (mirrors TS vmStructRegistry).
+static FFI_STRUCT_REGISTRY: Mutex<HashMap<String, Arc<FfiStructDef>>> = Mutex::new(HashMap::new());
+
+fn register_ffi_builtins(vm: &mut VM) {
+    // ffi-open: (ffi-open path signatures) → FfiLibrary
+    //   path: string (library name, e.g. "m" → libm.dylib on macOS)
+    //   signatures: list of (list name (list arg-types...) return-type)
+    builtin("ffi-open", ffi_open);
+
+    // ffi-call: (ffi-call lib fn-name args...) → Value
+    builtin("ffi-call", ffi_call);
+
+    // ffi-close: (ffi-close lib) → nil
+    builtin("ffi-close", ffi_close);
+
+    // ffi-struct: (ffi-struct name fields) → FfiStructDef
+    //   fields: list of (list field-name field-type)
+    builtin("ffi-struct", ffi_struct);
+
+    // struct-new: (struct-new def [field-values...]) → FfiStruct
+    builtin("struct-new", struct_new);
+
+    // struct-get: (struct-get struct field-name) → Value
+    builtin("struct-get", struct_get);
+
+    // struct-set: (struct-set struct field-name value) → FfiStruct
+    builtin("struct-set", struct_set);
+}
+```
+
+#### Library Name Resolution
+
+Matches the TypeScript behavior — auto-adds platform-specific prefix/suffix:
+
+```rust
+fn resolve_library_name(name: &str) -> String {
+    if name.contains('/') || name.contains('.') {
+        return name.to_string(); // Already a path
+    }
+    #[cfg(target_os = "macos")]
+    { format!("lib{}.dylib", name) }
+    #[cfg(target_os = "linux")]
+    { format!("lib{}.so", name) }
+    #[cfg(target_os = "windows")]
+    { format!("{}.dll", name) }
+}
+```
+
+#### Value Conversion
+
+```rust
+/// Convert a Marlang Value to a C-compatible argument for libffi.
+fn value_to_ffi(value: &Value, ffi_type: &FfiType) -> Result<FfiArg, VMError> {
+    match ffi_type {
+        FfiType::I32 => Ok(FfiArg::I32(value.as_number()
+            .ok_or(VMError::type_error("expected number"))? as i32)),
+        FfiType::F64 => Ok(FfiArg::F64(value.as_number()
+            .ok_or(VMError::type_error("expected number"))?)),
+        FfiType::CString => {
+            let s = value.as_string().ok_or(VMError::type_error("expected string"))?;
+            Ok(FfiArg::CString(CString::new(s.as_ref())?))
+        }
+        FfiType::Pointer => match value.as_object() {
+            Some(VMObject::FfiPointer(ptr)) => Ok(FfiArg::Pointer(*ptr)),
+            Some(VMObject::FfiStruct(s)) => Ok(FfiArg::Pointer(s.buffer.as_ptr() as *mut u8)),
+            _ => Ok(FfiArg::Pointer(std::ptr::null_mut())),
+        },
+        // ... other types
+        _ => Err(VMError::type_error(&format!("unsupported FFI type: {:?}", ffi_type))),
+    }
+}
+
+/// Convert a C return value back to a Marlang Value.
+fn ffi_to_value(raw: usize, ffi_type: &FfiType) -> Value {
+    match ffi_type {
+        FfiType::Void => Value::nil(),
+        FfiType::I32 => Value::number(raw as i32 as f64),
+        FfiType::F64 => Value::number(f64::from_bits(raw as u64)),
+        FfiType::Pointer => Value::object(VMObject::FfiPointer(raw as *mut u8)),
+        // ... other types
+        _ => Value::nil(),
+    }
+}
+```
+
+> **Note:** `libloading` handles symbol lookup; `libffi` handles the actual calling convention marshalling for arbitrary C signatures at runtime. This matches how `bun:ffi` works under the hood.
+
+### 9.2 Rust Function Registration (Embedding API)
+
+For embedding Marlang in Rust applications, host programs can register Rust functions directly as Marlang builtins:
 
 ```rust
 /// Trait for converting Marlang values to Rust types.
@@ -1961,7 +2115,7 @@ pub trait IntoBuiltin<Args, Ret> {
 // ... up to 8 args
 ```
 
-### Embedding Example
+#### Embedding Example
 
 ```rust
 use marlang_vm::{VM, Value, compile_program};
@@ -1970,13 +2124,13 @@ use marlang_core::{lex, parse};
 fn main() {
     let mut vm = VM::new();
 
-    // Register custom functions
+    // Register custom Rust functions as Marlang builtins
     vm.register_fn("square", |x: f64| -> f64 { x * x });
     vm.register_fn("http-get", |url: String| -> String {
         reqwest::blocking::get(&url).unwrap().text().unwrap()
     });
 
-    // Run Marlang code
+    // Run Marlang code that calls them
     let source = r#"(println (show (square 7)))"#;
     let tokens = lex(source);
     let ast = parse(&tokens);
@@ -1984,10 +2138,6 @@ fn main() {
     vm.interpret(&chunk);
 }
 ```
-
-### dlopen FFI (Optional, Phase 2)
-
-For loading shared libraries at runtime (matching the TypeScript `ffi-open`/`ffi-call` builtins), use the `libloading` crate. This is deferred to Phase 2 since the Rust registration API covers the primary use case.
 
 ---
 
@@ -2048,37 +2198,81 @@ impl ModuleLoader {
 }
 ```
 
-### Stdlib Bundling
+### Stdlib Resolution
 
-Standard library files are embedded at compile time using `include_str!`:
+Standard library files are loaded from the filesystem at runtime, matching the TypeScript module loader. The `std:` prefix resolver finds the stdlib directory using the same priority chain as the TS version:
 
 ```rust
 struct StdlibResolver;
 
-impl PrefixResolver for StdlibResolver {
-    fn resolve(&self, name: &str, _from_file: &Path) -> Result<PathBuf, ModuleError> {
-        // Return a virtual path — the source is bundled
-        Ok(PathBuf::from(format!("$stdlib/{}.mar", name)))
+impl StdlibResolver {
+    /// Find the stdlib directory. Priority:
+    /// 1. MARLANG_HOME env var
+    /// 2. ~/.marlang/stdlib (standard installation)
+    /// 3. Executable's sibling stdlib/ directory (installed binary)
+    /// 4. Source tree stdlib/ (dev mode — cargo run)
+    fn find_stdlib_root() -> Option<PathBuf> {
+        // 1. Explicit env var
+        if let Ok(home) = std::env::var("MARLANG_HOME") {
+            let p = PathBuf::from(home).join("stdlib");
+            if p.is_dir() { return Some(p); }
+        }
+
+        // 2. ~/.marlang/stdlib
+        if let Some(home) = dirs::home_dir() {
+            let p = home.join(".marlang").join("stdlib");
+            if p.is_dir() { return Some(p); }
+        }
+
+        // 3. Next to the executable (for installed binaries)
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let p = dir.join("stdlib");
+                if p.is_dir() { return Some(p); }
+            }
+        }
+
+        // 4. Source tree (dev mode)
+        // Cargo sets CARGO_MANIFEST_DIR at compile time
+        let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stdlib");
+        if dev.is_dir() { return Some(dev.canonicalize().ok()?); }
+
+        None
     }
 }
 
-/// Register all bundled stdlib modules.
-pub fn register_stdlib(loader: &mut ModuleLoader) {
-    let modules = [
-        ("option",  include_str!("../../stdlib/option.mar")),
-        ("result",  include_str!("../../stdlib/result.mar")),
-        ("io",      include_str!("../../stdlib/io.mar")),
-        ("net",     include_str!("../../stdlib/net.mar")),
-        ("http",    include_str!("../../stdlib/http.mar")),
-    ];
-    for (name, source) in modules {
-        loader.register_virtual(
-            PathBuf::from(format!("$stdlib/{}.mar", name)),
-            source.to_string(),
-        );
+impl PrefixResolver for StdlibResolver {
+    fn resolve(&self, name: &str, _from_file: &Path) -> Result<PathBuf, ModuleError> {
+        let root = Self::find_stdlib_root()
+            .ok_or(ModuleError::StdlibNotFound)?;
+        let path = root.join(name).with_extension("mar");
+        if path.is_file() {
+            Ok(path)
+        } else {
+            Err(ModuleError::ModuleNotFound(format!("std:{}", name)))
+        }
     }
 }
 ```
+
+The stdlib directory contains all `.mar` files loaded on demand (not embedded at compile time):
+
+```
+stdlib/
+├── option.mar
+├── result.mar
+├── list.mar
+├── math.mar
+├── string.mar
+├── concurrent.mar
+├── actor.mar
+├── io.mar
+├── net.mar
+└── http.mar
+```
+
+Virtual modules are still supported for testing — `ModuleLoader.register_virtual()` takes precedence over filesystem.
 
 ---
 
@@ -2581,17 +2775,32 @@ criterion_main!(benches);
 - **`captured_output: Option<String>`** — Test IO capture: when `Some`, `print`/`println` write to the buffer instead of stdout.
 - **126 execution tests**: literals, arithmetic, string concat, comparison, control flow, variables, functions, closures, TCO (100k iterations), ADTs, pattern matching, show, not, string ops, effects (handle/perform/resume, stateful counter, abort, state effect, one-shot enforcement), default IO, error handling, type forms, complex programs (map, fold, mutual recursion, higher-order, MkPair, Ok/Err)
 
-### Phase 5: Module System (Weeks 8-9)
+### Phase 5: Modules + FFI (Weeks 8-10)
 
-**Goal:** Import resolution with stdlib bundling.
+**Goal:** Import resolution with filesystem-based stdlib, and dlopen FFI.
+
+#### 5a: Module System
 
 - [ ] Port `ModuleLoader` with prefix resolution
-- [ ] Bundle stdlib same way the typescript version does
+- [ ] Implement `StdlibResolver` with filesystem-based lookup (MARLANG_HOME → ~/.marlang → exe dir → source tree)
 - [ ] Port module caching
 - [ ] Port virtual modules (for testing)
 - [ ] Wire module loading into compiler
 
 **Deliverable:** `cargo test -p marlang-modules` passes modules (18) + stdlib (69) = **87 tests**.
+
+#### 5b: FFI
+
+- [ ] Add `libloading` + `libffi` dependencies
+- [ ] Implement `FfiLibrary`, `FfiSignature`, `FfiType`, `FfiStructDef`, `FfiStruct` types
+- [ ] Add `FfiLibrary`, `FfiPointer`, `FfiStructDef`, `FfiStruct` VMObject variants
+- [ ] Implement `ffi-open` builtin (library name resolution, signature parsing, dlopen)
+- [ ] Implement `ffi-call` builtin (value conversion, libffi invocation)
+- [ ] Implement `ffi-close` builtin
+- [ ] Implement `ffi-struct`, `struct-new`, `struct-get`, `struct-set` builtins
+- [ ] Implement `register_fn` embedding API (`FromValue`/`IntoValue` traits, `IntoBuiltin` macro)
+
+**Deliverable:** FFI tests pass (port from TS `vm.test.ts` FFI tests). Embedding API works for registering Rust closures as builtins.
 
 ### Phase 6: Concurrency — Single-Threaded (Weeks 9-11)
 
@@ -2727,7 +2936,7 @@ The `vm` crate uses feature flags to exclude native-only code from the WASM buil
 # crates/vm/Cargo.toml
 [features]
 default = ["native"]
-native = ["tokio", "reqwest", "hyper", "crossbeam-deque", "crossbeam-channel", "num_cpus", "fastrand"]
+native = ["tokio", "reqwest", "hyper", "crossbeam-deque", "crossbeam-channel", "num_cpus", "fastrand", "libloading", "libffi"]
 ```
 
 ```rust
@@ -2940,9 +3149,11 @@ crossbeam-channel = "0.5"      # Lock-free MPSC for inter-scheduler messaging
 dashmap = "6"                  # Concurrent hashmap for ProcessRegistry, ChannelRegistry
 num_cpus = "1"                 # Detect core count for default scheduler count
 fastrand = "2"                 # Fast thread-local RNG for work-stealing randomization
+libloading = "0.8"             # Cross-platform dlopen for FFI
+libffi = "3"                   # Calling convention marshalling for arbitrary C signatures
 
 # Modules
-# (no external deps beyond std::fs)
+dirs = "6"                     # Home directory resolution for stdlib lookup
 
 # LSP
 tower-lsp = "0.20"
@@ -2966,7 +3177,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 The Rust port intentionally drops:
 
 1. **Tree-walker interpreter** (`src/core/interpreter.ts`, ~1200 LOC) — the VM is strictly better. The 60 interpreter tests become VM integration tests.
-2. **`bun:ffi` dlopen** — replaced by Rust function registration API. `libloading`-based dlopen deferred to Phase 2.
+2. **`bun:ffi` runtime** — replaced by `libloading` + `libffi` for dlopen FFI. Same Marlang API (`ffi-open`, `ffi-call`, etc.).
 3. **`--vm` flag** — no longer needed since everything runs on the VM.
 4. **Node.js `readline`** — replaced by `rustyline` with history support.
 5. **Hand-rolled LSP protocol** (`lsp/protocol.ts`) — replaced by `tower-lsp`.
