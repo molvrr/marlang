@@ -1,0 +1,16 @@
+[package]
+name = "marlang-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "mar"
+path = "src/main.rs"
+
+[dependencies]
+marlang-core = { path = "../core" }
+marlang-types = { path = "../types" }
+marlang-vm = { path = "../vm" }
+clap = { version = "4", features = ["derive"] }
+rustyline = "14"
+dirs = "6"

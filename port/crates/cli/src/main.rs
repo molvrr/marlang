@@ -1,0 +1,277 @@
+use std::fs;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand};
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
+
+use marlang_core::intern::Interner;
+use marlang_core::lexer::lex;
+use marlang_core::parser::parse;
+use marlang_types::ast::format_type;
+use marlang_types::checker::{type_check, TypeCheckResult};
+use marlang_types::errors::format_error;
+use marlang_vm::builtins::register_builtins;
+use marlang_vm::compiler::compile_program;
+use marlang_vm::debug::disassemble;
+use marlang_vm::modules::{run_program, ModuleLoader};
+use marlang_vm::value::format_value;
+use marlang_vm::vm::VM;
+
+#[derive(Parser)]
+#[command(name = "mar", about = "The Marlang programming language", version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run a Marlang file
+    Run {
+        /// Path to the .mar file
+        file: PathBuf,
+        /// Skip type checking
+        #[arg(long)]
+        no_typecheck: bool,
+    },
+    /// Start interactive REPL
+    Repl,
+    /// Type check a file without running
+    Typecheck {
+        /// Path to the .mar file
+        file: PathBuf,
+        /// Print inferred types for each top-level expression
+        #[arg(long)]
+        verbose: bool,
+    },
+    /// Disassemble bytecode
+    Disasm {
+        /// Path to the .mar file
+        file: PathBuf,
+    },
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Command::Run { file, no_typecheck } => cmd_run(&file, no_typecheck),
+        Command::Repl => cmd_repl(),
+        Command::Typecheck { file, verbose } => cmd_typecheck(&file, verbose),
+        Command::Disasm { file } => cmd_disasm(&file),
+    }
+}
+
+fn cmd_run(file: &PathBuf, no_typecheck: bool) -> ExitCode {
+    let source = match fs::read_to_string(file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading file: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let interner = Interner::new();
+
+    // Parse first to get AST for type checking
+    let tokens = match lex(&source, &interner) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Lex error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let exprs = match parse(&tokens) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Parse error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Type check if not disabled
+    if !no_typecheck {
+        match type_check(&exprs, &interner) {
+            TypeCheckResult::Ok { .. } => {}
+            TypeCheckResult::Err { error } => {
+                eprintln!("Type error: {}", format_error(&error));
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    // Run with module support
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+
+    match run_program(&mut vm, &source, Some(file.as_path()), &mut loader, &interner) {
+        Ok(_value) => {
+            // Don't print result by default (matches TypeScript behavior)
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Runtime error: {}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_typecheck(file: &PathBuf, verbose: bool) -> ExitCode {
+    let source = match fs::read_to_string(file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading file: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let interner = Interner::new();
+
+    let tokens = match lex(&source, &interner) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Lex error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let exprs = match parse(&tokens) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Parse error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match type_check(&exprs, &interner) {
+        TypeCheckResult::Ok { types, .. } => {
+            if verbose {
+                for (i, ty) in types.iter().enumerate() {
+                    println!("expr {}: {}", i + 1, format_type(ty));
+                }
+            }
+            println!("Type check passed.");
+            ExitCode::SUCCESS
+        }
+        TypeCheckResult::Err { error } => {
+            eprintln!("Type error: {}", format_error(&error));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_disasm(file: &PathBuf) -> ExitCode {
+    let source = match fs::read_to_string(file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading file: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let interner = Interner::new();
+
+    let tokens = match lex(&source, &interner) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Lex error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let exprs = match parse(&tokens) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Parse error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let chunk = match compile_program(&exprs, &interner) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Compile error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let name = file.file_stem().and_then(|s| s.to_str());
+    println!("{}", disassemble(&chunk, name));
+
+    ExitCode::SUCCESS
+}
+
+fn cmd_repl() -> ExitCode {
+    println!("Marlang REPL v{}", env!("CARGO_PKG_VERSION"));
+    println!("Type .exit or Ctrl+D to exit\n");
+
+    let mut rl = match DefaultEditor::new() {
+        Ok(editor) => editor,
+        Err(e) => {
+            eprintln!("Failed to initialize REPL: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Try to load history
+    let history_path = dirs::home_dir()
+        .map(|h| h.join(".marlang_history"))
+        .unwrap_or_else(|| PathBuf::from(".marlang_history"));
+    let _ = rl.load_history(&history_path);
+
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+
+    loop {
+        match rl.readline("mar> ") {
+            Ok(line) => {
+                let trimmed = line.trim();
+
+                // Handle special commands
+                if trimmed == ".exit" || trimmed == "(quit)" {
+                    println!("Goodbye!");
+                    break;
+                }
+
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                let _ = rl.add_history_entry(&line);
+
+                // Run the expression
+                match run_program(&mut vm, &line, None, &mut loader, &interner) {
+                    Ok(value) => {
+                        println!("=> {}", format_value(&value));
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                    }
+                }
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("^C");
+                continue;
+            }
+            Err(ReadlineError::Eof) => {
+                println!("Goodbye!");
+                break;
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                break;
+            }
+        }
+    }
+
+    // Save history
+    let _ = rl.save_history(&history_path);
+
+    ExitCode::SUCCESS
+}

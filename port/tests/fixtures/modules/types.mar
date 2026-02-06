@@ -1,0 +1,11 @@
+; Module with custom types
+
+(data (Result e a)
+  (Err e)
+  (Ok a))
+
+(define (map-result : (-> (-> a b) (Result e a) (Result e b)))
+  (lambda (f result)
+    (match result
+      ((Err e) (Err e))
+      ((Ok a) (Ok (f a))))))

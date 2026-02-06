@@ -5,3 +5,8 @@ edition.workspace = true
 
 [dependencies]
 marlang-core = { path = "../core" }
+libloading = { version = "0.8", optional = true }
+
+[features]
+default = ["ffi"]
+ffi = ["libloading"]

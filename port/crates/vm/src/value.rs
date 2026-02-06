@@ -284,6 +284,14 @@ fn format_object(obj: &VMObject) -> String {
         VMObject::TcpListener(id) => format!("#<tcp-listener {}>", id),
         VMObject::HttpServer(id) => format!("#<http-server {}>", id),
         VMObject::HttpRequest(id) => format!("#<http-request {}>", id),
+        #[cfg(feature = "ffi")]
+        VMObject::FfiLibrary(lib) => format!("#<ffi-library {}>", lib.path),
+        #[cfg(feature = "ffi")]
+        VMObject::FfiPointer(addr) => format!("#<ffi-pointer 0x{:x}>", addr),
+        #[cfg(feature = "ffi")]
+        VMObject::FfiStructDef(def) => format!("#<ffi-struct-def {}>", def.name),
+        #[cfg(feature = "ffi")]
+        VMObject::FfiStruct(s) => format!("#<ffi-struct {}>", s.def.name),
     }
 }
 

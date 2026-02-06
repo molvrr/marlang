@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use marlang_core::intern::Interner;
 use marlang_core::lexer::lex;
 use marlang_core::parser::parse;
@@ -7,6 +9,7 @@ use crate::bytecode::{Chunk, ConstantValue, Op};
 use crate::compiler::{compile, compile_program};
 use crate::debug::disassemble;
 use crate::errors::VMError;
+use crate::modules::{run_program, ModuleLoader};
 use crate::value::{format_value, Value};
 use crate::vm::{interpret, VM};
 
@@ -1446,4 +1449,637 @@ fn exec_continuation_one_shot_enforced() {
       (resume saved nil))))
 "#;
     assert_error(source, "one-shot");
+}
+
+// =====================================================================
+// ===== Module Tests (Phase 5a) =======================================
+// =====================================================================
+
+fn fixtures_dir() -> PathBuf {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    Path::new(manifest)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests")
+        .join("fixtures")
+        .join("modules")
+}
+
+fn eval_with_modules(source: &str, file_path: &str) -> Result<Value, VMError> {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+
+    let path = fixtures_dir().join(file_path);
+    run_program(&mut vm, source, Some(&path), &mut loader, &interner)
+}
+
+fn eval_with_virtual_modules(
+    source: &str,
+    file_path: &str,
+    virtual_modules: Vec<(&str, &str)>,
+) -> Result<Value, VMError> {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+
+    let base = fixtures_dir();
+    for (vpath, vsource) in virtual_modules {
+        loader.register_virtual(base.join(vpath), vsource);
+    }
+
+    let path = base.join(file_path);
+    run_program(&mut vm, source, Some(&path), &mut loader, &interner)
+}
+
+fn eval_modules_with_output(source: &str, file_path: &str) -> (Result<Value, VMError>, String) {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    vm.captured_output = Some(String::new());
+    let mut loader = ModuleLoader::new();
+
+    let path = fixtures_dir().join(file_path);
+    let result = run_program(&mut vm, source, Some(&path), &mut loader, &interner);
+    let output = vm.captured_output.take().unwrap_or_default();
+    (result, output)
+}
+
+fn assert_module_num(source: &str, file_path: &str, expected: f64) {
+    let val = eval_with_modules(source, file_path)
+        .expect(&format!("eval failed for module test: {}", source));
+    let n = val.as_number().expect(&format!(
+        "expected number, got {:?}",
+        format_value(&val)
+    ));
+    assert!(
+        (n - expected).abs() < 1e-10,
+        "expected {} but got {}",
+        expected,
+        n
+    );
+}
+
+fn assert_module_formatted(source: &str, file_path: &str, expected: &str) {
+    let val = eval_with_modules(source, file_path)
+        .expect(&format!("eval failed for module test: {}", source));
+    let formatted = format_value(&val);
+    assert_eq!(formatted, expected, "for: {}", source);
+}
+
+fn assert_module_error(source: &str, file_path: &str, substring: &str) {
+    let result = eval_with_modules(source, file_path);
+    match result {
+        Err(e) => assert!(
+            e.message.contains(substring),
+            "expected error containing '{}', got: {}",
+            substring,
+            e.message
+        ),
+        Ok(v) => panic!(
+            "expected error containing '{}', but got: {:?}",
+            substring,
+            format_value(&v)
+        ),
+    }
+}
+
+// ===== Import All =====
+
+#[test]
+fn module_import_all_bindings() {
+    assert_module_num(
+        r#"(import "./math.mar")
+           (square 5)"#,
+        "test.mar",
+        25.0,
+    );
+}
+
+#[test]
+fn module_import_all_multiple() {
+    assert_module_num(
+        r#"(import "./math.mar")
+           (add (square 2) (double 3))"#,
+        "test.mar",
+        10.0,
+    );
+}
+
+// ===== Selective Import =====
+
+#[test]
+fn module_import_selective() {
+    assert_module_num(
+        r#"(import "./math.mar" (square))
+           (square 6)"#,
+        "test.mar",
+        36.0,
+    );
+}
+
+#[test]
+fn module_import_selective_multiple() {
+    assert_module_num(
+        r#"(import "./math.mar" (square double))
+           (+ (square 3) (double 4))"#,
+        "test.mar",
+        17.0,
+    );
+}
+
+#[test]
+fn module_import_selective_nonexistent() {
+    assert_module_error(
+        r#"(import "./math.mar" (nonexistent))"#,
+        "test.mar",
+        "does not export",
+    );
+}
+
+// ===== Qualified Import =====
+
+#[test]
+fn module_import_qualified() {
+    assert_module_num(
+        r#"(import "./math.mar" as m)
+           (m/square 7)"#,
+        "test.mar",
+        49.0,
+    );
+}
+
+#[test]
+fn module_import_qualified_multiple() {
+    assert_module_num(
+        r#"(import "./math.mar" as math)
+           (math/add (math/square 2) (math/double 5))"#,
+        "test.mar",
+        14.0,
+    );
+}
+
+// ===== Path Resolution =====
+
+#[test]
+fn module_import_auto_extension() {
+    assert_module_num(
+        r#"(import "./math")
+           (square 3)"#,
+        "test.mar",
+        9.0,
+    );
+}
+
+// ===== Circular Dependency =====
+
+#[test]
+fn module_import_circular_detection() {
+    assert_module_error(
+        r#"(import "./circular-a.mar")"#,
+        "test.mar",
+        "Circular dependency",
+    );
+}
+
+// ===== Module Caching (Diamond) =====
+
+#[test]
+fn module_import_caching_diamond() {
+    // Both test.mar and uses-math.mar import math.mar — should only load once
+    assert_module_num(
+        r#"(import "./math.mar")
+           (import "./uses-math.mar")
+           (+ (square 2) (quad 2))"#,
+        "test.mar",
+        20.0,
+    );
+}
+
+// ===== Data Types =====
+
+#[test]
+fn module_import_data_types() {
+    assert_module_formatted(
+        r#"(import "./types.mar")
+           (map-result (lambda (x) (* x 2)) (Ok 3))"#,
+        "test.mar",
+        "(Ok 6)",
+    );
+}
+
+// ===== Effects =====
+
+#[test]
+fn module_import_effects() {
+    assert_module_num(
+        r#"(import "./effects.mar")
+           (define counter 0)
+           (handle
+             (count-up 3)
+             ((inc k) -> (begin
+               (define counter (+ counter 1))
+               (resume k counter)))
+             ((get k) -> (resume k counter)))"#,
+        "test.mar",
+        3.0,
+    );
+}
+
+// ===== Error Cases =====
+
+#[test]
+fn module_import_nonexistent() {
+    assert_module_error(
+        r#"(import "./nonexistent.mar")"#,
+        "test.mar",
+        "not found",
+    );
+}
+
+#[test]
+fn module_import_no_file_context() {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+    let result = run_program(
+        &mut vm,
+        r#"(import "./math.mar")"#,
+        None,
+        &mut loader,
+        &interner,
+    );
+    match result {
+        Err(e) => assert!(
+            e.message.contains("file context"),
+            "expected 'file context' error, got: {}",
+            e.message
+        ),
+        Ok(v) => panic!("expected error, got: {:?}", format_value(&v)),
+    }
+}
+
+// ===== run_program without imports =====
+
+#[test]
+fn module_run_program_basic() {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+    let result = run_program(&mut vm, "(+ 1 2)", None, &mut loader, &interner)
+        .expect("run_program failed");
+    assert_eq!(result.as_number(), Some(3.0));
+}
+
+#[test]
+fn module_run_program_multiple_exprs() {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+    let result = run_program(
+        &mut vm,
+        "(define x 10) (define y 20) (+ x y)",
+        None,
+        &mut loader,
+        &interner,
+    )
+    .expect("run_program failed");
+    assert_eq!(result.as_number(), Some(30.0));
+}
+
+#[test]
+fn module_run_program_effects() {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    vm.captured_output = Some(String::new());
+    let mut loader = ModuleLoader::new();
+    let _result = run_program(
+        &mut vm,
+        r#"(perform println "hello from run_program")"#,
+        None,
+        &mut loader,
+        &interner,
+    )
+    .expect("run_program failed");
+    let output = vm.captured_output.take().unwrap_or_default();
+    assert_eq!(output, "hello from run_program\n");
+}
+
+// ===== Stdlib Tests =====
+
+#[test]
+fn stdlib_option_map_some() {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let test_file = workspace.join("stdlib").join("_test.mar");
+    let result = run_program(
+        &mut vm,
+        r#"(import "std:option" as opt)
+           (opt/map (lambda (x) (* x 2)) (Some 5))"#,
+        Some(&test_file),
+        &mut loader,
+        &interner,
+    )
+    .expect("stdlib option test failed");
+    assert_eq!(format_value(&result), "(Some 10)");
+}
+
+#[test]
+fn stdlib_option_map_none() {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let test_file = workspace.join("stdlib").join("_test.mar");
+    let result = run_program(
+        &mut vm,
+        r#"(import "std:option" as opt)
+           (opt/map (lambda (x) (* x 2)) None)"#,
+        Some(&test_file),
+        &mut loader,
+        &interner,
+    )
+    .expect("stdlib option test failed");
+    assert_eq!(format_value(&result), "None");
+}
+
+#[test]
+fn stdlib_option_unwrap_or() {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let test_file = workspace.join("stdlib").join("_test.mar");
+    let result = run_program(
+        &mut vm,
+        r#"(import "std:option" as opt)
+           (+ (opt/unwrap-or 0 (Some 42)) (opt/unwrap-or 99 None))"#,
+        Some(&test_file),
+        &mut loader,
+        &interner,
+    )
+    .expect("stdlib option test failed");
+    assert_eq!(result.as_number(), Some(141.0));
+}
+
+#[test]
+fn stdlib_option_is_some_is_none() {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let test_file = workspace.join("stdlib").join("_test.mar");
+    let result = run_program(
+        &mut vm,
+        r#"(import "std:option" as opt)
+           (list (opt/is-some (Some 1)) (opt/is-none (Some 1)) (opt/is-some None) (opt/is-none None))"#,
+        Some(&test_file),
+        &mut loader,
+        &interner,
+    )
+    .expect("stdlib option test failed");
+    assert_eq!(format_value(&result), "(#t #f #f #t)");
+}
+
+#[test]
+fn stdlib_result_map_ok() {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let test_file = workspace.join("stdlib").join("_test.mar");
+    let result = run_program(
+        &mut vm,
+        r#"(import "std:result" as res)
+           (res/map (lambda (x) (* x 3)) (res/Ok 5))"#,
+        Some(&test_file),
+        &mut loader,
+        &interner,
+    )
+    .expect("stdlib result test failed");
+    assert_eq!(format_value(&result), "(Ok 15)");
+}
+
+#[test]
+fn stdlib_result_map_err() {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let test_file = workspace.join("stdlib").join("_test.mar");
+    let result = run_program(
+        &mut vm,
+        r#"(import "std:result" as res)
+           (res/map (lambda (x) (* x 3)) (res/Err "oops"))"#,
+        Some(&test_file),
+        &mut loader,
+        &interner,
+    )
+    .expect("stdlib result test failed");
+    assert_eq!(format_value(&result), "(Err \"oops\")");
+}
+
+#[test]
+fn stdlib_result_is_ok_is_err() {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let test_file = workspace.join("stdlib").join("_test.mar");
+    let result = run_program(
+        &mut vm,
+        r#"(import "std:result" as res)
+           (list (res/is-ok (res/Ok 1)) (res/is-err (res/Ok 1)) (res/is-ok (res/Err "e")) (res/is-err (res/Err "e")))"#,
+        Some(&test_file),
+        &mut loader,
+        &interner,
+    )
+    .expect("stdlib result test failed");
+    assert_eq!(format_value(&result), "(#t #f #f #t)");
+}
+
+#[test]
+fn stdlib_result_unwrap_or() {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let test_file = workspace.join("stdlib").join("_test.mar");
+    let result = run_program(
+        &mut vm,
+        r#"(import "std:result" as res)
+           (+ (res/unwrap-or 0 (res/Ok 10)) (res/unwrap-or 99 (res/Err "fail")))"#,
+        Some(&test_file),
+        &mut loader,
+        &interner,
+    )
+    .expect("stdlib result test failed");
+    assert_eq!(result.as_number(), Some(109.0));
+}
+
+#[test]
+fn stdlib_io_println_effect() {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    vm.captured_output = Some(String::new());
+    let mut loader = ModuleLoader::new();
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let test_file = workspace.join("stdlib").join("_test.mar");
+    let _result = run_program(
+        &mut vm,
+        r#"(import "std:io" as io)
+           (io/println "hello from stdlib")"#,
+        Some(&test_file),
+        &mut loader,
+        &interner,
+    )
+    .expect("stdlib io test failed");
+    let output = vm.captured_output.take().unwrap_or_default();
+    assert_eq!(output, "hello from stdlib\n");
+}
+
+// =====================================================================
+// ===== FFI Tests (Phase 5b) ==========================================
+// =====================================================================
+
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_call_cos() {
+    // cos(0.0) → 1.0
+    let source = r#"
+(define lib (ffi-open "m" (list (list "cos" (list "f64") "f64"))))
+(ffi-call lib "cos" 0.0)
+"#;
+    assert_num(source, 1.0);
+}
+
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_call_sqrt() {
+    // sqrt(16.0) → 4.0
+    let source = r#"
+(define lib (ffi-open "m" (list (list "sqrt" (list "f64") "f64"))))
+(ffi-call lib "sqrt" 16.0)
+"#;
+    assert_num(source, 4.0);
+}
+
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_multiple_sigs() {
+    // sin(0) + cos(0) + pow(2,3) → 0 + 1 + 8 = 9
+    let source = r#"
+(define lib (ffi-open "m" (list
+  (list "sin" (list "f64") "f64")
+  (list "cos" (list "f64") "f64")
+  (list "pow" (list "f64" "f64") "f64"))))
+(+ (+ (ffi-call lib "sin" 0.0) (ffi-call lib "cos" 0.0)) (ffi-call lib "pow" 2.0 3.0))
+"#;
+    assert_num(source, 9.0);
+}
+
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_struct_roundtrip() {
+    let source = r#"
+(define point-def (ffi-struct "Point" (list (list "x" "f64") (list "y" "f64"))))
+(define p (struct-new point-def 3.0 4.0))
+(+ (struct-get p "x") (struct-get p "y"))
+"#;
+    assert_num(source, 7.0);
+}
+
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_struct_set() {
+    let source = r#"
+(define point-def (ffi-struct "Point" (list (list "x" "f64") (list "y" "f64"))))
+(define p (struct-new point-def 1.0 2.0))
+(define p2 (struct-set p "x" 10.0))
+(+ (struct-get p2 "x") (struct-get p2 "y"))
+"#;
+    assert_num(source, 12.0);
+}
+
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_close_library() {
+    let source = r#"
+(define lib (ffi-open "m" (list (list "cos" (list "f64") "f64"))))
+(ffi-close lib)
+"#;
+    assert_nil(source);
 }

@@ -51,6 +51,8 @@ pub struct VM {
     pub(crate) resumed_continuations: HashSet<u64>,
     /// Captured output for testing (when Some, print/println write here instead of stdout)
     pub captured_output: Option<String>,
+    /// When Some, records the names of globals written via SetGlobal (for module export tracking).
+    pub dirty_globals: Option<HashSet<String>>,
 }
 
 impl VM {
@@ -64,6 +66,7 @@ impl VM {
             handler_stack: Vec::new(),
             resumed_continuations: HashSet::new(),
             captured_output: None,
+            dirty_globals: None,
         }
     }
 
@@ -597,6 +600,11 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     }
                 };
                 let value = vm.pop();
+
+                // Track dirty globals for module export detection
+                if let Some(ref mut dirty) = vm.dirty_globals {
+                    dirty.insert(name.clone());
+                }
 
                 // Check for N-ary constructor encoding: "\0ctor:Name:arity"
                 if let Some(s) = value.as_string() {

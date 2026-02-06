@@ -1250,6 +1250,42 @@ impl<'a> Compiler<'a> {
 
 // --- Public API ---
 
+/// Result of compiling a single expression with external context.
+/// Returns the chunk along with updated constructor/effect knowledge.
+pub struct CompileResult {
+    pub chunk: Chunk,
+    pub known_constructors: HashSet<Symbol>,
+    pub known_effect_ops: HashMap<Symbol, Symbol>,
+}
+
+/// Compile a single expression with external knowledge of constructors and effect ops.
+/// Used by the module system to compile expressions one at a time while accumulating
+/// knowledge across expressions and imports.
+pub fn compile_expr_with_context(
+    expr: &Expr,
+    interner: &Interner,
+    known_constructors: &HashSet<Symbol>,
+    known_effect_ops: &HashMap<Symbol, Symbol>,
+) -> Result<CompileResult, CompileError> {
+    let ks = KnownSymbols::new(interner);
+    let mut compiler = Compiler::new(
+        "<script>",
+        interner,
+        &ks,
+        None,
+        known_constructors.clone(),
+        known_effect_ops.clone(),
+    );
+    compiler.compile_expr(expr, false)?;
+    compiler.emit(Op::Return, Compiler::get_line(expr));
+    compiler.chunk.local_count = compiler.local_count;
+    Ok(CompileResult {
+        chunk: compiler.chunk,
+        known_constructors: compiler.known_constructors,
+        known_effect_ops: compiler.known_effect_ops,
+    })
+}
+
 /// Compile a single expression to bytecode.
 pub fn compile(expr: &Expr, interner: &Interner) -> Result<Chunk, CompileError> {
     let ks = KnownSymbols::new(interner);

@@ -1,0 +1,13 @@
+; Module with effect definitions
+
+(effect Counter
+  (inc (-> Unit Int))
+  (get (-> Unit Int)))
+
+(define (count-up : (-> Int Int))
+  (lambda (n)
+    (if (= n 0)
+      (perform get)
+      (begin
+        (perform inc)
+        (count-up (- n 1))))))

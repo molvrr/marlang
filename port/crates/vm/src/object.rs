@@ -29,6 +29,15 @@ pub enum VMObject {
     TcpListener(u64),
     HttpServer(u64),
     HttpRequest(u64),
+    // FFI types
+    #[cfg(feature = "ffi")]
+    FfiLibrary(std::sync::Arc<crate::ffi::FfiLibrary>),
+    #[cfg(feature = "ffi")]
+    FfiPointer(u64),
+    #[cfg(feature = "ffi")]
+    FfiStructDef(std::sync::Arc<crate::ffi::FfiStructDef>),
+    #[cfg(feature = "ffi")]
+    FfiStruct(Box<crate::ffi::FfiStruct>),
 }
 
 impl VMObject {
@@ -47,6 +56,14 @@ impl VMObject {
             VMObject::TcpListener(_) => "tcp-listener",
             VMObject::HttpServer(_) => "http-server",
             VMObject::HttpRequest(_) => "http-request",
+            #[cfg(feature = "ffi")]
+            VMObject::FfiLibrary(_) => "ffi-library",
+            #[cfg(feature = "ffi")]
+            VMObject::FfiPointer(_) => "ffi-pointer",
+            #[cfg(feature = "ffi")]
+            VMObject::FfiStructDef(_) => "ffi-struct-def",
+            #[cfg(feature = "ffi")]
+            VMObject::FfiStruct(_) => "ffi-struct",
         }
     }
 }
@@ -64,6 +81,8 @@ impl PartialEq for VMObject {
             }
             (VMObject::Pid(a), VMObject::Pid(b)) => a == b,
             (VMObject::Channel(a), VMObject::Channel(b)) => a == b,
+            #[cfg(feature = "ffi")]
+            (VMObject::FfiPointer(a), VMObject::FfiPointer(b)) => a == b,
             _ => false,
         }
     }
