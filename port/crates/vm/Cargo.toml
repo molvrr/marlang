@@ -1,0 +1,7 @@
+[package]
+name = "marlang-vm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+marlang-core = { path = "../core" }

@@ -357,91 +357,84 @@ The TypeScript VM uses `VMValue = number | VMObject` (unboxed JS numbers). In Ru
 ///
 /// Layout (64-bit IEEE 754):
 ///   Normal f64          → float value (including +0, -0, Inf, NaN)
-///   0x7FF8_0000_0000_0000 | tag | payload → tagged pointer or immediate
+///   QNAN | tag | payload → tagged pointer or immediate
 ///
-/// Tags (bits 48..50):
-///   000 → object pointer (48-bit, aligned — lower 3 bits always zero)
-///   001 → nil
-///   010 → true
-///   011 → false
-#[derive(Clone, Copy)]
+/// Tags (low bits within QNAN space):
+///   QNAN | 1 → nil
+///   QNAN | 2 → true
+///   QNAN | 3 → false
+///   SIGN_BIT | QNAN | 48-bit ptr → object (Arc<VMObject>)
 #[repr(transparent)]
-pub struct Value(u64);
+pub struct Value(u64);  // Manual Clone/Drop for Arc refcounting
 
-const QNAN: u64          = 0x7FF8_0000_0000_0000;
-const TAG_OBJ: u64       = 0x0000_0000_0000_0000;
-const TAG_NIL: u64       = 0x0001_0000_0000_0000;
-const TAG_TRUE: u64       = 0x0002_0000_0000_0000;
-const TAG_FALSE: u64      = 0x0003_0000_0000_0000;
-const PTR_MASK: u64       = 0x0000_FFFF_FFFF_FFFF;
+const QNAN: u64          = 0x7FFC_0000_0000_0000;  // Quiet NaN prefix (extra 0x4 bit)
+const SIGN_BIT: u64      = 0x8000_0000_0000_0000;
+const TAG_NIL: u64       = 1;
+const TAG_TRUE: u64      = 2;
+const TAG_FALSE: u64     = 3;
 
 impl Value {
-    pub const NIL: Value = Value(QNAN | TAG_NIL);
-    pub const TRUE: Value = Value(QNAN | TAG_TRUE);
-    pub const FALSE: Value = Value(QNAN | TAG_FALSE);
-
     #[inline]
-    pub fn from_f64(n: f64) -> Value {
+    pub fn number(n: f64) -> Value {
         Value(n.to_bits())
     }
 
     #[inline]
-    pub fn from_object(obj: Arc<VMObject>) -> Value {
-        let ptr = Arc::into_raw(obj) as u64;
-        debug_assert!(ptr & !PTR_MASK == 0, "pointer exceeds 48 bits");
-        Value(QNAN | TAG_OBJ | ptr)
+    pub fn nil() -> Value { Value(QNAN | TAG_NIL) }
+    pub fn boolean(b: bool) -> Value { Value(QNAN | if b { TAG_TRUE } else { TAG_FALSE }) }
+
+    pub fn object(obj: VMObject) -> Value {
+        let arc = Arc::new(obj);
+        let ptr = Arc::into_raw(arc) as u64;
+        debug_assert!(ptr & !(0x0000_FFFF_FFFF_FFFF) == 0, "pointer exceeds 48 bits");
+        Value(SIGN_BIT | QNAN | ptr)
     }
 
     #[inline]
     pub fn is_number(&self) -> bool {
-        // Any bit pattern where the QNAN prefix is NOT set is a real f64
         (self.0 & QNAN) != QNAN
     }
 
     #[inline]
-    pub fn as_f64(&self) -> Option<f64> {
-        if self.is_number() { Some(f64::from_bits(self.0)) } else { None }
+    pub fn is_object(&self) -> bool {
+        (self.0 & (SIGN_BIT | QNAN)) == (SIGN_BIT | QNAN)
     }
 
     #[inline]
-    pub fn as_object(&self) -> Option<Arc<VMObject>> {
-        if (self.0 & (QNAN | 0x0007_0000_0000_0000)) == QNAN {
-            let ptr = (self.0 & PTR_MASK) as *const VMObject;
-            // Reconstruct the Arc without dropping the original (increment refcount)
-            let arc = unsafe { Arc::from_raw(ptr) };
-            let clone = arc.clone();
-            std::mem::forget(arc); // Don't decrement — we still hold it in the Value
-            Some(clone)
+    pub fn as_number(&self) -> Option<f64> {
+        if self.is_number() { Some(f64::from_bits(self.0)) } else { None }
+    }
+
+    pub fn as_object(&self) -> Option<&VMObject> {
+        if self.is_object() {
+            let ptr = (self.0 & 0x0000_FFFF_FFFF_FFFF) as *const VMObject;
+            unsafe { Some(&*ptr) }
         } else {
             None
         }
     }
 
     #[inline]
-    pub fn is_falsy(&self) -> bool {
+    pub fn is_truthy(&self) -> bool {
         // Only nil and #f are falsy (matches TS behavior)
-        self.0 == Self::NIL.0 || self.0 == Self::FALSE.0
+        !self.is_nil() && !self.is_false()
     }
 }
 
 impl Drop for Value {
     fn drop(&mut self) {
-        // If this Value holds an object pointer, drop the Arc
-        if (self.0 & (QNAN | 0x0007_0000_0000_0000)) == QNAN && (self.0 & PTR_MASK) != 0 {
-            let ptr = (self.0 & PTR_MASK) as *const VMObject;
-            unsafe { Arc::from_raw(ptr); } // Reconstructs and drops, decrementing refcount
+        if self.is_object() {
+            let ptr = (self.0 & 0x0000_FFFF_FFFF_FFFF) as *const VMObject;
+            unsafe { Arc::decrement_strong_count(ptr); }
         }
     }
 }
 
 impl Clone for Value {
     fn clone(&self) -> Self {
-        if (self.0 & (QNAN | 0x0007_0000_0000_0000)) == QNAN && (self.0 & PTR_MASK) != 0 {
-            // Object pointer — increment refcount
-            let ptr = (self.0 & PTR_MASK) as *const VMObject;
-            let arc = unsafe { Arc::from_raw(ptr) };
-            std::mem::forget(arc.clone()); // Increment refcount, leak the clone into the new Value
-            std::mem::forget(arc);         // Don't decrement the original
+        if self.is_object() {
+            let ptr = (self.0 & 0x0000_FFFF_FFFF_FFFF) as *const VMObject;
+            unsafe { Arc::increment_strong_count(ptr); }
         }
         Value(self.0)
     }
@@ -450,7 +443,7 @@ impl Clone for Value {
 
 > **Platform assumptions:** NaN-boxing relies on 48-bit virtual addresses (x86-64 canonical addresses, ARM64 default). For WASM (32-bit pointers), a tagged enum fallback is used — see [Section 15: WASM & Web Editor](#15-wasm--web-editor) for details.
 >
-> **Note:** The exact bit layout will be finalized during implementation. The `Clone`/`Drop` impls above demonstrate the refcounting discipline: every `Value` that holds an object pointer owns one `Arc` refcount. The key property: numbers are zero-cost, object access requires one branch + refcount increment.
+> **Implementation note (Phase 3):** The NaN-boxing uses `QNAN = 0x7FFC_0000_0000_0000` (not `0x7FF8` from the original spec). The extra `0x4` bit ensures all tagged values sit firmly in the quiet NaN space. Objects use the sign bit + QNAN + 48-bit pointer. The `Clone`/`Drop` impls use `Arc::increment_strong_count` / `Arc::decrement_strong_count` (cleaner than the original `from_raw` + `forget` pattern). `as_object()` returns `&VMObject` (borrow, no refcount change) instead of `Arc<VMObject>` (clone) — more efficient for read access.
 
 ### 3.7 VMObject
 
@@ -494,7 +487,10 @@ pub enum VMObject {
     HttpRequest(u64),
 }
 
-pub type BuiltinFn = fn(&mut VM, &[Value]) -> Result<Value, VMError>;
+// Phase 3 (compiler only): simple signature without VM access
+pub type BuiltinFn = fn(&[Value]) -> Value;
+// Phase 4 (execution engine) will extend to:
+// pub type BuiltinFn = fn(&mut VM, &[Value]) -> Result<Value, VMError>;
 ```
 
 ### 3.8 Bytecode
@@ -555,12 +551,13 @@ pub struct Instruction {
     pub line: u32,      // Source line for error reporting
 }
 
-/// Constant pool entry — pre-converted to Value at load time.
+/// Constant pool entry — pre-converted to Value at load time (Phase 4).
+/// During compilation (Phase 3), uses ConstantValue enum for clean separation.
 pub struct Chunk {
     pub code: Vec<Instruction>,
-    pub constants: Vec<Value>,      // Pre-converted (no separate ConstantValue type)
-    pub local_count: u16,
-    pub source_file: Option<Arc<str>>,
+    pub constants: Vec<ConstantValue>,  // Compile-time; preconvert_constants() for Phase 4
+    pub local_count: u32,
+    pub source_file: Option<String>,
 }
 
 /// A compiled function template — instantiated into closures at runtime.
@@ -838,7 +835,7 @@ pub fn format_error(err: &TypeError) -> String { /* ... */ }
 
 ---
 
-## 6. Bytecode Compiler
+## 6. Bytecode Compiler ✅
 
 The compiler transforms `Vec<Expr>` into a `Chunk`. Architecture matches TypeScript exactly:
 
@@ -850,20 +847,35 @@ pub struct Compiler<'a> {
     chunk: Chunk,
     /// Local variable slots for the current scope.
     locals: Vec<Local>,
+    local_count: u32,
     /// Upvalue descriptors for the current function.
     upvalues: Vec<UpvalueDescriptor>,
-    /// Enclosing compiler (for nested functions/closures).
-    enclosing: Option<&'a mut Compiler<'a>>,
-    /// String interner (shared).
-    interner: &'a mut Interner,
+    /// Snapshot of parent scope for upvalue resolution.
+    enclosing: Option<Box<ParentScope>>,
+    /// String interner (shared, immutable reference).
+    interner: &'a Interner,
+    /// Pre-interned known symbols for fast dispatch.
+    known_symbols: &'a KnownSymbols,
     /// Scope depth for variable resolution.
     scope_depth: u32,
+    /// Known data constructors (for pattern matching).
+    known_constructors: HashSet<Symbol>,
+    /// Known effect operations (opName → effectName).
+    known_effect_ops: HashMap<Symbol, Symbol>,
 }
 
 struct Local {
     name: Symbol,
     depth: u32,
-    captured: bool,
+    slot: u32,
+}
+
+/// Snapshot of parent's locals+upvalues for child upvalue resolution.
+/// Avoids Rust's borrow-checker issues with mutable enclosing references.
+struct ParentScope {
+    locals: Vec<Local>,
+    upvalues: Vec<UpvalueDescriptor>,
+    enclosing: Option<Box<ParentScope>>,
 }
 ```
 
@@ -2325,8 +2337,9 @@ The TypeScript codebase has **467 tests** across 13 test files:
 | `parser.test.ts` | 34 | `core` | Unit tests in `parser.rs` |
 | `interpreter.test.ts` | 60 | `vm` | Integration tests (VM replaces tree-walker) |
 | `type-system.test.ts` | 63 | `types` | Unit tests in `tests.rs` — 54 ported (type-checking only; 9 runtime-only tests skipped) ✅ |
-| `effects.test.ts` | 53 | `vm` | Integration tests |
-| `vm.test.ts` | 67 | `vm` | Integration tests |
+| N/A (compiler+value) | N/A | `vm` | 65 unit tests: compiler (57) + NaN-boxed Value (8) ✅ |
+| `effects.test.ts` | 53 | `vm` | Integration tests (Phase 4) |
+| `vm.test.ts` | 67 | `vm` | Integration tests (Phase 4) |
 | `tco.test.ts` | 7 | `vm` | Integration tests |
 | `modules.test.ts` | 18 | `modules` | Integration tests |
 | `stdlib.test.ts` | 69 | `modules` | Integration tests |
@@ -2515,20 +2528,31 @@ criterion_main!(benches);
 - **`mergeEnv()` deferred** — The TS `mergeEnv()` function (used for module imports with qualified/selective modes) is not ported yet since import processing is stubbed. Will be needed in Phase 5.
 - **54 tests**: basic types (4), arithmetic (3), type annotations (5), functions (2), if expressions (3), let expressions (3), ADTs (2), typeclasses (2), recursive mu-types (4), exhaustiveness checking (7), Show typeclass (7), variadic arithmetic (9), integration (3)
 
-### Phase 3: Bytecode Compiler (Weeks 5-6)
+### Phase 3: Bytecode Compiler ✅
 
 **Goal:** Compile Marlang AST to bytecode.
 
-- [ ] Port opcodes, `Instruction`, `Chunk`, `FunctionPrototype`
-- [ ] Implement NaN-boxed `Value`
-- [ ] Port `VMObject` enum
-- [ ] Port compiler: expressions, special forms, closures, pattern matching
-- [ ] Port binary operator optimization
-- [ ] Port data constructor compilation
-- [ ] Port handler descriptor compilation
-- [ ] Port disassembler
+- [x] Port opcodes, `Instruction`, `Chunk`, `FunctionPrototype`
+- [x] Implement NaN-boxed `Value`
+- [x] Port `VMObject` enum
+- [x] Port compiler: expressions, special forms, closures, pattern matching
+- [x] Port binary operator optimization
+- [x] Port data constructor compilation
+- [x] Port handler descriptor compilation
+- [x] Port disassembler
 
-**Deliverable:** Compiler produces correct bytecode for all language features. Disassembler output matches TypeScript.
+**Deliverable:** `cargo test -p marlang-vm` passes 65 tests (57 compiler + 8 value). Compiler produces correct bytecode for all language features. Disassembler output matches TypeScript.
+
+**Implementation notes:**
+- Crate: `port/crates/vm/` = `marlang-vm`, depends only on `marlang-core` (not `marlang-types` — type annotations are handled syntactically)
+- 8 source files: `bytecode.rs`, `value.rs`, `object.rs`, `compiler.rs`, `debug.rs`, `errors.rs`, `lib.rs` + `tests.rs`
+- **ParentScope snapshot pattern** — The TS compiler uses `enclosing: CompilerContext | null` (mutable reference to parent). Rust's borrow checker prevents `&mut` chains. Solution: when creating a child compiler (for lambda/handle), clone parent's `locals` + `upvalues` into a `ParentScope` struct. Child walks this chain for `resolve_upvalue`. Cost: one `Vec<Local>` clone per nested function — negligible since scopes are small.
+- **KnownSymbols pre-interning** — All 26 special form names (`define`, `lambda`, `if`, `let`, `begin`, `cond`, `match`, `data`, `effect`, `perform`, `handle`, `resume`, `import`, `class`, `instance`, `type`, `else`, `->`, `return`, `:`, `_`, `#t`, `#f`, `nil`, `negate`, `-`) are interned once at compiler creation. Dispatch uses `Symbol` equality (u32 comparison) instead of string comparison — faster than the TS `switch` on strings.
+- **Separate ConstantValue type** — The spec proposed pre-converting constants to `Value` at compile time (`constants: Vec<Value>` in `Chunk`). The implementation keeps a separate `ConstantValue` enum for compile-time constants and provides `preconvert_constants()` for Phase 4 conversion. This avoids NaN-boxed pointer management during compilation and makes the constant pool serializable.
+- **`String` not `Symbol` in bytecode types** — `FunctionPrototype.name`, `ConstantValue::String`, ADT tags in `VMObject` use `String` (not `Symbol`) since these are compile-time data that may outlive the interner or need independent ownership. Runtime interning of globals happens at VM execution time (Phase 4).
+- **`BuiltinFn` simplified** — Typed as `fn(&[Value]) -> Value` for Phase 3 (no `&mut VM` parameter). Phase 4 will extend this when implementing the execution engine.
+- **NaN-boxing layout** — Uses `QNAN = 0x7FFC_0000_0000_0000` (quiet NaN prefix), tag bits 1/2/3 for nil/true/false, sign bit + 48-bit pointer for objects. Manual `Clone`/`Drop` for Arc refcounting. Differs from spec's `0x7FF8` prefix — the extra `0x4` bit ensures all tagged values are quiet NaN (avoids floating-point hardware traps).
+- **65 tests**: literals (7), arithmetic (6), comparisons (5), control flow (5), variables (6), functions (5), ADTs+patterns (8), effects (5), type forms (2), disassembler (3), import error (1), compile API (3), value tests (8)
 
 ### Phase 4: VM Execution (Weeks 6-8)
 
@@ -2550,7 +2574,7 @@ criterion_main!(benches);
 **Goal:** Import resolution with stdlib bundling.
 
 - [ ] Port `ModuleLoader` with prefix resolution
-- [ ] Bundle stdlib via `include_str!`
+- [ ] Bundle stdlib same way the typescript version does
 - [ ] Port module caching
 - [ ] Port virtual modules (for testing)
 - [ ] Wire module loading into compiler

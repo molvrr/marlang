@@ -12,3 +12,10 @@ version = "0.1.0"
 dependencies = [
  "marlang-core",
 ]
+
+[[package]]
+name = "marlang-vm"
+version = "0.1.0"
+dependencies = [
+ "marlang-core",
+]
