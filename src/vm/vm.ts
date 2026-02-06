@@ -78,6 +78,10 @@ function valuesEqual(a: VMValue, b: VMValue): boolean {
   if (a.kind === 'string' && b.kind === 'string') return a.value === b.value;
   if (a.kind === 'pid' && b.kind === 'pid') return a.id === b.id;
   if (a.kind === 'channel' && b.kind === 'channel') return a.id === b.id;
+  if (a.kind === 'tcp-socket' && b.kind === 'tcp-socket') return a.id === b.id;
+  if (a.kind === 'tcp-listener' && b.kind === 'tcp-listener') return a.id === b.id;
+  if (a.kind === 'http-server' && b.kind === 'http-server') return a.id === b.id;
+  if (a.kind === 'http-request' && b.kind === 'http-request') return a.id === b.id;
   if (a.kind === 'adt-value' && b.kind === 'adt-value') {
     if (a.constructor !== b.constructor) return false;
     if (a.args.length !== b.args.length) return false;
@@ -1065,6 +1069,10 @@ export function formatVMValue(value: VMValue): string {
     case 'ffi-pointer': return `#<ffi-pointer 0x${value.ptr.toString(16)}>`;
     case 'ffi-struct-def': return `#<ffi-struct-def ${value.def.name} (${value.def.size} bytes)>`;
     case 'ffi-struct': return `#<ffi-struct ${value.def.name}>`;
+    case 'tcp-socket': return `#<tcp-socket ${value.id}>`;
+    case 'tcp-listener': return `#<tcp-listener ${value.id}>`;
+    case 'http-server': return `#<http-server ${value.id}>`;
+    case 'http-request': return `#<http-request ${value.id}>`;
   }
 }
 
@@ -1088,5 +1096,9 @@ function toRuntimeValue(v: VMValue): RuntimeValue {
     case 'ffi-pointer': return { kind: 'ffi-pointer', ptr: v.ptr };
     case 'ffi-struct-def': return { kind: 'ffi-struct-def', def: v.def };
     case 'ffi-struct': return { kind: 'ffi-struct', def: v.def, buffer: v.buffer };
+    case 'tcp-socket': return { kind: 'nil' };
+    case 'tcp-listener': return { kind: 'nil' };
+    case 'http-server': return { kind: 'nil' };
+    case 'http-request': return { kind: 'nil' };
   }
 }

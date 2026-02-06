@@ -1,0 +1,49 @@
+; Net module - TCP networking using the effect system
+;
+; All TCP operations are effects handled by the scheduler (run-fibers).
+;
+; Example usage:
+;   (import "std:net" as net)
+;
+;   (run-fibers (lambda ()
+;     (let ((sock (net/connect "127.0.0.1" 8080)))
+;       (net/send sock "hello\n")
+;       (let ((resp (net/recv sock)))
+;         (perform println resp))
+;       (net/close sock))))
+
+; === TCP Effect ===
+
+(effect Tcp
+  (tcp-connect (-> String Int TcpSocket))
+  (tcp-listen  (-> Int TcpListener))
+  (tcp-accept  (-> TcpListener TcpSocket))
+  (tcp-send    (-> TcpSocket String Unit))
+  (tcp-recv    (-> TcpSocket String))
+  (tcp-close   (-> TcpSocket Unit)))
+
+; === TCP Operations ===
+
+; connect : (-> String Int {Tcp} TcpSocket)
+; Connect to a TCP server at host:port
+(define connect (lambda (host port) (perform tcp-connect host port)))
+
+; listen : (-> Int {Tcp} TcpListener)
+; Start listening for TCP connections on port
+(define listen (lambda (port) (perform tcp-listen port)))
+
+; accept : (-> TcpListener {Tcp} TcpSocket)
+; Accept the next incoming connection (blocks until one arrives)
+(define accept (lambda (listener) (perform tcp-accept listener)))
+
+; send : (-> TcpSocket String {Tcp} Unit)
+; Send data over a TCP socket
+(define send (lambda (sock data) (perform tcp-send sock data)))
+
+; recv : (-> TcpSocket {Tcp} String)
+; Receive data from a TCP socket (blocks until data arrives, nil on close)
+(define recv (lambda (sock) (perform tcp-recv sock)))
+
+; close : (-> TcpSocket {Tcp} Unit)
+; Close a TCP socket or listener
+(define close (lambda (sock) (perform tcp-close sock)))

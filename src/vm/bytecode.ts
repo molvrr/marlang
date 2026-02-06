@@ -150,7 +150,11 @@ export type VMObject =
   | VMFFILibrary
   | VMFFIPointer
   | VMFFIStructDef
-  | VMFFIStruct;
+  | VMFFIStruct
+  | VMTcpSocket
+  | VMTcpListener
+  | VMHttpServer
+  | VMHttpRequest;
 
 // FFI types — reuse StructDef/FFISignature from core/types.ts
 import type { FFISignature, StructDef } from '../core/types';
@@ -176,6 +180,27 @@ export type VMFFIStruct = {
   kind: 'ffi-struct';
   def: StructDef;
   buffer: Uint8Array;
+};
+
+// Network types
+export type VMTcpSocket = {
+  kind: 'tcp-socket';
+  id: number;
+};
+
+export type VMTcpListener = {
+  kind: 'tcp-listener';
+  id: number;
+};
+
+export type VMHttpServer = {
+  kind: 'http-server';
+  id: number;
+};
+
+export type VMHttpRequest = {
+  kind: 'http-request';
+  id: number;
 };
 
 export type VMValue = number | VMObject;
