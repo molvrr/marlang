@@ -71,8 +71,9 @@ impl PartialEq for VMObject {
 
 /// A function type for built-in operations.
 ///
-/// Phase 4 may extend this to `fn(&[Value], &mut VM) -> Value`.
-pub type BuiltinFn = fn(&[Value]) -> Value;
+/// Takes a mutable reference to the VM (for globals, stack access) and argument slice.
+/// Returns `Result<Value, VMError>` to propagate runtime errors.
+pub type BuiltinFn = fn(&mut crate::vm::VM, &[Value]) -> Result<Value, crate::errors::VMError>;
 
 /// A closure: a function prototype plus captured upvalues.
 #[derive(Debug, Clone)]
@@ -108,6 +109,8 @@ pub struct VMHandlerFrame {
     // Capture snapshots (mutable — updated by RESUME)
     pub capture_frame_start: usize,
     pub capture_stack_start: usize,
+    /// Unique ID for identity-based handler matching (replaces reference equality from TypeScript).
+    pub id: u64,
 }
 
 /// A captured one-shot continuation for effect handling.
@@ -116,7 +119,8 @@ pub struct VMContinuation {
     pub frames: Vec<CallFrame>,
     pub stack: Vec<Value>,
     pub handler_stack: Vec<VMHandlerFrame>,
-    pub resumed: bool,
+    /// Unique ID used to enforce one-shot semantics via VM::resumed_continuations.
+    pub id: u64,
     pub frame_base: usize,
     pub stack_base: usize,
 }

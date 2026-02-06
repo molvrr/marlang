@@ -2554,20 +2554,32 @@ criterion_main!(benches);
 - **NaN-boxing layout** — Uses `QNAN = 0x7FFC_0000_0000_0000` (quiet NaN prefix), tag bits 1/2/3 for nil/true/false, sign bit + 48-bit pointer for objects. Manual `Clone`/`Drop` for Arc refcounting. Differs from spec's `0x7FF8` prefix — the extra `0x4` bit ensures all tagged values are quiet NaN (avoids floating-point hardware traps).
 - **65 tests**: literals (7), arithmetic (6), comparisons (5), control flow (5), variables (6), functions (5), ADTs+patterns (8), effects (5), type forms (2), disassembler (3), import error (1), compile API (3), value tests (8)
 
-### Phase 4: VM Execution (Weeks 6-8)
+### Phase 4: VM Execution ✅
 
 **Goal:** Execute bytecode with effects and continuations.
 
-- [ ] Implement `VM` struct with stack, frames, globals, handler stack
-- [ ] Implement `run()` main loop with `RunResult` enum
-- [ ] Port all opcode implementations
-- [ ] Port `call_closure()` and `resume_continuation()`
-- [ ] Port `run_with_handler()` with deep handler semantics
-- [ ] Port default IO handlers
-- [ ] Port built-in functions (arithmetic, comparison, list, show, ADTs)
-- [ ] Port `interpret()` entry point
+- [x] Implement `VM` struct with stack, frames, globals, handler stack
+- [x] Implement `run()` main loop with `VMSignal` enum
+- [x] Port all opcode implementations
+- [x] Port `call_closure()` and `resume_continuation()`
+- [x] Port `run_with_handler()` with deep handler semantics
+- [x] Port default IO handlers
+- [x] Port built-in functions (arithmetic, comparison, list, show, ADTs)
+- [x] Port `interpret()` entry point
 
-**Deliverable:** `cargo test -p marlang-vm` passes VM (67), effects (53), interpreter (60), TCO (7) = **187 tests**.
+**Deliverable:** `cargo test -p marlang-vm` passes 191 tests (126 execution + 65 compiler/value).
+
+**Implementation notes:**
+- 2 new source files: `vm.rs` (~1500 lines), `builtins.rs` (~240 lines); modified `errors.rs`, `object.rs`, `value.rs`, `lib.rs`, `tests.rs`
+- **`VMSignal` enum instead of `RunResult`** — The spec proposed `RunResult { Ok, Effect }`. The implementation uses `Result<Value, VMSignal>` where `VMSignal` is `Error(VMError) | Effect(EffectSignal)`. This lets the `?` operator propagate both errors and effects through the call chain naturally.
+- **Local frame copy pattern** — The `run()` loop clones the current frame into a local variable, works on the copy, and calls `save_frame()` before any operation that might read `vm.frames` (calls, errors). This avoids borrow-checker conflicts between frame reads and mutable VM access. Cost: one clone per frame switch — acceptable since frames are small.
+- **Handler identity via `u64` IDs** — TypeScript uses reference equality (`signal.targetHandler === handlerFrame`) to match effects to handlers. Rust uses a global `AtomicU64` counter to assign unique IDs to each `VMHandlerFrame`. `EffectSignal.target_handler_id` matches against `VMHandlerFrame.id`.
+- **One-shot continuation enforcement** — The spec proposed `cont.resumed = true` on the `VMContinuation` struct, but this doesn't work with Arc-backed values (aliases share the same data via Arc, but the `resumed` flag is only set on the clone). Solution: each `VMContinuation` gets a unique `id: u64`, and the VM tracks resumed IDs in `resumed_continuations: HashSet<u64>`. This correctly prevents aliased continuations from being resumed multiple times.
+- **Stack slot cleanup on unwind** — `VM::clear_stack_slots(new_top)` replaces slots `[new_top..stack_top)` with `Value::nil()` before lowering `stack_top`, releasing Arc references that would otherwise leak.
+- **Manual JSON parsing** — Handler descriptors (`\0handler:{...}`) are parsed with a hand-rolled JSON parser (~90 lines). No `serde_json` dependency.
+- **Pre-convert constants per frame** — `preconvert_constants_recursive()` converts `ConstantValue` to `Value` on each frame switch. A future optimization could cache these per-chunk.
+- **`captured_output: Option<String>`** — Test IO capture: when `Some`, `print`/`println` write to the buffer instead of stdout.
+- **126 execution tests**: literals, arithmetic, string concat, comparison, control flow, variables, functions, closures, TCO (100k iterations), ADTs, pattern matching, show, not, string ops, effects (handle/perform/resume, stateful counter, abort, state effect, one-shot enforcement), default IO, error handling, type forms, complex programs (map, fold, mutual recursion, higher-order, MkPair, Ok/Err)
 
 ### Phase 5: Module System (Weeks 8-9)
 

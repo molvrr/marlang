@@ -650,6 +650,18 @@ Marlang has two execution backends:
 4. **Tree-walker** (`interpreter.ts`) - evaluates the AST directly (default)
 5. **Bytecode VM** (`src/vm/`) - compiles to bytecode and runs on a stack-based VM (`--vm` flag)
 
+### Rust Port (`port/`)
+
+A native Rust port is in progress under `port/`, targeting a standalone binary with improved performance. Phases 1-4 are complete:
+
+- **`marlang-core`** — Lexer, parser, string interning, spans (75 tests)
+- **`marlang-types`** — HM type inference, typeclasses, exhaustiveness checking (54 tests)
+- **`marlang-vm`** — Bytecode compiler, NaN-boxed values, VM execution engine with algebraic effects (191 tests)
+
+```bash
+cargo test --workspace    # Run all 320 Rust tests (from port/ directory)
+```
+
 ### Bytecode VM (`src/vm/`)
 
 - **`bytecode.ts`** - Bytecode IR: opcodes, instructions, chunks, VM value types
@@ -698,6 +710,11 @@ marlang/
 │   ├── document.ts       # Open document management
 │   ├── analyzer.ts       # Analysis pipeline
 │   └── handlers/         # LSP request handlers
+├── port/                 # Rust port (Cargo workspace)
+│   └── crates/
+│       ├── core/         # marlang-core: lexer, parser
+│       ├── types/        # marlang-types: type inference
+│       └── vm/           # marlang-vm: compiler, VM engine
 ├── bench/                # Benchmarks (tree-walker vs VM)
 │   ├── run.ts            # Benchmark runner
 │   ├── fib.mar           # Recursive fibonacci

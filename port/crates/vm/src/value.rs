@@ -222,6 +222,80 @@ impl std::fmt::Debug for Value {
     }
 }
 
+// --- Display formatting ---
+
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", format_value(self))
+    }
+}
+
+/// Format a VM value for display (ports `formatVMValue` from TypeScript).
+pub fn format_value(value: &Value) -> String {
+    if let Some(n) = value.as_number() {
+        if n == n.trunc() && n.abs() < 1e15 && !n.is_infinite() {
+            return format!("{}", n as i64);
+        }
+        return format!("{}", n);
+    }
+    if value.is_nil() {
+        return "nil".to_string();
+    }
+    if value.is_true() {
+        return "#t".to_string();
+    }
+    if value.is_false() {
+        return "#f".to_string();
+    }
+    if let Some(obj) = value.as_object() {
+        return format_object(obj);
+    }
+    "unknown".to_string()
+}
+
+fn format_object(obj: &VMObject) -> String {
+    match obj {
+        VMObject::String(s) => format!("\"{}\"", s),
+        VMObject::List(elements) => {
+            let parts: Vec<String> = elements.iter().map(format_value).collect();
+            format!("({})", parts.join(" "))
+        }
+        VMObject::AdtValue { tag, fields } => {
+            if fields.is_empty() {
+                tag.clone()
+            } else {
+                let parts: Vec<String> = fields.iter().map(format_value).collect();
+                format!("({} {})", tag, parts.join(" "))
+            }
+        }
+        VMObject::AdtConstructor { name, arity } => {
+            format!("#<constructor {}/{}>", name, arity)
+        }
+        VMObject::Closure(c) => {
+            format!("#<vm-closure {}>", c.proto.name)
+        }
+        VMObject::Continuation(_) => "#<continuation>".to_string(),
+        VMObject::Builtin { name, .. } => {
+            format!("#<vm-builtin {}>", name)
+        }
+        VMObject::Pid(id) => format!("#<pid {}>", id),
+        VMObject::Channel(id) => format!("#<channel {}>", id),
+        VMObject::TcpSocket(id) => format!("#<tcp-socket {}>", id),
+        VMObject::TcpListener(id) => format!("#<tcp-listener {}>", id),
+        VMObject::HttpServer(id) => format!("#<http-server {}>", id),
+        VMObject::HttpRequest(id) => format!("#<http-request {}>", id),
+    }
+}
+
+/// Format a VM value for display without quotes around strings.
+/// Used by `show` and IO handlers.
+pub fn format_value_unquoted(value: &Value) -> String {
+    if let Some(s) = value.as_string() {
+        return s.to_string();
+    }
+    format_value(value)
+}
+
 // --- Constant pool conversion ---
 
 /// Pre-convert a compile-time constant pool to NaN-boxed Values.
