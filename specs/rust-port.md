@@ -2459,18 +2459,30 @@ criterion_main!(benches);
 
 ## 14. Migration Milestones
 
-### Phase 1: Core (Weeks 1-2)
+### Phase 1: Core ✅
 
 **Goal:** Lex and parse Marlang source into a Rust AST.
 
-- [ ] Set up Cargo workspace with `core` crate
-- [ ] Implement `Span`, `LineMap`, `Interner`
-- [ ] Implement `Token`, `Expr`, `LispValue` types
-- [ ] Port lexer (37 tests)
-- [ ] Port parser (34 tests)
-- [ ] `list_to_array()` and other AST utilities
+- [x] Set up Cargo workspace with `core` crate
+- [x] Implement `Span`, `LineMap`, `Interner`
+- [x] Implement `Token`, `Expr`, `LispValue` types
+- [x] Port lexer (39 tests)
+- [x] Port parser (34 tests)
+- [x] `list_to_array()` and other AST utilities
 
-**Deliverable:** `cargo test -p marlang-core` passes all 71 tests.
+**Deliverable:** `cargo test -p marlang-core` passes all 75 tests.
+
+**Implementation notes:**
+- All code lives under `port/` directory (not at workspace root)
+- Workspace: `port/Cargo.toml`, crate: `port/crates/core/`
+- Edition 2024 (Rust 1.85+)
+- Lexer is cursor-based (`&[u8]` with `pos`), not functional-style like the TS version — cleaner and faster
+- TS lexer emits `spc` tokens for whitespace/comments then filters them; Rust lexer skips them entirely in `skip_whitespace_and_comments()` — simpler, fewer allocations
+- TS lexer tracks line/column eagerly on every character; Rust uses byte-offset `Span` and resolves line/column lazily via `LineMap` — 8 bytes per span vs 48 bytes in TS
+- Negative numbers (`-7`) are handled in `lex_identifier()`: when `-` is followed by a digit, it lexes as a negative number literal. Inside expressions like `(- 3)`, the `-` is a standalone identifier (correct behavior matching TS)
+- `Interner` uses `RwLock<HashMap>` + leaked `&'static str` — thread-safe for future multi-scheduler use
+- `LispValue::String` uses `Arc<str>` (not `String`) for cheap cloning
+- 75 tests total: 2 intern + 2 span + 37 lexer + 34 parser (exceeds spec's 71 estimate due to extra edge case coverage)
 
 ### Phase 2: Type System (Weeks 3-5)
 
