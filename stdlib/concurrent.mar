@@ -12,8 +12,8 @@
   (chan-close (-> Channel Unit)))
 
 (define spawn     (lambda (f) (perform fiber-spawn f)))
-(define yield     (lambda () (perform fiber-yield)))
-(define self      (lambda () (perform fiber-self)))
+(define yield     (lambda () (perform fiber-yield ())))
+(define self      (lambda () (perform fiber-self ())))
 (define chan-new   (lambda (cap) (perform chan-new cap)))
 (define chan-send  (lambda (ch v) (perform chan-send ch v)))
 (define chan-recv  (lambda (ch) (perform chan-recv ch)))

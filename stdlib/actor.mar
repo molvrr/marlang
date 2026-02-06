@@ -6,7 +6,7 @@
 
 (effect Actor
   (actor-send          (-> Pid a Unit))
-  (actor-receive       (-> Unit a))
+  (actor-receive       (-> a))
   (actor-receive-match (-> (-> a Bool) a))
   (actor-monitor       (-> Pid Unit))
   (actor-link          (-> Pid Unit))

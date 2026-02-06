@@ -25,7 +25,7 @@
 (effect IO
   (print (=> (Show a) (-> a Unit)))
   (println (=> (Show a) (-> a Unit)))
-  (read-line (-> Unit String))
+  (read-line (-> String))
   (read-file (-> String String))
   (write-file (-> String String Unit)))
 
@@ -41,7 +41,7 @@
 
 ; read-line : (-> Unit {IO} String)
 ; Read a line of input from stdin
-(define read-line (lambda () (perform read-line ())))
+(define read-line (lambda () (perform read-line)))
 
 ; === File IO Operations ===
 
@@ -74,9 +74,9 @@
 ; === Async IO Effects (for use inside run-fibers) ===
 
 (effect AsyncIO
-  (io-stdout    (-> Unit Channel))
-  (io-stderr    (-> Unit Channel))
-  (io-stdin     (-> Unit Channel))
+  (io-stdout    (-> Channel))
+  (io-stderr    (-> Channel))
+  (io-stdin     (-> Channel))
   (io-read-file  (-> String String))
   (io-write-file (-> String String Unit))
   (io-open-file  (-> String String Channel)))

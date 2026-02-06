@@ -290,6 +290,171 @@ export const createBuiltinEnv = (): TypeEnv => {
     typeArrow([tFFIStruct, tString, typeVar('a')], tUnit)
   ));
 
+  // === Math builtins ===
+
+  // abs : forall a. (Num a) => a -> a
+  env = extendEnv(env, 'abs', numUnaryOp());
+
+  // rem : forall a. (Num a) => a -> a -> a
+  env = extendEnv(env, 'rem', numBinOp());
+
+  // mod : forall a. (Num a) => a -> a -> a
+  env = extendEnv(env, 'mod', numBinOp());
+
+  // floor : Float -> Int
+  env = extendEnv(env, 'floor', monotype(typeArrow([tFloat], tInt)));
+
+  // ceil : Float -> Int
+  env = extendEnv(env, 'ceil', monotype(typeArrow([tFloat], tInt)));
+
+  // round : Float -> Int
+  env = extendEnv(env, 'round', monotype(typeArrow([tFloat], tInt)));
+
+  // truncate : Float -> Int
+  env = extendEnv(env, 'truncate', monotype(typeArrow([tFloat], tInt)));
+
+  // pow : Float -> Float -> Float
+  env = extendEnv(env, 'pow', monotype(typeArrow([tFloat, tFloat], tFloat)));
+
+  // sqrt : Float -> Float
+  env = extendEnv(env, 'sqrt', monotype(typeArrow([tFloat], tFloat)));
+
+  // exp : Float -> Float
+  env = extendEnv(env, 'exp', monotype(typeArrow([tFloat], tFloat)));
+
+  // log : Float -> Float
+  env = extendEnv(env, 'log', monotype(typeArrow([tFloat], tFloat)));
+
+  // log10 : Float -> Float
+  env = extendEnv(env, 'log10', monotype(typeArrow([tFloat], tFloat)));
+
+  // log2 : Float -> Float
+  env = extendEnv(env, 'log2', monotype(typeArrow([tFloat], tFloat)));
+
+  // sin : Float -> Float
+  env = extendEnv(env, 'sin', monotype(typeArrow([tFloat], tFloat)));
+
+  // cos : Float -> Float
+  env = extendEnv(env, 'cos', monotype(typeArrow([tFloat], tFloat)));
+
+  // tan : Float -> Float
+  env = extendEnv(env, 'tan', monotype(typeArrow([tFloat], tFloat)));
+
+  // asin : Float -> Float
+  env = extendEnv(env, 'asin', monotype(typeArrow([tFloat], tFloat)));
+
+  // acos : Float -> Float
+  env = extendEnv(env, 'acos', monotype(typeArrow([tFloat], tFloat)));
+
+  // atan : Float -> Float
+  env = extendEnv(env, 'atan', monotype(typeArrow([tFloat], tFloat)));
+
+  // atan2 : Float -> Float -> Float
+  env = extendEnv(env, 'atan2', monotype(typeArrow([tFloat, tFloat], tFloat)));
+
+  // sinh : Float -> Float
+  env = extendEnv(env, 'sinh', monotype(typeArrow([tFloat], tFloat)));
+
+  // cosh : Float -> Float
+  env = extendEnv(env, 'cosh', monotype(typeArrow([tFloat], tFloat)));
+
+  // tanh : Float -> Float
+  env = extendEnv(env, 'tanh', monotype(typeArrow([tFloat], tFloat)));
+
+  // is-nan : Float -> Bool
+  env = extendEnv(env, 'is-nan', monotype(typeArrow([tFloat], tBool)));
+
+  // is-infinite : Float -> Bool
+  env = extendEnv(env, 'is-infinite', monotype(typeArrow([tFloat], tBool)));
+
+  // is-finite : Float -> Bool
+  env = extendEnv(env, 'is-finite', monotype(typeArrow([tFloat], tBool)));
+
+  // === String builtins ===
+
+  // string-length : String -> Int
+  env = extendEnv(env, 'string-length', monotype(typeArrow([tString], tInt)));
+
+  // string-concat : String -> String -> String
+  env = extendEnv(env, 'string-concat', monotype(typeArrow([tString, tString], tString)));
+
+  // string-append : String... -> String (variadic, typed as binary)
+  env = extendEnv(env, 'string-append', monotype(typeArrow([tString, tString], tString)));
+
+  // string-is-empty : String -> Bool
+  env = extendEnv(env, 'string-is-empty', monotype(typeArrow([tString], tBool)));
+
+  // string-reverse : String -> String
+  env = extendEnv(env, 'string-reverse', monotype(typeArrow([tString], tString)));
+
+  // string-repeat : String -> Int -> String
+  env = extendEnv(env, 'string-repeat', monotype(typeArrow([tString, tInt], tString)));
+
+  // string-to-upper : String -> String
+  env = extendEnv(env, 'string-to-upper', monotype(typeArrow([tString], tString)));
+
+  // string-to-lower : String -> String
+  env = extendEnv(env, 'string-to-lower', monotype(typeArrow([tString], tString)));
+
+  // string-trim : String -> String
+  env = extendEnv(env, 'string-trim', monotype(typeArrow([tString], tString)));
+
+  // string-trim-start : String -> String
+  env = extendEnv(env, 'string-trim-start', monotype(typeArrow([tString], tString)));
+
+  // string-trim-end : String -> String
+  env = extendEnv(env, 'string-trim-end', monotype(typeArrow([tString], tString)));
+
+  // string-starts-with : String -> String -> Bool
+  env = extendEnv(env, 'string-starts-with', monotype(typeArrow([tString, tString], tBool)));
+
+  // string-ends-with : String -> String -> Bool
+  env = extendEnv(env, 'string-ends-with', monotype(typeArrow([tString, tString], tBool)));
+
+  // string-contains : String -> String -> Bool
+  env = extendEnv(env, 'string-contains', monotype(typeArrow([tString, tString], tBool)));
+
+  // string-index-of : String -> String -> Option Int
+  env = extendEnv(env, 'string-index-of', monotype(
+    typeArrow([tString, tString], typeApp(typeConst('Option'), [tInt]))
+  ));
+
+  // string-substring : String -> Int -> Int -> String
+  env = extendEnv(env, 'string-substring', monotype(typeArrow([tString, tInt, tInt], tString)));
+
+  // string-char-at : String -> Int -> Option String
+  env = extendEnv(env, 'string-char-at', monotype(
+    typeArrow([tString, tInt], typeApp(typeConst('Option'), [tString]))
+  ));
+
+  // string-split : String -> String -> List String
+  env = extendEnv(env, 'string-split', monotype(
+    typeArrow([tString, tString], tList(tString))
+  ));
+
+  // string-join : String -> List String -> String
+  env = extendEnv(env, 'string-join', monotype(
+    typeArrow([tString, tList(tString)], tString)
+  ));
+
+  // string-replace : String -> String -> String -> String
+  env = extendEnv(env, 'string-replace', monotype(typeArrow([tString, tString, tString], tString)));
+
+  // string-replace-all : String -> String -> String -> String
+  env = extendEnv(env, 'string-replace-all', monotype(typeArrow([tString, tString, tString], tString)));
+
+  // string-pad-start : String -> Int -> String -> String
+  env = extendEnv(env, 'string-pad-start', monotype(typeArrow([tString, tInt, tString], tString)));
+
+  // string-pad-end : String -> Int -> String -> String
+  env = extendEnv(env, 'string-pad-end', monotype(typeArrow([tString, tInt, tString], tString)));
+
+  // char-code : String -> Int
+  env = extendEnv(env, 'char-code', monotype(typeArrow([tString], tInt)));
+
+  // char-from-code : Int -> String
+  env = extendEnv(env, 'char-from-code', monotype(typeArrow([tInt], tString)));
+
   // === Concurrency builtins ===
 
   // run-fibers : forall a. (-> Unit a) -> a
