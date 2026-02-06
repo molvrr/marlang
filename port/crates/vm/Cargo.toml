@@ -7,6 +7,14 @@ edition.workspace = true
 marlang-core = { path = "../core" }
 libloading = { version = "0.8", optional = true }
 
+[dev-dependencies]
+criterion = { workspace = true }
+marlang-types = { path = "../types" }
+
 [features]
 default = ["ffi"]
 ffi = ["libloading"]
+
+[[bench]]
+name = "vm_benchmark"
+harness = false

@@ -73,12 +73,26 @@ impl PartialEq for VMObject {
         match (self, other) {
             (VMObject::String(a), VMObject::String(b)) => a == b,
             (VMObject::List(a), VMObject::List(b)) => a == b,
-            (VMObject::AdtValue { tag: t1, fields: f1 }, VMObject::AdtValue { tag: t2, fields: f2 }) => {
-                t1 == t2 && f1 == f2
-            }
-            (VMObject::AdtConstructor { name: n1, arity: a1 }, VMObject::AdtConstructor { name: n2, arity: a2 }) => {
-                n1 == n2 && a1 == a2
-            }
+            (
+                VMObject::AdtValue {
+                    tag: t1,
+                    fields: f1,
+                },
+                VMObject::AdtValue {
+                    tag: t2,
+                    fields: f2,
+                },
+            ) => t1 == t2 && f1 == f2,
+            (
+                VMObject::AdtConstructor {
+                    name: n1,
+                    arity: a1,
+                },
+                VMObject::AdtConstructor {
+                    name: n2,
+                    arity: a2,
+                },
+            ) => n1 == n2 && a1 == a2,
             (VMObject::Pid(a), VMObject::Pid(b)) => a == b,
             (VMObject::Channel(a), VMObject::Channel(b)) => a == b,
             #[cfg(feature = "ffi")]
@@ -95,9 +109,10 @@ impl PartialEq for VMObject {
 pub type BuiltinFn = fn(&mut crate::vm::VM, &[Value]) -> Result<Value, crate::errors::VMError>;
 
 /// A closure: a function prototype plus captured upvalues.
+/// Uses Arc to share the prototype, avoiding expensive clones of the chunk.
 #[derive(Debug, Clone)]
 pub struct Closure {
-    pub proto: FunctionPrototype,
+    pub proto: Arc<FunctionPrototype>,
     pub upvalues: Vec<Value>,
 }
 

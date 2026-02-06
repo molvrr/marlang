@@ -152,6 +152,17 @@ impl ConstantValue {
             _ => false,
         }
     }
+
+    /// Convert to a VM Value. Prototypes become nil.
+    pub fn as_value(&self) -> crate::value::Value {
+        match self {
+            ConstantValue::Number(n) => crate::value::Value::number(*n),
+            ConstantValue::String(s) => crate::value::Value::string(s.as_str()),
+            ConstantValue::Boolean(b) => crate::value::Value::boolean(*b),
+            ConstantValue::Nil => crate::value::Value::nil(),
+            ConstantValue::Prototype(_) => crate::value::Value::nil(),
+        }
+    }
 }
 
 /// A bytecode chunk — a sequence of instructions plus a constant pool.

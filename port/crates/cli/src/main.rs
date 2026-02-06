@@ -108,9 +108,15 @@ fn cmd_run(file: &PathBuf, no_typecheck: bool) -> ExitCode {
     register_builtins(&mut vm);
     let mut loader = ModuleLoader::new();
 
-    match run_program(&mut vm, &source, Some(file.as_path()), &mut loader, &interner) {
-        Ok(_value) => {
-            // Don't print result by default (matches TypeScript behavior)
+    match run_program(
+        &mut vm,
+        &source,
+        Some(file.as_path()),
+        &mut loader,
+        &interner,
+    ) {
+        Ok(value) => {
+            println!("{}", format_value(&value));
             ExitCode::SUCCESS
         }
         Err(e) => {

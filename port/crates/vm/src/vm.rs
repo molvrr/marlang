@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::bytecode::{Chunk, ConstantValue, FunctionPrototype, Op};
 use crate::errors::{StackTraceEntry, VMError};
-use crate::object::{
-    CallFrame, Closure, HandlerEntry, VMContinuation, VMHandlerFrame, VMObject,
-};
+use crate::object::{CallFrame, Closure, HandlerEntry, VMContinuation, VMHandlerFrame, VMObject};
 use crate::value::{format_value_unquoted, Value};
 
 // --- VMSignal: unified error/effect propagation ---
@@ -137,28 +136,12 @@ impl VM {
         let line = trace.first().map(|e| e.line).unwrap_or(0);
         VMError::new(msg, line, trace)
     }
-
 }
 
 impl Default for VM {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Pre-convert constants, recursively handling prototypes by converting their
-/// nested chunks' constants as well. Prototypes become closures (with no upvalues).
-fn preconvert_constants_recursive(constants: &[ConstantValue]) -> Vec<Value> {
-    constants
-        .iter()
-        .map(|c| match c {
-            ConstantValue::Number(n) => Value::number(*n),
-            ConstantValue::String(s) => Value::string(s.as_str()),
-            ConstantValue::Boolean(b) => Value::boolean(*b),
-            ConstantValue::Nil => Value::nil(),
-            ConstantValue::Prototype(_) => Value::nil(), // prototypes accessed via compile-time constants
-        })
-        .collect()
 }
 
 // --- Closure helpers ---
@@ -173,13 +156,17 @@ fn create_closure_from_proto(frame: &CallFrame, proto: &FunctionPrototype) -> Cl
         }
     }
     Closure {
-        proto: proto.clone(),
+        proto: Arc::new(proto.clone()),
         upvalues,
     }
 }
 
 /// Call a closure, pushing a frame and running until it returns.
-pub(crate) fn call_closure(vm: &mut VM, closure: &Closure, args: &[Value]) -> Result<Value, VMSignal> {
+pub(crate) fn call_closure(
+    vm: &mut VM,
+    closure: &Closure,
+    args: &[Value],
+) -> Result<Value, VMSignal> {
     let mut locals = vec![Value::nil(); closure.proto.chunk.local_count as usize];
     for (i, arg) in args.iter().enumerate() {
         locals[i] = arg.clone();
@@ -194,14 +181,51 @@ pub(crate) fn call_closure(vm: &mut VM, closure: &Closure, args: &[Value]) -> Re
     run(vm, base_frame_count)
 }
 
+/// Call any callable Value (closure, builtin, etc) from Rust code.
+/// This is the public interface for calling Marlang functions from builtins.
+pub fn call_value(vm: &mut VM, callee: &Value, args: &[Value]) -> Result<Value, VMError> {
+    match callee.as_object() {
+        Some(VMObject::Closure(closure)) => match call_closure(vm, closure, args) {
+            Ok(v) => Ok(v),
+            Err(VMSignal::Error(e)) => Err(e),
+            Err(VMSignal::Effect(_)) => Err(VMError::runtime("Effect escaped from call_value")),
+        },
+        Some(VMObject::Builtin { func, .. }) => func(vm, args),
+        Some(VMObject::AdtConstructor { name, arity }) => {
+            if args.len() != *arity as usize {
+                return Err(VMError::runtime(format!(
+                    "Constructor {} expects {} arguments, got {}",
+                    name,
+                    arity,
+                    args.len()
+                )));
+            }
+            Ok(Value::object(VMObject::AdtValue {
+                tag: name.clone(),
+                fields: args.to_vec(),
+            }))
+        }
+        _ => Err(VMError::runtime(format!(
+            "Not callable: {}",
+            callee.kind_name()
+        ))),
+    }
+}
+
 /// Resume a continuation from Rust (used by scheduler in future).
 /// Unlike the RESUME opcode, this does NOT catch EffectSignal —
 /// effects propagate to the caller.
 #[allow(dead_code)] // Used by future scheduler (Phase 5)
-pub(crate) fn resume_continuation(vm: &mut VM, cont: &VMContinuation, value: Value) -> Result<Value, VMSignal> {
+pub(crate) fn resume_continuation(
+    vm: &mut VM,
+    cont: &VMContinuation,
+    value: Value,
+) -> Result<Value, VMSignal> {
     // Enforce one-shot semantics via VM-level tracking (works across Arc aliases)
     if !vm.resumed_continuations.insert(cont.id) {
-        return Err(VMSignal::Error(VMError::runtime("Continuation already resumed (one-shot)")));
+        return Err(VMSignal::Error(VMError::runtime(
+            "Continuation already resumed (one-shot)",
+        )));
     }
 
     let resume_base = vm.frame_count;
@@ -223,7 +247,8 @@ pub(crate) fn resume_continuation(vm: &mut VM, cont: &VMContinuation, value: Val
     let frame_offset = resume_base as i64 - cont.frame_base as i64;
     let stack_offset = (vm.stack_top as i64 - cont.stack.len() as i64 - 1) - cont.stack_base as i64;
     for h in &cont.handler_stack {
-        vm.handler_stack.push(rebase_handler(h, frame_offset, stack_offset));
+        vm.handler_stack
+            .push(rebase_handler(h, frame_offset, stack_offset));
     }
 
     let result = run(vm, resume_base);
@@ -289,7 +314,13 @@ fn run_with_handler(
             }
             handler_args.push(signal.continuation);
             // Deep handler semantics: recursively run with same handler def
-            run_with_handler(vm, handler_entries, return_handler, &clause.closure, &handler_args)
+            run_with_handler(
+                vm,
+                handler_entries,
+                return_handler,
+                &clause.closure,
+                &handler_args,
+            )
         }
         Err(e) => {
             // Not for us — clean up if our handler is still on the stack
@@ -352,7 +383,7 @@ pub fn interpret(vm: &mut VM, chunk: &Chunk) -> Result<Value, VMError> {
     };
 
     let script_closure = Closure {
-        proto: script_proto,
+        proto: Arc::new(script_proto),
         upvalues: Vec::new(),
     };
 
@@ -398,7 +429,7 @@ fn parse_handler_descriptor(json: &str) -> Result<HandlerDescriptor, String> {
     if !json.starts_with('{') || !json.ends_with('}') {
         return Err("expected object".to_string());
     }
-    let inner = &json[1..json.len()-1];
+    let inner = &json[1..json.len() - 1];
 
     let body_proto_idx = extract_number(inner, "bodyProtoIdx")? as u32;
     let return_proto_idx = extract_number(inner, "returnProtoIdx")? as i32;
@@ -407,7 +438,7 @@ fn parse_handler_descriptor(json: &str) -> Result<HandlerDescriptor, String> {
     let handlers_start = inner.find("\"handlers\":[").ok_or("missing handlers")?;
     let arr_start = inner[handlers_start..].find('[').unwrap() + handlers_start;
     let arr_end = find_matching_bracket(inner, arr_start)?;
-    let arr_content = &inner[arr_start+1..arr_end];
+    let arr_content = &inner[arr_start + 1..arr_end];
 
     let mut handlers = Vec::new();
     if !arr_content.trim().is_empty() {
@@ -426,7 +457,8 @@ fn parse_handler_descriptor(json: &str) -> Result<HandlerDescriptor, String> {
                         handlers.push(h);
                         start = i + 1;
                         // skip comma
-                        while start < bytes.len() && (bytes[start] == b',' || bytes[start] == b' ') {
+                        while start < bytes.len() && (bytes[start] == b',' || bytes[start] == b' ')
+                        {
                             start += 1;
                         }
                     }
@@ -448,20 +480,30 @@ fn parse_handler_clause(json: &str) -> Result<HandlerClauseDescriptor, String> {
     if !json.starts_with('{') || !json.ends_with('}') {
         return Err("expected handler clause object".to_string());
     }
-    let inner = &json[1..json.len()-1];
+    let inner = &json[1..json.len() - 1];
     let op_name_idx = extract_number(inner, "opNameIdx")? as u32;
     let proto_idx = extract_number(inner, "protoIdx")? as u32;
     let arity = extract_number(inner, "arity")? as u8;
-    Ok(HandlerClauseDescriptor { op_name_idx, proto_idx, arity })
+    Ok(HandlerClauseDescriptor {
+        op_name_idx,
+        proto_idx,
+        arity,
+    })
 }
 
 fn extract_number(s: &str, key: &str) -> Result<f64, String> {
     let pattern = format!("\"{}\":", key);
-    let pos = s.find(&pattern).ok_or_else(|| format!("missing key: {}", key))?;
+    let pos = s
+        .find(&pattern)
+        .ok_or_else(|| format!("missing key: {}", key))?;
     let after = &s[pos + pattern.len()..];
-    let end = after.find(|c: char| c == ',' || c == '}' || c == ']').unwrap_or(after.len());
+    let end = after
+        .find(|c: char| c == ',' || c == '}' || c == ']')
+        .unwrap_or(after.len());
     let num_str = after[..end].trim();
-    num_str.parse::<f64>().map_err(|e| format!("bad number for {}: {}", key, e))
+    num_str
+        .parse::<f64>()
+        .map_err(|e| format!("bad number for {}: {}", key, e))
 }
 
 fn find_matching_bracket(s: &str, open: usize) -> Result<usize, String> {
@@ -473,9 +515,16 @@ fn find_matching_bracket(s: &str, open: usize) -> Result<usize, String> {
         _ => return Err("not a bracket".to_string()),
     };
     let mut depth = 1;
-    for i in (open+1)..bytes.len() {
-        if bytes[i] == open_char { depth += 1; }
-        if bytes[i] == close_char { depth -= 1; if depth == 0 { return Ok(i); } }
+    for i in (open + 1)..bytes.len() {
+        if bytes[i] == open_char {
+            depth += 1;
+        }
+        if bytes[i] == close_char {
+            depth -= 1;
+            if depth == 0 {
+                return Ok(i);
+            }
+        }
     }
     Err("unmatched bracket".to_string())
 }
@@ -541,9 +590,6 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
     let mut frame_idx = vm.frame_count - 1;
     let mut frame = vm.frames[frame_idx].clone();
 
-    // Pre-convert constants for the initial frame's chunk
-    let mut vm_constants = preconvert_constants_recursive(&frame.closure.proto.chunk.constants);
-
     loop {
         let inst = &frame.closure.proto.chunk.code[frame.ip];
         frame.ip += 1;
@@ -551,7 +597,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
         match inst.op {
             // --- Stack operations ---
             Op::PushConst => {
-                let val = vm_constants[inst.operand as usize].clone();
+                let val = frame.closure.proto.chunk.constants[inst.operand as usize]
+                    .as_value()
+                    .clone();
                 vm.push(val);
             }
 
@@ -575,17 +623,18 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     ConstantValue::String(s) => s,
                     _ => {
                         save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("Global name must be string", &frame)));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("Global name must be string", &frame),
+                        ));
                     }
                 };
                 let value = match vm.globals.get(name) {
                     Some(v) => v.clone(),
                     None => {
                         save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error(
-                            format!("Undefined variable: {}", name),
-                            &frame,
-                        )));
+                        return Err(VMSignal::Error(
+                            vm.vm_error(format!("Undefined variable: {}", name), &frame),
+                        ));
                     }
                 };
                 vm.push(value);
@@ -596,7 +645,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     ConstantValue::String(s) => s.clone(),
                     _ => {
                         save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("Global name must be string", &frame)));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("Global name must be string", &frame),
+                        ));
                     }
                 };
                 let value = vm.pop();
@@ -612,7 +663,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         let rest = &s[6..];
                         if let Some(colon_pos) = rest.rfind(':') {
                             let ctor_name = &rest[..colon_pos];
-                            if let Ok(arity) = rest[colon_pos+1..].parse::<u8>() {
+                            if let Ok(arity) = rest[colon_pos + 1..].parse::<u8>() {
                                 vm.globals.insert(
                                     name,
                                     Value::object(VMObject::AdtConstructor {
@@ -669,7 +720,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     (Some(na), Some(nb)) => vm.push(Value::number(na - nb)),
                     _ => {
                         save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("Subtraction requires numbers", &frame)));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("Subtraction requires numbers", &frame),
+                        ));
                     }
                 }
             }
@@ -681,7 +734,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     (Some(na), Some(nb)) => vm.push(Value::number(na * nb)),
                     _ => {
                         save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("Multiplication requires numbers", &frame)));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("Multiplication requires numbers", &frame),
+                        ));
                     }
                 }
             }
@@ -693,7 +748,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     (Some(na), Some(nb)) => vm.push(Value::number(na / nb)),
                     _ => {
                         save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("Division requires numbers", &frame)));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("Division requires numbers", &frame),
+                        ));
                     }
                 }
             }
@@ -704,7 +761,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     Some(n) => vm.push(Value::number(-n)),
                     None => {
                         save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("Negate requires number", &frame)));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("Negate requires number", &frame),
+                        ));
                     }
                 }
             }
@@ -792,7 +851,6 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                 frame_idx = vm.frame_count - 1;
                 frame = vm.frames[frame_idx].clone();
-                vm_constants = preconvert_constants_recursive(&frame.closure.proto.chunk.constants);
                 vm.push(result);
             }
 
@@ -807,12 +865,16 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             if arity != closure.proto.arity as usize {
                                 save_frame(vm, frame_idx, &frame);
                                 return Err(VMSignal::Error(vm.vm_error(
-                                    format!("Expected {} arguments, got {}", closure.proto.arity, arity),
+                                    format!(
+                                        "Expected {} arguments, got {}",
+                                        closure.proto.arity, arity
+                                    ),
                                     &frame,
                                 )));
                             }
 
-                            let mut locals = vec![Value::nil(); closure.proto.chunk.local_count as usize];
+                            let mut locals =
+                                vec![Value::nil(); closure.proto.chunk.local_count as usize];
                             for i in (0..arity).rev() {
                                 locals[i] = vm.pop();
                             }
@@ -830,7 +892,6 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             vm.push_frame(new_frame);
                             frame_idx = vm.frame_count - 1;
                             frame = vm.frames[frame_idx].clone();
-                            vm_constants = preconvert_constants_recursive(&frame.closure.proto.chunk.constants);
                         }
 
                         VMObject::Builtin { func, .. } => {
@@ -846,13 +907,19 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             vm.push(result);
                         }
 
-                        VMObject::AdtConstructor { name, arity: expected_arity } => {
+                        VMObject::AdtConstructor {
+                            name,
+                            arity: expected_arity,
+                        } => {
                             let name = name.clone();
                             let expected_arity = *expected_arity;
                             if arity != expected_arity as usize {
                                 save_frame(vm, frame_idx, &frame);
                                 return Err(VMSignal::Error(vm.vm_error(
-                                    format!("Constructor {} expects {} arguments, got {}", name, expected_arity, arity),
+                                    format!(
+                                        "Constructor {} expects {} arguments, got {}",
+                                        name, expected_arity, arity
+                                    ),
                                     &frame,
                                 )));
                             }
@@ -861,16 +928,18 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 args[i] = vm.pop();
                             }
                             vm.pop(); // pop callee
-                            vm.push(Value::object(VMObject::AdtValue { tag: name, fields: args }));
+                            vm.push(Value::object(VMObject::AdtValue {
+                                tag: name,
+                                fields: args,
+                            }));
                         }
 
                         _ => {
                             let kind = obj.kind_name();
                             save_frame(vm, frame_idx, &frame);
-                            return Err(VMSignal::Error(vm.vm_error(
-                                format!("Cannot call {}", kind),
-                                &frame,
-                            )));
+                            return Err(VMSignal::Error(
+                                vm.vm_error(format!("Cannot call {}", kind), &frame),
+                            ));
                         }
                     }
                 } else {
@@ -889,12 +958,16 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             if arity != closure.proto.arity as usize {
                                 save_frame(vm, frame_idx, &frame);
                                 return Err(VMSignal::Error(vm.vm_error(
-                                    format!("Expected {} arguments, got {}", closure.proto.arity, arity),
+                                    format!(
+                                        "Expected {} arguments, got {}",
+                                        closure.proto.arity, arity
+                                    ),
                                     &frame,
                                 )));
                             }
 
-                            let mut locals = vec![Value::nil(); closure.proto.chunk.local_count as usize];
+                            let mut locals =
+                                vec![Value::nil(); closure.proto.chunk.local_count as usize];
                             for i in (0..arity).rev() {
                                 locals[i] = vm.pop();
                             }
@@ -904,7 +977,6 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             frame.closure = (**closure).clone();
                             frame.ip = 0;
                             frame.locals = locals;
-                            vm_constants = preconvert_constants_recursive(&frame.closure.proto.chunk.constants);
                         }
 
                         VMObject::Builtin { func, .. } => {
@@ -924,17 +996,22 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             }
                             frame_idx = vm.frame_count - 1;
                             frame = vm.frames[frame_idx].clone();
-                            vm_constants = preconvert_constants_recursive(&frame.closure.proto.chunk.constants);
                             vm.push(result);
                         }
 
-                        VMObject::AdtConstructor { name, arity: expected_arity } => {
+                        VMObject::AdtConstructor {
+                            name,
+                            arity: expected_arity,
+                        } => {
                             let name = name.clone();
                             let expected_arity = *expected_arity;
                             if arity != expected_arity as usize {
                                 save_frame(vm, frame_idx, &frame);
                                 return Err(VMSignal::Error(vm.vm_error(
-                                    format!("Constructor {} expects {} arguments, got {}", name, expected_arity, arity),
+                                    format!(
+                                        "Constructor {} expects {} arguments, got {}",
+                                        name, expected_arity, arity
+                                    ),
                                     &frame,
                                 )));
                             }
@@ -943,7 +1020,10 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 args[i] = vm.pop();
                             }
                             vm.pop();
-                            let result = Value::object(VMObject::AdtValue { tag: name, fields: args });
+                            let result = Value::object(VMObject::AdtValue {
+                                tag: name,
+                                fields: args,
+                            });
 
                             vm.frame_count -= 1;
                             if vm.frame_count <= base_frame_count {
@@ -951,17 +1031,15 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             }
                             frame_idx = vm.frame_count - 1;
                             frame = vm.frames[frame_idx].clone();
-                            vm_constants = preconvert_constants_recursive(&frame.closure.proto.chunk.constants);
                             vm.push(result);
                         }
 
                         _ => {
                             let kind = obj.kind_name();
                             save_frame(vm, frame_idx, &frame);
-                            return Err(VMSignal::Error(vm.vm_error(
-                                format!("Cannot call {}", kind),
-                                &frame,
-                            )));
+                            return Err(VMSignal::Error(
+                                vm.vm_error(format!("Cannot call {}", kind), &frame),
+                            ));
                         }
                     }
                 } else {
@@ -975,7 +1053,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     ConstantValue::Prototype(p) => p,
                     _ => {
                         save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("CLOSURE expects a prototype constant", &frame)));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("CLOSURE expects a prototype constant", &frame),
+                        ));
                     }
                 };
 
@@ -989,7 +1069,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     ConstantValue::String(s) => s.clone(),
                     _ => {
                         save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("CONSTRUCT name must be string", &frame)));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("CONSTRUCT name must be string", &frame),
+                        ));
                     }
                 };
                 let arity = inst.operand2 as usize;
@@ -997,7 +1079,10 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 for i in (0..arity).rev() {
                     args[i] = vm.pop();
                 }
-                vm.push(Value::object(VMObject::AdtValue { tag: name, fields: args }));
+                vm.push(Value::object(VMObject::AdtValue {
+                    tag: name,
+                    fields: args,
+                }));
             }
 
             Op::GetField => {
@@ -1021,10 +1106,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             if field_idx == 0 {
                                 if elements.is_empty() {
                                     save_frame(vm, frame_idx, &frame);
-                                    return Err(VMSignal::Error(vm.vm_error(
-                                        "Cannot get head of empty list",
-                                        &frame,
-                                    )));
+                                    return Err(VMSignal::Error(
+                                        vm.vm_error("Cannot get head of empty list", &frame),
+                                    ));
                                 }
                                 vm.push(elements[0].clone());
                             } else if field_idx == 1 {
@@ -1056,7 +1140,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     ConstantValue::String(s) => s.as_str(),
                     _ => {
                         save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("MATCH_TAG name must be string", &frame)));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("MATCH_TAG name must be string", &frame),
+                        ));
                     }
                 };
                 let target = inst.operand2 as usize;
@@ -1096,13 +1182,16 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
             // --- Effects ---
             Op::PushHandler => {
-                let descriptor_str = match &frame.closure.proto.chunk.constants[inst.operand as usize] {
-                    ConstantValue::String(s) if s.starts_with("\0handler:") => s.clone(),
-                    _ => {
-                        save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("Invalid handler descriptor", &frame)));
-                    }
-                };
+                let descriptor_str =
+                    match &frame.closure.proto.chunk.constants[inst.operand as usize] {
+                        ConstantValue::String(s) if s.starts_with("\0handler:") => s.clone(),
+                        _ => {
+                            save_frame(vm, frame_idx, &frame);
+                            return Err(VMSignal::Error(
+                                vm.vm_error("Invalid handler descriptor", &frame),
+                            ));
+                        }
+                    };
 
                 let json = &descriptor_str["\0handler:".len()..];
                 let descriptor = match parse_handler_descriptor(json) {
@@ -1117,11 +1206,15 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 };
 
                 // Create body closure from prototype
-                let body_proto = match &frame.closure.proto.chunk.constants[descriptor.body_proto_idx as usize] {
+                let body_proto = match &frame.closure.proto.chunk.constants
+                    [descriptor.body_proto_idx as usize]
+                {
                     ConstantValue::Prototype(p) => p,
                     _ => {
                         save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("Expected body prototype", &frame)));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("Expected body prototype", &frame),
+                        ));
                     }
                 };
                 let body_closure = create_closure_from_proto(&frame, body_proto);
@@ -1129,18 +1222,23 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 // Create handler clause closures
                 let mut handler_entries = Vec::new();
                 for h in &descriptor.handlers {
-                    let op_name = match &frame.closure.proto.chunk.constants[h.op_name_idx as usize] {
+                    let op_name = match &frame.closure.proto.chunk.constants[h.op_name_idx as usize]
+                    {
                         ConstantValue::String(s) => s.clone(),
                         _ => {
                             save_frame(vm, frame_idx, &frame);
-                            return Err(VMSignal::Error(vm.vm_error("Invalid handler clause", &frame)));
+                            return Err(VMSignal::Error(
+                                vm.vm_error("Invalid handler clause", &frame),
+                            ));
                         }
                     };
                     let proto = match &frame.closure.proto.chunk.constants[h.proto_idx as usize] {
                         ConstantValue::Prototype(p) => p,
                         _ => {
                             save_frame(vm, frame_idx, &frame);
-                            return Err(VMSignal::Error(vm.vm_error("Invalid handler clause", &frame)));
+                            return Err(VMSignal::Error(
+                                vm.vm_error("Invalid handler clause", &frame),
+                            ));
                         }
                     };
                     handler_entries.push(HandlerEntry {
@@ -1152,11 +1250,14 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                 // Create return handler closure
                 let return_closure = if descriptor.return_proto_idx >= 0 {
-                    match &frame.closure.proto.chunk.constants[descriptor.return_proto_idx as usize] {
+                    match &frame.closure.proto.chunk.constants[descriptor.return_proto_idx as usize]
+                    {
                         ConstantValue::Prototype(p) => Some(create_closure_from_proto(&frame, p)),
                         _ => {
                             save_frame(vm, frame_idx, &frame);
-                            return Err(VMSignal::Error(vm.vm_error("Expected return handler prototype", &frame)));
+                            return Err(VMSignal::Error(
+                                vm.vm_error("Expected return handler prototype", &frame),
+                            ));
                         }
                     }
                 } else {
@@ -1167,13 +1268,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 save_frame(vm, frame_idx, &frame);
 
                 // Run body with handler installed
-                let mut result = run_with_handler(
-                    vm,
-                    &handler_entries,
-                    &return_closure,
-                    &body_closure,
-                    &[],
-                )?;
+                let mut result =
+                    run_with_handler(vm, &handler_entries, &return_closure, &body_closure, &[])?;
 
                 // Apply return handler to the final result
                 if let Some(ref ret_closure) = return_closure {
@@ -1182,7 +1278,6 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                 // Restore frame (it may have been clobbered by handler execution)
                 frame = vm.frames[frame_idx].clone();
-                vm_constants = preconvert_constants_recursive(&frame.closure.proto.chunk.constants);
                 vm.push(result);
             }
 
@@ -1195,7 +1290,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     ConstantValue::String(s) => s.clone(),
                     _ => {
                         save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("PERFORM name must be string", &frame)));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("PERFORM name must be string", &frame),
+                        ));
                     }
                 };
                 let arity = inst.operand2 as usize;
@@ -1208,7 +1305,11 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 // Walk handler stack to find a matching handler
                 let mut found = None;
                 for i in (0..vm.handler_stack.len()).rev() {
-                    if vm.handler_stack[i].handlers.iter().any(|e| e.op_name == op_name) {
+                    if vm.handler_stack[i]
+                        .handlers
+                        .iter()
+                        .any(|e| e.op_name == op_name)
+                    {
                         found = Some(i);
                         break;
                     }
@@ -1240,7 +1341,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         .collect();
 
                     // Capture nested handler frames
-                    let captured_handlers: Vec<VMHandlerFrame> = vm.handler_stack[handler_idx + 1..].to_vec();
+                    let captured_handlers: Vec<VMHandlerFrame> =
+                        vm.handler_stack[handler_idx + 1..].to_vec();
 
                     let continuation = VMContinuation {
                         frames: captured_frames,
@@ -1270,10 +1372,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     vm.push(result);
                 } else {
                     save_frame(vm, frame_idx, &frame);
-                    return Err(VMSignal::Error(vm.vm_error(
-                        format!("Unhandled effect: {}", op_name),
-                        &frame,
-                    )));
+                    return Err(VMSignal::Error(
+                        vm.vm_error(format!("Unhandled effect: {}", op_name), &frame),
+                    ));
                 }
             }
 
@@ -1285,14 +1386,18 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     Some(VMObject::Continuation(c)) => c,
                     _ => {
                         save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("resume expects a continuation", &frame)));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("resume expects a continuation", &frame),
+                        ));
                     }
                 };
 
                 // Enforce one-shot semantics via VM-level tracking (works across Arc aliases)
                 if !vm.resumed_continuations.insert(cont.id) {
                     save_frame(vm, frame_idx, &frame);
-                    return Err(VMSignal::Error(vm.vm_error("Continuation already resumed (one-shot)", &frame)));
+                    return Err(VMSignal::Error(
+                        vm.vm_error("Continuation already resumed (one-shot)", &frame),
+                    ));
                 }
 
                 let cont_data = (**cont).clone();
@@ -1327,7 +1432,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 // Restore nested handlers, rebasing indices
                 let saved_handler_len = vm.handler_stack.len();
                 let frame_offset = resume_base as i64 - cont_data.frame_base as i64;
-                let stack_offset = (vm.stack_top as i64 - cont_data.stack.len() as i64 - 1) - cont_data.stack_base as i64;
+                let stack_offset = (vm.stack_top as i64 - cont_data.stack.len() as i64 - 1)
+                    - cont_data.stack_base as i64;
 
                 let mut restored_handlers = Vec::new();
                 for h in &cont_data.handler_stack {
@@ -1348,7 +1454,12 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let result = if restored_handlers.is_empty() {
                     run(vm, resume_base)
                 } else {
-                    run_restored_continuation(vm, resume_base, &restored_handlers, saved_handler_len)
+                    run_restored_continuation(
+                        vm,
+                        resume_base,
+                        &restored_handlers,
+                        saved_handler_len,
+                    )
                 };
 
                 // Handle the result
@@ -1358,10 +1469,14 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         // Check if body re-performed an effect handled by the enclosing handler
                         if let Some((top_id, ref entries, ref ret_handler)) = top_handler_data {
                             if signal.target_handler_id == top_id {
-                                let clause = entries.iter().find(|e| e.op_name == signal.op_name).cloned();
+                                let clause = entries
+                                    .iter()
+                                    .find(|e| e.op_name == signal.op_name)
+                                    .cloned();
 
                                 if let Some(clause) = clause {
-                                    let expected_arg_count = (clause.arity as usize).saturating_sub(1);
+                                    let expected_arg_count =
+                                        (clause.arity as usize).saturating_sub(1);
                                     let mut handler_args = Vec::new();
                                     for i in 0..expected_arg_count.min(signal.args.len()) {
                                         handler_args.push(signal.args[i].clone());
@@ -1395,7 +1510,6 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 // Restore frame
                 frame_idx = vm.frame_count - 1;
                 frame = vm.frames[frame_idx].clone();
-                vm_constants = preconvert_constants_recursive(&frame.closure.proto.chunk.constants);
                 vm.push(result);
             }
 
@@ -1466,16 +1580,29 @@ fn objects_equal(a: &VMObject, b: &VMObject) -> bool {
     match (a, b) {
         (VMObject::String(sa), VMObject::String(sb)) => sa == sb,
         (VMObject::List(la), VMObject::List(lb)) => {
-            if la.len() != lb.len() { return false; }
+            if la.len() != lb.len() {
+                return false;
+            }
             la.iter().zip(lb.iter()).all(|(a, b)| values_equal(a, b))
         }
-        (VMObject::AdtValue { tag: t1, fields: f1 }, VMObject::AdtValue { tag: t2, fields: f2 }) => {
-            if t1 != t2 || f1.len() != f2.len() { return false; }
+        (
+            VMObject::AdtValue {
+                tag: t1,
+                fields: f1,
+            },
+            VMObject::AdtValue {
+                tag: t2,
+                fields: f2,
+            },
+        ) => {
+            if t1 != t2 || f1.len() != f2.len() {
+                return false;
+            }
             f1.iter().zip(f2.iter()).all(|(a, b)| values_equal(a, b))
         }
         // nil-equivalent comparisons
-        (VMObject::List(elements), VMObject::AdtValue { tag, fields }) |
-        (VMObject::AdtValue { tag, fields }, VMObject::List(elements)) => {
+        (VMObject::List(elements), VMObject::AdtValue { tag, fields })
+        | (VMObject::AdtValue { tag, fields }, VMObject::List(elements)) => {
             elements.is_empty() && tag == "Nil" && fields.is_empty()
         }
         (VMObject::Pid(a), VMObject::Pid(b)) => a == b,

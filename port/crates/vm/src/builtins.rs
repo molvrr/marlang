@@ -13,31 +13,52 @@ pub fn register_builtins(vm: &mut VM) {
     // --- Built-in ADT constructors ---
     vm.globals.insert(
         "None".to_string(),
-        Value::object(VMObject::AdtValue { tag: "None".to_string(), fields: vec![] }),
+        Value::object(VMObject::AdtValue {
+            tag: "None".to_string(),
+            fields: vec![],
+        }),
     );
     vm.globals.insert(
         "Some".to_string(),
-        Value::object(VMObject::AdtConstructor { name: "Some".to_string(), arity: 1 }),
+        Value::object(VMObject::AdtConstructor {
+            name: "Some".to_string(),
+            arity: 1,
+        }),
     );
     vm.globals.insert(
         "Nil".to_string(),
-        Value::object(VMObject::AdtValue { tag: "Nil".to_string(), fields: vec![] }),
+        Value::object(VMObject::AdtValue {
+            tag: "Nil".to_string(),
+            fields: vec![],
+        }),
     );
     vm.globals.insert(
         "Cons".to_string(),
-        Value::object(VMObject::AdtConstructor { name: "Cons".to_string(), arity: 2 }),
+        Value::object(VMObject::AdtConstructor {
+            name: "Cons".to_string(),
+            arity: 2,
+        }),
     );
     vm.globals.insert(
         "MkPair".to_string(),
-        Value::object(VMObject::AdtConstructor { name: "MkPair".to_string(), arity: 2 }),
+        Value::object(VMObject::AdtConstructor {
+            name: "MkPair".to_string(),
+            arity: 2,
+        }),
     );
     vm.globals.insert(
         "Ok".to_string(),
-        Value::object(VMObject::AdtConstructor { name: "Ok".to_string(), arity: 1 }),
+        Value::object(VMObject::AdtConstructor {
+            name: "Ok".to_string(),
+            arity: 1,
+        }),
     );
     vm.globals.insert(
         "Err".to_string(),
-        Value::object(VMObject::AdtConstructor { name: "Err".to_string(), arity: 1 }),
+        Value::object(VMObject::AdtConstructor {
+            name: "Err".to_string(),
+            arity: 1,
+        }),
     );
 
     // --- Built-in functions ---
@@ -68,13 +89,17 @@ pub fn register_builtins(vm: &mut VM) {
         if args.is_empty() {
             return Err(VMError::runtime("- expects at least one argument"));
         }
-        let first = args[0].as_number().ok_or_else(|| VMError::runtime("- expects numbers"))?;
+        let first = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("- expects numbers"))?;
         if args.len() == 1 {
             return Ok(Value::number(-first));
         }
         let mut result = first;
         for a in &args[1..] {
-            result -= a.as_number().ok_or_else(|| VMError::runtime("- expects numbers"))?;
+            result -= a
+                .as_number()
+                .ok_or_else(|| VMError::runtime("- expects numbers"))?;
         }
         Ok(Value::number(result))
     });
@@ -94,10 +119,14 @@ pub fn register_builtins(vm: &mut VM) {
         if args.len() < 2 {
             return Err(VMError::runtime("/ expects at least two arguments"));
         }
-        let first = args[0].as_number().ok_or_else(|| VMError::runtime("/ expects numbers"))?;
+        let first = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("/ expects numbers"))?;
         let mut result = first;
         for a in &args[1..] {
-            result /= a.as_number().ok_or_else(|| VMError::runtime("/ expects numbers"))?;
+            result /= a
+                .as_number()
+                .ok_or_else(|| VMError::runtime("/ expects numbers"))?;
         }
         Ok(Value::number(result))
     });
@@ -106,7 +135,9 @@ pub fn register_builtins(vm: &mut VM) {
         if args.len() != 1 {
             return Err(VMError::runtime("negate expects one number"));
         }
-        let n = args[0].as_number().ok_or_else(|| VMError::runtime("negate expects one number"))?;
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("negate expects one number"))?;
         Ok(Value::number(-n))
     });
 
@@ -115,8 +146,12 @@ pub fn register_builtins(vm: &mut VM) {
         if args.len() != 2 {
             return Err(VMError::runtime("< expects two numbers"));
         }
-        let a = args[0].as_number().ok_or_else(|| VMError::runtime("< expects two numbers"))?;
-        let b = args[1].as_number().ok_or_else(|| VMError::runtime("< expects two numbers"))?;
+        let a = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("< expects two numbers"))?;
+        let b = args[1]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("< expects two numbers"))?;
         Ok(Value::boolean(a < b))
     });
 
@@ -124,8 +159,12 @@ pub fn register_builtins(vm: &mut VM) {
         if args.len() != 2 {
             return Err(VMError::runtime("> expects two numbers"));
         }
-        let a = args[0].as_number().ok_or_else(|| VMError::runtime("> expects two numbers"))?;
-        let b = args[1].as_number().ok_or_else(|| VMError::runtime("> expects two numbers"))?;
+        let a = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("> expects two numbers"))?;
+        let b = args[1]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("> expects two numbers"))?;
         Ok(Value::boolean(a > b))
     });
 
@@ -133,8 +172,12 @@ pub fn register_builtins(vm: &mut VM) {
         if args.len() != 2 {
             return Err(VMError::runtime("= expects two numbers"));
         }
-        let a = args[0].as_number().ok_or_else(|| VMError::runtime("= expects two numbers"))?;
-        let b = args[1].as_number().ok_or_else(|| VMError::runtime("= expects two numbers"))?;
+        let a = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("= expects two numbers"))?;
+        let b = args[1]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("= expects two numbers"))?;
         Ok(Value::boolean(a == b))
     });
 
@@ -142,8 +185,12 @@ pub fn register_builtins(vm: &mut VM) {
         if args.len() != 2 {
             return Err(VMError::runtime("<= expects two numbers"));
         }
-        let a = args[0].as_number().ok_or_else(|| VMError::runtime("<= expects two numbers"))?;
-        let b = args[1].as_number().ok_or_else(|| VMError::runtime("<= expects two numbers"))?;
+        let a = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("<= expects two numbers"))?;
+        let b = args[1]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("<= expects two numbers"))?;
         Ok(Value::boolean(a <= b))
     });
 
@@ -151,8 +198,12 @@ pub fn register_builtins(vm: &mut VM) {
         if args.len() != 2 {
             return Err(VMError::runtime(">= expects two numbers"));
         }
-        let a = args[0].as_number().ok_or_else(|| VMError::runtime(">= expects two numbers"))?;
-        let b = args[1].as_number().ok_or_else(|| VMError::runtime(">= expects two numbers"))?;
+        let a = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime(">= expects two numbers"))?;
+        let b = args[1]
+            .as_number()
+            .ok_or_else(|| VMError::runtime(">= expects two numbers"))?;
         Ok(Value::boolean(a >= b))
     });
 
@@ -182,14 +233,18 @@ pub fn register_builtins(vm: &mut VM) {
         if args.len() != 1 {
             return Err(VMError::runtime("string-length expects 1 argument"));
         }
-        let s = args[0].as_string().ok_or_else(|| VMError::runtime("string-length expects a string"))?;
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-length expects a string"))?;
         Ok(Value::number(s.len() as f64))
     });
 
     builtin(vm, "string-append", |_vm, args| {
         let mut result = String::new();
         for a in args {
-            let s = a.as_string().ok_or_else(|| VMError::runtime("string-append expects strings"))?;
+            let s = a
+                .as_string()
+                .ok_or_else(|| VMError::runtime("string-append expects strings"))?;
             result.push_str(s);
         }
         Ok(Value::string(result.as_str()))
@@ -199,7 +254,9 @@ pub fn register_builtins(vm: &mut VM) {
         if args.len() != 1 {
             return Err(VMError::runtime("number->string expects 1 argument"));
         }
-        let n = args[0].as_number().ok_or_else(|| VMError::runtime("number->string expects a number"))?;
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("number->string expects a number"))?;
         let s = if n == n.trunc() && n.abs() < 1e15 && !n.is_infinite() {
             format!("{}", n as i64)
         } else {
@@ -212,7 +269,9 @@ pub fn register_builtins(vm: &mut VM) {
         if args.len() != 1 {
             return Err(VMError::runtime("string->number expects 1 argument"));
         }
-        let s = args[0].as_string().ok_or_else(|| VMError::runtime("string->number expects a string"))?;
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string->number expects a string"))?;
         match s.parse::<f64>() {
             Ok(n) => Ok(Value::number(n)),
             Err(_) => Ok(Value::nil()),
@@ -233,7 +292,27 @@ pub fn register_builtins(vm: &mut VM) {
 
     // Stubs for Phase 5+
     builtin(vm, "run-fibers", |_vm, _args| {
-        Err(VMError::runtime("run-fibers is not yet supported in the Rust VM"))
+        Err(VMError::runtime(
+            "run-fibers is not yet supported in the Rust VM",
+        ))
+    });
+
+    // Profiling: time a thunk and return (result ms)
+    builtin(vm, "time-it", |vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("time-it expects 1 argument (a thunk)"));
+        }
+        let thunk = &args[0];
+        let start = std::time::Instant::now();
+        // Call the thunk via the VM
+        let result = crate::vm::call_value(vm, thunk, &[])?;
+        let elapsed = start.elapsed().as_micros() as f64 / 1000.0;
+        // Return pair (result, ms)
+        let pair = crate::object::VMObject::AdtValue {
+            tag: "MkPair".to_string(),
+            fields: vec![result, crate::value::Value::number(elapsed)],
+        };
+        Ok(crate::value::Value::object(pair))
     });
 
     // FFI builtins
@@ -251,21 +330,30 @@ fn register_ffi_builtins(
 
     // Global struct registry (like TS vmStructRegistry)
     use std::sync::Mutex;
-    static STRUCT_REGISTRY: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Arc<ffi::FfiStructDef>>>> =
-        std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+    static STRUCT_REGISTRY: std::sync::LazyLock<
+        Mutex<std::collections::HashMap<String, Arc<ffi::FfiStructDef>>>,
+    > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
     // ffi-open: (ffi-open "libname" (list (list "fn_name" (list "arg_type" ...) "ret_type") ...))
     builtin(vm, "ffi-open", |_vm, args| {
         if args.len() < 2 {
-            return Err(VMError::runtime("ffi-open expects library name and signatures list"));
+            return Err(VMError::runtime(
+                "ffi-open expects library name and signatures list",
+            ));
         }
-        let lib_name = args[0].as_string().ok_or_else(|| VMError::runtime("ffi-open: first arg must be string"))?;
+        let lib_name = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("ffi-open: first arg must be string"))?;
 
         // Parse signatures from the list
         let sig_list_val = &args[1];
         let sig_entries = match sig_list_val.as_object() {
             Some(VMObject::List(items)) => items,
-            _ => return Err(VMError::runtime("ffi-open: second arg must be a list of signature specs")),
+            _ => {
+                return Err(VMError::runtime(
+                    "ffi-open: second arg must be a list of signature specs",
+                ))
+            }
         };
 
         let mut sigs = Vec::new();
@@ -275,21 +363,35 @@ fn register_ffi_builtins(
                 _ => return Err(VMError::runtime("ffi-open: each signature must be a list")),
             };
             if parts.len() != 3 {
-                return Err(VMError::runtime("ffi-open: signature must be (name args-list ret-type)"));
+                return Err(VMError::runtime(
+                    "ffi-open: signature must be (name args-list ret-type)",
+                ));
             }
-            let fn_name = parts[0].as_string().ok_or_else(|| VMError::runtime("ffi-open: fn name must be string"))?;
+            let fn_name = parts[0]
+                .as_string()
+                .ok_or_else(|| VMError::runtime("ffi-open: fn name must be string"))?;
             let arg_types_val = match parts[1].as_object() {
                 Some(VMObject::List(a)) => a,
                 _ => return Err(VMError::runtime("ffi-open: arg types must be a list")),
             };
             let mut arg_types = Vec::new();
             for at in arg_types_val {
-                let type_str = at.as_string().ok_or_else(|| VMError::runtime("ffi-open: arg type must be string"))?;
+                let type_str = at
+                    .as_string()
+                    .ok_or_else(|| VMError::runtime("ffi-open: arg type must be string"))?;
                 arg_types.push(ffi::parse_ffi_type(type_str)?);
             }
-            let ret_str = parts[2].as_string().ok_or_else(|| VMError::runtime("ffi-open: ret type must be string"))?;
+            let ret_str = parts[2]
+                .as_string()
+                .ok_or_else(|| VMError::runtime("ffi-open: ret type must be string"))?;
             let ret_type = ffi::parse_ffi_type(ret_str)?;
-            sigs.push((fn_name.to_string(), ffi::FfiSignature { args: arg_types, ret: ret_type }));
+            sigs.push((
+                fn_name.to_string(),
+                ffi::FfiSignature {
+                    args: arg_types,
+                    ret: ret_type,
+                },
+            ));
         }
 
         let lib = ffi::ffi_open(lib_name, &sigs)?;
@@ -299,13 +401,21 @@ fn register_ffi_builtins(
     // ffi-call: (ffi-call lib "fn_name" arg1 arg2 ...)
     builtin(vm, "ffi-call", |_vm, args| {
         if args.len() < 2 {
-            return Err(VMError::runtime("ffi-call expects library and function name"));
+            return Err(VMError::runtime(
+                "ffi-call expects library and function name",
+            ));
         }
         let lib = match args[0].as_object() {
             Some(VMObject::FfiLibrary(lib)) => lib,
-            _ => return Err(VMError::runtime("ffi-call: first arg must be an FFI library")),
+            _ => {
+                return Err(VMError::runtime(
+                    "ffi-call: first arg must be an FFI library",
+                ))
+            }
         };
-        let fn_name = args[1].as_string().ok_or_else(|| VMError::runtime("ffi-call: second arg must be function name string"))?;
+        let fn_name = args[1]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("ffi-call: second arg must be function name string"))?;
         let call_args = &args[2..];
         ffi::ffi_call(lib, fn_name, call_args)
     });
@@ -317,7 +427,9 @@ fn register_ffi_builtins(
         }
         match args[0].as_object() {
             Some(VMObject::FfiLibrary(_)) => Ok(Value::nil()),
-            _ => Err(VMError::runtime("ffi-close: argument must be an FFI library")),
+            _ => Err(VMError::runtime(
+                "ffi-close: argument must be an FFI library",
+            )),
         }
     });
 
@@ -326,7 +438,9 @@ fn register_ffi_builtins(
         if args.len() != 2 {
             return Err(VMError::runtime("ffi-struct expects name and fields list"));
         }
-        let name = args[0].as_string().ok_or_else(|| VMError::runtime("ffi-struct: first arg must be string"))?;
+        let name = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("ffi-struct: first arg must be string"))?;
         let fields_val = match args[1].as_object() {
             Some(VMObject::List(items)) => items,
             _ => return Err(VMError::runtime("ffi-struct: second arg must be a list")),
@@ -341,15 +455,22 @@ fn register_ffi_builtins(
             if parts.len() != 2 {
                 return Err(VMError::runtime("ffi-struct: field must be (name type)"));
             }
-            let fname = parts[0].as_string().ok_or_else(|| VMError::runtime("ffi-struct: field name must be string"))?;
-            let ftype_str = parts[1].as_string().ok_or_else(|| VMError::runtime("ffi-struct: field type must be string"))?;
+            let fname = parts[0]
+                .as_string()
+                .ok_or_else(|| VMError::runtime("ffi-struct: field name must be string"))?;
+            let ftype_str = parts[1]
+                .as_string()
+                .ok_or_else(|| VMError::runtime("ffi-struct: field type must be string"))?;
             let ftype = ffi::parse_ffi_type(ftype_str)?;
             fields.push((fname.to_string(), ftype));
         }
 
         let def = ffi::compute_struct_layout(name, &fields);
         let def = Arc::new(def);
-        STRUCT_REGISTRY.lock().unwrap().insert(name.to_string(), Arc::clone(&def));
+        STRUCT_REGISTRY
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), Arc::clone(&def));
         Ok(Value::object(VMObject::FfiStructDef(def)))
     });
 
@@ -360,7 +481,11 @@ fn register_ffi_builtins(
         }
         let def = match args[0].as_object() {
             Some(VMObject::FfiStructDef(d)) => Arc::clone(d),
-            _ => return Err(VMError::runtime("struct-new: first arg must be a struct def")),
+            _ => {
+                return Err(VMError::runtime(
+                    "struct-new: first arg must be a struct def",
+                ))
+            }
         };
         let field_vals = &args[1..];
         if field_vals.len() != def.fields.len() {
@@ -375,10 +500,9 @@ fn register_ffi_builtins(
         for (i, field) in def.fields.iter().enumerate() {
             ffi::write_field(&mut buffer, field, &field_vals[i])?;
         }
-        Ok(Value::object(VMObject::FfiStruct(Box::new(ffi::FfiStruct {
-            def,
-            buffer,
-        }))))
+        Ok(Value::object(VMObject::FfiStruct(Box::new(
+            ffi::FfiStruct { def, buffer },
+        ))))
     });
 
     // struct-get: (struct-get s "field_name")
@@ -390,27 +514,50 @@ fn register_ffi_builtins(
             Some(VMObject::FfiStruct(s)) => s,
             _ => return Err(VMError::runtime("struct-get: first arg must be a struct")),
         };
-        let field_name = args[1].as_string().ok_or_else(|| VMError::runtime("struct-get: second arg must be string"))?;
-        let field = s.def.fields.iter().find(|f| f.name == field_name).ok_or_else(|| {
-            VMError::runtime(format!("struct-get: no field '{}' in {}", field_name, s.def.name))
-        })?;
+        let field_name = args[1]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("struct-get: second arg must be string"))?;
+        let field = s
+            .def
+            .fields
+            .iter()
+            .find(|f| f.name == field_name)
+            .ok_or_else(|| {
+                VMError::runtime(format!(
+                    "struct-get: no field '{}' in {}",
+                    field_name, s.def.name
+                ))
+            })?;
         Ok(ffi::read_field(&s.buffer, field))
     });
 
     // struct-set: (struct-set s "field_name" value)
     builtin(vm, "struct-set", |_vm, args| {
         if args.len() != 3 {
-            return Err(VMError::runtime("struct-set expects struct, field name, and value"));
+            return Err(VMError::runtime(
+                "struct-set expects struct, field name, and value",
+            ));
         }
         // We need to clone the struct to mutate it (since Values are immutable/refcounted)
         let mut s = match args[0].as_object() {
             Some(VMObject::FfiStruct(s)) => (**s).clone(),
             _ => return Err(VMError::runtime("struct-set: first arg must be a struct")),
         };
-        let field_name = args[1].as_string().ok_or_else(|| VMError::runtime("struct-set: second arg must be string"))?;
-        let field = s.def.fields.iter().find(|f| f.name == field_name).ok_or_else(|| {
-            VMError::runtime(format!("struct-set: no field '{}' in {}", field_name, s.def.name))
-        })?.clone();
+        let field_name = args[1]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("struct-set: second arg must be string"))?;
+        let field = s
+            .def
+            .fields
+            .iter()
+            .find(|f| f.name == field_name)
+            .ok_or_else(|| {
+                VMError::runtime(format!(
+                    "struct-set: no field '{}' in {}",
+                    field_name, s.def.name
+                ))
+            })?
+            .clone();
         ffi::write_field(&mut s.buffer, &field, &args[2])?;
         Ok(Value::object(VMObject::FfiStruct(Box::new(s))))
     });
