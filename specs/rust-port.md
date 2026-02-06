@@ -2483,7 +2483,7 @@ fn start_repl(vm: &mut VM) -> Result<(), Box<dyn Error>> {
 
 ### Runtime Initialization
 
-The CLI creates a multi-scheduler `Runtime` for commands that use concurrency. Non-concurrent commands (typecheck, disasm) use a single VM directly:
+The CLI initially uses `vm.interpret()` directly for non-concurrent execution. Once the scheduler lands (Phase 7), `run` will be updated to use the multi-scheduler `Runtime` for programs that use concurrency effects:
 
 ```rust
 fn main() {
@@ -2491,18 +2491,23 @@ fn main() {
 
     match cli.command {
         Command::Run { file, no_typecheck } => {
-            // Create multi-scheduler runtime (one scheduler per core)
-            let runtime = Runtime::new(None);
-            let chunk = compile_file(&file, &runtime.shared, no_typecheck);
-            let closure = Arc::new(Closure { proto: Arc::new(chunk.into_proto()), upvalues: Box::new([]) });
-            let result = runtime.run_fibers(closure);
-            runtime.shutdown();
+            // Phase 6: direct VM execution (no scheduler)
+            let mut interner = Interner::new();
+            let chunk = compile_file(&file, &mut interner, no_typecheck);
+            let mut vm = VM::new_with_interner(interner);
+            register_builtins(&mut vm);
+            vm.interpret(&chunk).expect("runtime error");
+
+            // Phase 7 upgrade: detect concurrency effects and use Runtime
+            // let runtime = Runtime::new(None);
+            // let result = runtime.run_fibers(closure);
+            // runtime.shutdown();
         }
         Command::Repl => {
-            // REPL uses single scheduler
-            let runtime = Runtime::new(Some(1));
-            start_repl(&runtime).unwrap();
-            runtime.shutdown();
+            let mut interner = Interner::new();
+            let mut vm = VM::new_with_interner(interner);
+            register_builtins(&mut vm);
+            start_repl(&mut vm).unwrap();
         }
         Command::Typecheck { file, verbose } => typecheck_file(&file, verbose),
         Command::Disasm { file } => disasm_file(&file),
@@ -2802,7 +2807,24 @@ criterion_main!(benches);
 
 **Deliverable:** FFI tests pass (port from TS `vm.test.ts` FFI tests). Embedding API works for registering Rust closures as builtins.
 
-### Phase 6: Concurrency — Single-Threaded (Weeks 9-11)
+### Phase 6: CLI (Weeks 10-11)
+
+**Goal:** Standalone `mar` binary for non-concurrent programs. Uses `vm.interpret()` directly — no scheduler dependency yet.
+
+- [ ] Add `crates/cli/` binary crate with `clap` derive API
+- [ ] Implement `run` subcommand (compile + interpret via VM, optional `--no-typecheck`)
+- [ ] Implement `typecheck` subcommand (with `--verbose` for inferred types)
+- [ ] Implement `disasm` subcommand (bytecode disassembly)
+- [ ] Implement `repl` subcommand with `rustyline` and history
+- [ ] Wire module loader into all commands
+- [ ] Cross-compile and test on Linux, macOS, Windows
+- [ ] Performance benchmarks: verify targets (5× fib40, <10 ms startup, 3× less memory)
+- [ ] Binary size optimization (`strip`, LTO, `opt-level = "z"` if needed)
+- [ ] Update CLAUDE.md and documentation
+
+**Deliverable:** `mar run file.mar`, `mar repl`, `mar typecheck file.mar`, `mar disasm file.mar` — all working as a single ~5-10 MB binary. Concurrency effects (`run-fibers`) not yet supported; `mar lsp` added in Phase 9.
+
+### Phase 7: Concurrency — Single-Threaded (Weeks 11-13)
 
 **Goal:** Full fiber scheduler with channels, actors, and async IO on a single scheduler thread.
 
@@ -2814,10 +2836,11 @@ criterion_main!(benches);
 - [ ] Port Layer 3: async IO effects (print, println, read-line, read-file, write-file)
 - [ ] Integrate with Tokio (`current_thread` runtime per scheduler)
 - [ ] Port `run-fibers` builtin
+- [ ] Update CLI `run` command to use `Runtime` when program uses concurrency
 
 **Deliverable:** `cargo test -p marlang-vm` passes concurrent (25) tests with a single scheduler.
 
-### Phase 6b: Concurrency — Multi-Threaded (Weeks 11-12)
+### Phase 7b: Concurrency — Multi-Threaded (Weeks 13-14)
 
 **Goal:** Scale to N scheduler threads with work stealing and cross-thread messaging.
 
@@ -2833,7 +2856,7 @@ criterion_main!(benches);
 
 **Deliverable:** Multi-threaded runtime passes all 25 existing concurrent tests + new parallel scaling tests.
 
-### Phase 7: Networking (Weeks 12-13)
+### Phase 8: Networking (Weeks 14-15)
 
 **Goal:** TCP and HTTP support via Tokio's thread pool.
 
@@ -2845,7 +2868,7 @@ criterion_main!(benches);
 
 **Deliverable:** Net (4) + HTTP (5) = **9 tests** pass.
 
-### Phase 8: LSP (Weeks 13-14)
+### Phase 9: LSP (Weeks 15-16)
 
 **Goal:** Language server with diagnostics, hover, definition, completion.
 
@@ -2856,22 +2879,9 @@ criterion_main!(benches);
 - [ ] Port go-to-definition handler
 - [ ] Port completion handler
 - [ ] Port diagnostics publishing
+- [ ] Add `mar lsp` subcommand to CLI
 
 **Deliverable:** `cargo test -p marlang-lsp` passes editor-ops (25) tests.
-
-### Phase 9: CLI & Polish (Weeks 14-16)
-
-**Goal:** Standalone binary with all commands working.
-
-- [ ] Implement `clap` CLI with all subcommands (run, repl, typecheck, disasm, lsp)
-- [ ] Implement `rustyline` REPL with history
-- [ ] Wire up Tokio runtime for async commands
-- [ ] Cross-compile and test on Linux, macOS, Windows
-- [ ] Performance benchmarks: verify targets (5× fib40, <10 ms startup, 3× less memory)
-- [ ] Binary size optimization (`strip`, LTO, `opt-level = "z"` if needed)
-- [ ] Update CLAUDE.md and documentation
-
-**Deliverable:** `mar run file.mar`, `mar repl`, `mar typecheck file.mar`, `mar disasm file.mar`, `mar lsp` — all working as a single ~5-10 MB binary.
 
 ### Phase 10: WASM & Web Editor (Weeks 16-18)
 
