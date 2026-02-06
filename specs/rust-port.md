@@ -289,30 +289,32 @@ pub enum Token {
 
 ### 3.5 Type System Types
 
+> **Implementation note:** The spec originally used `Symbol` for type variable names, effect names, class names, etc. The actual implementation uses `String` instead — type variables are generated fresh (`t0`, `t1`, ...) and never interned, so coupling them to the `Interner` would add unnecessary complexity. This keeps the type system decoupled from the core crate's interner. The `Interner` is only needed in `infer.rs` to resolve symbols in the AST when dispatching special forms.
+
 ```rust
 /// Core type representation for HM inference.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
-    Var(Symbol),                                      // type-var
-    Const(Symbol),                                    // type-const (Int, Bool, String, ...)
+    Var(String),                                      // type-var
+    Const(String),                                    // type-const (Int, Bool, String, ...)
     App { constructor: Box<Type>, args: Vec<Type> },  // type-app (List Int), (Option a)
     Arrow {
         params: Vec<Type>,
         effects: Option<EffectRow>,
         result: Box<Type>,
     },
-    Rec { var: Symbol, body: Box<Type> },             // recursive types
+    Rec { var: String, body: Box<Type> },             // recursive types
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EffectRow {
-    Closed(Vec<Symbol>),                     // {IO, State}
-    Open { effects: Vec<Symbol>, row_var: Symbol }, // {IO | r}
+    Closed(Vec<String>),                     // {IO, State}
+    Open { effects: Vec<String>, row_var: String }, // {IO | r}
 }
 
 #[derive(Debug, Clone)]
 pub struct Constraint {
-    pub class: Symbol,    // Num, Eq, Ord, Show
+    pub class: String,    // Num, Eq, Ord, Show
     pub type_arg: Type,
 }
 
@@ -324,7 +326,7 @@ pub struct QualType {
 
 #[derive(Debug, Clone)]
 pub struct TypeScheme {
-    pub quantified_vars: Vec<Symbol>,
+    pub quantified_vars: Vec<String>,
     pub qual_type: QualType,
 }
 
@@ -332,9 +334,9 @@ pub struct TypeScheme {
 #[derive(Debug, Clone)]
 pub enum Pattern {
     Wildcard,
-    Var(Symbol),
+    Var(String),
     Literal(LiteralPattern),
-    Constructor { name: Symbol, args: Vec<Pattern> },
+    Constructor { name: String, args: Vec<Pattern> },
 }
 
 #[derive(Debug, Clone)]
@@ -731,7 +733,7 @@ impl<'t> Parser<'t> {
 
 ---
 
-## 5. Type System
+## 5. Type System ✅
 
 The type system is a Hindley-Milner inference engine with typeclasses, algebraic effects, and exhaustiveness checking. It's entirely pure-functional (no mutation of the inference state) making it a clean fit for Rust.
 
@@ -739,13 +741,13 @@ The type system is a Hindley-Milner inference engine with typeclasses, algebraic
 
 ```
 types/
-├── ast.rs       — Type, TypeScheme, Constraint, Pattern, EffectRow
-├── env.rs       — TypeEnv (immutable bindings map), Substitution
-├── unify.rs     — Robinson's unification
-├── infer.rs     — Constraint generation + HM inference
-├── builtins.rs  — Built-in types (Int, Float, Bool, String) and classes (Num, Eq, Ord)
+├── ast.rs       — Type, TypeScheme, Constraint, Pattern, EffectRow, fresh var generation
+├── env.rs       — TypeEnv (immutable bindings map), Substitution, generalize, instantiate
+├── unify.rs     — Robinson's unification + effect row unification
+├── infer.rs     — HM inference, all special forms, patterns, exhaustiveness
+├── builtins.rs  — Built-in types (Int, Float, Bool, String), classes (Num, Eq, Ord, Show), 70+ builtins
 ├── checker.rs   — Top-level type_check() entry point
-└── errors.rs    — TypeError, formatting
+└── errors.rs    — TypeError enum (19 variants), format_error()
 ```
 
 ### Type Environment
@@ -754,15 +756,18 @@ types/
 /// Immutable type environment. Clone-on-extend for lexical scoping.
 #[derive(Clone)]
 pub struct TypeEnv {
-    pub bindings: HashMap<Symbol, TypeScheme>,
-    pub type_constructors: HashMap<Symbol, Vec<ConstructorInfo>>,
-    pub classes: HashMap<Symbol, ClassInfo>,
-    pub instances: Vec<InstanceInfo>,
-    pub effect_ops: HashMap<Symbol, EffectOpInfo>,
+    pub bindings: HashMap<String, TypeScheme>,
+    pub data_types: HashMap<String, DataType>,
+    pub constructors: HashMap<String, (DataType, Constructor)>,
+    pub classes: HashMap<String, TypeClass>,
+    pub instances: HashMap<String, Vec<ClassInstance>>,
+    pub aliases: HashMap<String, TypeAlias>,
+    pub effects: HashMap<String, EffectDeclaration>,
+    pub parent: Option<Box<TypeEnv>>,
 }
 
 /// Substitution: mapping from type variables to types.
-pub type Substitution = HashMap<Symbol, Type>;
+pub type Substitution = HashMap<String, Type>;
 
 pub fn apply_subst(subst: &Substitution, ty: &Type) -> Type { /* ... */ }
 pub fn compose_subst(s1: &Substitution, s2: &Substitution) -> Substitution { /* ... */ }
@@ -771,26 +776,13 @@ pub fn compose_subst(s1: &Substitution, s2: &Substitution) -> Substitution { /* 
 ### Unification
 
 ```rust
-/// Robinson's unification. Returns a substitution or a type error.
-pub fn unify(t1: &Type, t2: &Type, env: &TypeEnv) -> Result<Substitution, TypeError> {
-    match (t1, t2) {
-        (Type::Var(a), _) => bind(*a, t2),
-        (_, Type::Var(b)) => bind(*b, t1),
-        (Type::Const(a), Type::Const(b)) if a == b => Ok(HashMap::new()),
-        (Type::Arrow { params: p1, result: r1, .. },
-         Type::Arrow { params: p2, result: r2, .. }) => {
-            // Unify parameter lists and results
-            /* ... */
-        }
-        (Type::App { constructor: c1, args: a1 },
-         Type::App { constructor: c2, args: a2 }) => {
-            let s = unify(c1, c2, env)?;
-            // Unify args pairwise under accumulated substitution
-            /* ... */
-        }
-        _ => Err(TypeError::Mismatch { expected: t1.clone(), found: t2.clone() }),
-    }
-}
+/// Robinson's unification with cycle detection.
+/// Creates mu-types on occurs check instead of failing (supports recursive data structures).
+pub fn unify(t1: &Type, t2: &Type) -> Result<Substitution, TypeError> { /* ... */ }
+pub fn unify_with_context(t1: &Type, t2: &Type, context: &str) -> Result<Substitution, TypeError> { /* ... */ }
+pub fn unify_many(pairs: &[(Type, Type)]) -> Result<Substitution, TypeError> { /* ... */ }
+pub fn match_types(pattern: &Type, target: &Type) -> Result<Substitution, TypeError> { /* ... */ }
+pub fn unify_effect_rows(r1: Option<&EffectRow>, r2: Option<&EffectRow>) -> Result<EffectRowSubstitution, TypeError> { /* ... */ }
 ```
 
 ### Inference
@@ -800,15 +792,16 @@ pub struct InferResult {
     pub ty: Type,
     pub subst: Substitution,
     pub constraints: Vec<Constraint>,
+    pub effects: EffectRow,
 }
 
-pub fn infer_expr(env: &TypeEnv, expr: &Expr) -> Result<InferResult, TypeError> { /* ... */ }
+pub fn infer_expr(env: &TypeEnv, expr: &Expr, interner: &Interner) -> Result<InferResult, TypeError> { /* ... */ }
 
 pub fn infer_program(
     env: &TypeEnv,
     exprs: &[Expr],
-    file_path: Option<&str>,
-) -> Result<InferProgramResult, TypeError> { /* ... */ }
+    interner: &Interner,
+) -> Result<(TypeEnv, Vec<Type>), TypeError> { /* ... */ }
 ```
 
 ### Exhaustiveness Checking
@@ -819,18 +812,28 @@ Pattern matching exhaustiveness follows the same algorithm as TypeScript: for ea
 
 ```rust
 pub enum TypeError {
-    Mismatch { expected: Type, found: Type, span: Span },
-    UnboundVariable { name: Symbol, span: Span },
-    OccursCheck { var: Symbol, ty: Type, span: Span },
-    InexhaustiveMatch { missing: Vec<String>, span: Span },
-    NoInstance { class: Symbol, ty: Type, span: Span },
-    ArityMismatch { expected: usize, found: usize, span: Span },
-    // ... other variants matching TypeScript
+    UnificationError { t1: Type, t2: Type, context: Option<String>, span: Option<Span> },
+    OccursCheck { var_name: String, ty: Type, span: Option<Span> },
+    UndefinedVariable { name: String, span: Option<Span> },
+    UndefinedType { name: String, span: Option<Span> },
+    UndefinedConstructor { name: String, span: Option<Span> },
+    UndefinedClass { name: String, span: Option<Span> },
+    NoInstance { constraint: Constraint, span: Option<Span> },
+    DuplicateDefinition { name: String, what: String, span: Option<Span> },
+    ArityMismatch { expected: usize, got: usize, context: String, span: Option<Span> },
+    NotAFunction { ty: Type, span: Option<Span> },
+    PatternTypeMismatch { pattern: Pattern, expected: Type, got: Type, span: Option<Span> },
+    NonExhaustivePatterns { missing: Vec<String>, span: Option<Span> },
+    OverlappingInstances { class_name: String, ty: Type, span: Option<Span> },
+    MissingTypeAnnotation { name: String, span: Option<Span> },
+    InvalidTypeAnnotation { message: String, span: Option<Span> },
+    AmbiguousType { var_name: String, constraints: Vec<Constraint>, span: Option<Span> },
+    CyclicTypeAlias { name: String, span: Option<Span> },
+    KindError { message: String, span: Option<Span> },
+    InternalError { message: String, span: Option<Span> },
 }
 
-impl fmt::Display for TypeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { /* ... */ }
-}
+pub fn format_error(err: &TypeError) -> String { /* ... */ }
 ```
 
 ---
@@ -2321,7 +2324,7 @@ The TypeScript codebase has **467 tests** across 13 test files:
 | `lexer.test.ts` | 37 | `core` | Unit tests in `lexer.rs` |
 | `parser.test.ts` | 34 | `core` | Unit tests in `parser.rs` |
 | `interpreter.test.ts` | 60 | `vm` | Integration tests (VM replaces tree-walker) |
-| `type-system.test.ts` | 63 | `types` | Unit tests in `infer.rs` |
+| `type-system.test.ts` | 63 | `types` | Unit tests in `tests.rs` — 54 ported (type-checking only; 9 runtime-only tests skipped) ✅ |
 | `effects.test.ts` | 53 | `vm` | Integration tests |
 | `vm.test.ts` | 67 | `vm` | Integration tests |
 | `tco.test.ts` | 7 | `vm` | Integration tests |
@@ -2484,20 +2487,33 @@ criterion_main!(benches);
 - `LispValue::String` uses `Arc<str>` (not `String`) for cheap cloning
 - 75 tests total: 2 intern + 2 span + 37 lexer + 34 parser (exceeds spec's 71 estimate due to extra edge case coverage)
 
-### Phase 2: Type System (Weeks 3-5)
+### Phase 2: Type System ✅
 
 **Goal:** Full HM type inference with typeclasses and exhaustiveness.
 
-- [ ] Port type AST (`Type`, `TypeScheme`, `Constraint`, `Pattern`, `EffectRow`)
-- [ ] Port `TypeEnv`, `Substitution`, `apply_subst`, `compose_subst`
-- [ ] Port Robinson's unification
-- [ ] Port constraint generation and inference (`infer_expr`, `infer_program`)
-- [ ] Port built-in types and typeclasses (`Num`, `Eq`, `Ord`, `Show`)
-- [ ] Port exhaustiveness checking
-- [ ] Port error types and formatting
-- [ ] Port type checker entry point
+- [x] Port type AST (`Type`, `TypeScheme`, `Constraint`, `Pattern`, `EffectRow`)
+- [x] Port `TypeEnv`, `Substitution`, `apply_subst`, `compose_subst`
+- [x] Port Robinson's unification
+- [x] Port constraint generation and inference (`infer_expr`, `infer_program`)
+- [x] Port built-in types and typeclasses (`Num`, `Eq`, `Ord`, `Show`)
+- [x] Port exhaustiveness checking
+- [x] Port error types and formatting
+- [x] Port type checker entry point
 
-**Deliverable:** `cargo test -p marlang-types` passes all 63 type system tests.
+**Deliverable:** `cargo test -p marlang-types` passes 54 tests (all type-checking tests; 9 runtime-only tests from TS suite skipped since they test the tree-walker interpreter, not the type system).
+
+**Implementation notes:**
+- Crate: `port/crates/types/` = `marlang-types`, depends on `marlang-core`
+- 8 source files: `ast.rs`, `env.rs`, `unify.rs`, `infer.rs`, `builtins.rs`, `checker.rs`, `errors.rs`, `lib.rs` + `tests.rs`
+- **String-based type variables** — The spec originally proposed `Symbol` for type var names, class names, effect names, etc. The implementation uses `String` instead. Type variables (`t0`, `t1`, ...) and effect row variables (`ε0`, `ε1`, ...) are generated fresh and compared by value, never interned. This keeps the type system decoupled from the interner, which is only needed in `infer.rs` to resolve AST symbols during dispatch.
+- **Clone-based environments** — `TypeEnv` uses `parent: Option<Box<TypeEnv>>` with clone-on-extend, matching the TS immutable Map pattern. Simple and correct for type-checking workloads.
+- **`Result<T, TypeError>` everywhere** — Direct Rust `Result` instead of TS's custom `TypeResult<T>` monad. Enables `?` operator throughout.
+- **Thread-local fresh var counters** — `thread_local!` with `Cell<u32>` for `fresh_type_var()` and `fresh_effect_row_var()`, matching TS's global counter pattern but thread-safe.
+- **TypeEnv fields** — The spec proposed `type_constructors`, `effect_ops` as TypeEnv fields. The implementation instead mirrors the TS structure more closely: `data_types`, `constructors`, `classes`, `instances`, `aliases`, `effects` (all `HashMap<String, _>`) plus `parent: Option<Box<TypeEnv>>`.
+- **TypeClass methods** — Stored as `Vec<(String, Type)>` instead of `HashMap` for simplicity.
+- **Import processing** — Stubbed as no-op (full module loading deferred to Phase 5). The 54 type system tests don't test imports.
+- **`mergeEnv()` deferred** — The TS `mergeEnv()` function (used for module imports with qualified/selective modes) is not ported yet since import processing is stubbed. Will be needed in Phase 5.
+- **54 tests**: basic types (4), arithmetic (3), type annotations (5), functions (2), if expressions (3), let expressions (3), ADTs (2), typeclasses (2), recursive mu-types (4), exhaustiveness checking (7), Show typeclass (7), variadic arithmetic (9), integration (3)
 
 ### Phase 3: Bytecode Compiler (Weeks 5-6)
 

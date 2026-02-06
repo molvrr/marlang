@@ -1,0 +1,458 @@
+use std::cell::Cell;
+use std::collections::HashSet;
+
+// ===== Effect System Types =====
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EffectRow {
+    Closed(Vec<String>),
+    Open { effects: Vec<String>, row_var: String },
+}
+
+impl EffectRow {
+    pub fn effects(&self) -> &[String] {
+        match self {
+            EffectRow::Closed(e) => e,
+            EffectRow::Open { effects, .. } => effects,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectOp {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub constraints: Vec<Constraint>,
+    pub params: Vec<Type>,
+    pub result: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectDeclaration {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub operations: Vec<EffectOp>,
+}
+
+// ===== Core Type Representation =====
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Type {
+    Var(String),
+    Const(String),
+    App {
+        constructor: Box<Type>,
+        args: Vec<Type>,
+    },
+    Arrow {
+        params: Vec<Type>,
+        effects: Option<EffectRow>,
+        result: Box<Type>,
+    },
+    Rec {
+        var: String,
+        body: Box<Type>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Constraint {
+    pub class: String,
+    pub type_arg: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QualType {
+    pub constraints: Vec<Constraint>,
+    pub ty: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeScheme {
+    pub quantified_vars: Vec<String>,
+    pub qual_type: QualType,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Constructor {
+    pub name: String,
+    pub params: Vec<Type>,
+    pub result_type: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataType {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub constructors: Vec<Constructor>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeClass {
+    pub name: String,
+    pub type_param: String,
+    pub superclasses: Vec<String>,
+    pub methods: Vec<(String, Type)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassInstance {
+    pub class_name: String,
+    pub for_type: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pattern {
+    Wildcard,
+    Var(String),
+    Literal(LiteralPattern),
+    Constructor { name: String, args: Vec<Pattern> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiteralPattern {
+    Number(f64),
+    String(String),
+    Bool(bool),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeAlias {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub body: Type,
+}
+
+// ===== Constructors =====
+
+pub fn type_var(name: &str) -> Type {
+    Type::Var(name.to_string())
+}
+
+pub fn type_const(name: &str) -> Type {
+    Type::Const(name.to_string())
+}
+
+pub fn type_app(constructor: Type, args: Vec<Type>) -> Type {
+    Type::App {
+        constructor: Box::new(constructor),
+        args,
+    }
+}
+
+pub fn type_arrow(params: Vec<Type>, result: Type) -> Type {
+    Type::Arrow {
+        params,
+        effects: None,
+        result: Box::new(result),
+    }
+}
+
+pub fn type_arrow_with_effects(params: Vec<Type>, effects: Option<EffectRow>, result: Type) -> Type {
+    Type::Arrow {
+        params,
+        effects,
+        result: Box::new(result),
+    }
+}
+
+pub fn type_rec(var: &str, body: Type) -> Type {
+    Type::Rec {
+        var: var.to_string(),
+        body: Box::new(body),
+    }
+}
+
+pub fn effect_row_closed(effects: Vec<String>) -> EffectRow {
+    EffectRow::Closed(effects)
+}
+
+pub fn effect_row_open(effects: Vec<String>, row_var: String) -> EffectRow {
+    EffectRow::Open { effects, row_var }
+}
+
+pub fn effect_row_empty() -> EffectRow {
+    EffectRow::Closed(vec![])
+}
+
+// ===== Built-in Types =====
+
+pub fn t_int() -> Type {
+    type_const("Int")
+}
+pub fn t_float() -> Type {
+    type_const("Float")
+}
+pub fn t_bool() -> Type {
+    type_const("Bool")
+}
+pub fn t_string() -> Type {
+    type_const("String")
+}
+pub fn t_unit() -> Type {
+    type_const("Unit")
+}
+pub fn t_list(elem: Type) -> Type {
+    type_app(type_const("List"), vec![elem])
+}
+pub fn t_ffi_library() -> Type {
+    type_const("FFILibrary")
+}
+pub fn t_ffi_struct_def() -> Type {
+    type_const("FFIStructDef")
+}
+pub fn t_ffi_struct() -> Type {
+    type_const("FFIStruct")
+}
+pub fn t_ffi_pointer() -> Type {
+    type_const("FFIPointer")
+}
+pub fn t_pid() -> Type {
+    type_const("Pid")
+}
+pub fn t_channel() -> Type {
+    type_const("Channel")
+}
+
+// ===== Type Scheme Helpers =====
+
+pub fn monotype(t: Type) -> TypeScheme {
+    TypeScheme {
+        quantified_vars: vec![],
+        qual_type: QualType {
+            constraints: vec![],
+            ty: t,
+        },
+    }
+}
+
+pub fn polytype(vars: Vec<&str>, t: Type) -> TypeScheme {
+    TypeScheme {
+        quantified_vars: vars.into_iter().map(String::from).collect(),
+        qual_type: QualType {
+            constraints: vec![],
+            ty: t,
+        },
+    }
+}
+
+pub fn constrained_type(vars: Vec<&str>, constraints: Vec<Constraint>, t: Type) -> TypeScheme {
+    TypeScheme {
+        quantified_vars: vars.into_iter().map(String::from).collect(),
+        qual_type: QualType { constraints, ty: t },
+    }
+}
+
+// ===== Fresh Type Variable Generation =====
+
+thread_local! {
+    static TYPE_VAR_COUNTER: Cell<u32> = const { Cell::new(0) };
+    static EFFECT_ROW_VAR_COUNTER: Cell<u32> = const { Cell::new(0) };
+}
+
+pub fn fresh_type_var() -> Type {
+    fresh_type_var_with_prefix("t")
+}
+
+pub fn fresh_type_var_with_prefix(prefix: &str) -> Type {
+    TYPE_VAR_COUNTER.with(|c| {
+        let n = c.get();
+        c.set(n + 1);
+        Type::Var(format!("{prefix}{n}"))
+    })
+}
+
+pub fn reset_type_var_counter() {
+    TYPE_VAR_COUNTER.with(|c| c.set(0));
+}
+
+pub fn fresh_effect_row_var() -> String {
+    EFFECT_ROW_VAR_COUNTER.with(|c| {
+        let n = c.get();
+        c.set(n + 1);
+        format!("ε{n}")
+    })
+}
+
+pub fn reset_effect_row_var_counter() {
+    EFFECT_ROW_VAR_COUNTER.with(|c| c.set(0));
+}
+
+// ===== Free Type Variables =====
+
+pub fn free_type_vars(t: &Type) -> HashSet<String> {
+    match t {
+        Type::Var(name) => {
+            let mut s = HashSet::new();
+            s.insert(name.clone());
+            s
+        }
+        Type::Const(_) => HashSet::new(),
+        Type::App { constructor, args } => {
+            let mut result = free_type_vars(constructor);
+            for arg in args {
+                result.extend(free_type_vars(arg));
+            }
+            result
+        }
+        Type::Arrow {
+            params,
+            effects,
+            result,
+        } => {
+            let mut s = HashSet::new();
+            for p in params {
+                s.extend(free_type_vars(p));
+            }
+            s.extend(free_type_vars(result));
+            if let Some(row) = effects {
+                s.extend(free_effect_row_vars(row));
+            }
+            s
+        }
+        Type::Rec { var, body } => {
+            let mut s = free_type_vars(body);
+            s.remove(var);
+            s
+        }
+    }
+}
+
+pub fn free_effect_row_vars(row: &EffectRow) -> HashSet<String> {
+    match row {
+        EffectRow::Closed(_) => HashSet::new(),
+        EffectRow::Open { row_var, .. } => {
+            let mut s = HashSet::new();
+            s.insert(row_var.clone());
+            s
+        }
+    }
+}
+
+pub fn free_type_vars_scheme(scheme: &TypeScheme) -> HashSet<String> {
+    let mut s = free_type_vars(&scheme.qual_type.ty);
+    for v in &scheme.quantified_vars {
+        s.remove(v);
+    }
+    for c in &scheme.qual_type.constraints {
+        for v in free_type_vars(&c.type_arg) {
+            if !scheme.quantified_vars.contains(&v) {
+                s.insert(v);
+            }
+        }
+    }
+    s
+}
+
+// ===== Formatting =====
+
+pub fn format_effect_row(row: &EffectRow) -> String {
+    match row {
+        EffectRow::Closed(effects) => {
+            if effects.is_empty() {
+                "{}".to_string()
+            } else {
+                format!("{{{}}}", effects.join(", "))
+            }
+        }
+        EffectRow::Open { effects, row_var } => {
+            if effects.is_empty() {
+                format!("{{{row_var}}}")
+            } else {
+                format!("{{{} | {row_var}}}", effects.join(", "))
+            }
+        }
+    }
+}
+
+pub fn format_type(t: &Type) -> String {
+    match t {
+        Type::Var(name) => name.clone(),
+        Type::Const(name) => name.clone(),
+        Type::App { constructor, args } => {
+            if args.is_empty() {
+                format_type(constructor)
+            } else {
+                let args_str: Vec<_> = args.iter().map(format_type).collect();
+                format!("({} {})", format_type(constructor), args_str.join(" "))
+            }
+        }
+        Type::Arrow {
+            params,
+            effects,
+            result,
+        } => {
+            let params_str: Vec<_> = params.iter().map(format_type).collect();
+            let effects_str = match effects {
+                Some(row) => format!(" {}", format_effect_row(row)),
+                None => String::new(),
+            };
+            if params.is_empty() {
+                format!("(->{effects_str} {})", format_type(result))
+            } else {
+                format!(
+                    "(-> {}{effects_str} {})",
+                    params_str.join(" "),
+                    format_type(result)
+                )
+            }
+        }
+        Type::Rec { var, body } => {
+            format!("(mu {var} {})", format_type(body))
+        }
+    }
+}
+
+pub fn format_constraint(c: &Constraint) -> String {
+    format!("({} {})", c.class, format_type(&c.type_arg))
+}
+
+pub fn format_scheme(scheme: &TypeScheme) -> String {
+    let mut result = String::new();
+    if !scheme.quantified_vars.is_empty() {
+        result.push_str(&format!("(forall {} ", scheme.quantified_vars.join(" ")));
+    }
+    if !scheme.qual_type.constraints.is_empty() {
+        let cs: Vec<_> = scheme
+            .qual_type
+            .constraints
+            .iter()
+            .map(format_constraint)
+            .collect();
+        result.push_str(&format!("(=> {} ", cs.join(" ")));
+        result.push_str(&format_type(&scheme.qual_type.ty));
+        result.push(')');
+    } else {
+        result.push_str(&format_type(&scheme.qual_type.ty));
+    }
+    if !scheme.quantified_vars.is_empty() {
+        result.push(')');
+    }
+    result
+}
+
+pub fn format_pattern(p: &Pattern) -> String {
+    match p {
+        Pattern::Wildcard => "_".to_string(),
+        Pattern::Var(name) => name.clone(),
+        Pattern::Literal(lit) => match lit {
+            LiteralPattern::Number(n) => format!("{n}"),
+            LiteralPattern::String(s) => format!("\"{s}\""),
+            LiteralPattern::Bool(b) => {
+                if *b {
+                    "#t".to_string()
+                } else {
+                    "#f".to_string()
+                }
+            }
+        },
+        Pattern::Constructor { name, args } => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                let args_str: Vec<_> = args.iter().map(format_pattern).collect();
+                format!("({name} {})", args_str.join(" "))
+            }
+        }
+    }
+}

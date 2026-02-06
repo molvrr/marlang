@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "marlang-core"
 version = "0.1.0"
+
+[[package]]
+name = "marlang-types"
+version = "0.1.0"
+dependencies = [
+ "marlang-core",
+]
