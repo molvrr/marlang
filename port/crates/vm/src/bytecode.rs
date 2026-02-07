@@ -94,7 +94,7 @@ impl Op {
 }
 
 /// A single bytecode instruction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Instruction {
     pub op: Op,
     pub operand: u32,

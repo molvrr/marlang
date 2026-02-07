@@ -76,11 +76,7 @@ impl ModuleLoader {
     }
 
     /// Resolve an import path to an absolute path.
-    fn resolve_path(
-        &self,
-        import_path: &str,
-        from_file: &Path,
-    ) -> Result<PathBuf, VMError> {
+    fn resolve_path(&self, import_path: &str, from_file: &Path) -> Result<PathBuf, VMError> {
         if import_path.starts_with("std:") {
             // Standard library import
             let module_name = &import_path[4..];
@@ -128,9 +124,8 @@ impl ModuleLoader {
         if let Some(source) = self.virtual_modules.get(path) {
             return Ok(source.clone());
         }
-        std::fs::read_to_string(path).map_err(|_| {
-            VMError::runtime(format!("Module not found: {}", path.display()))
-        })
+        std::fs::read_to_string(path)
+            .map_err(|_| VMError::runtime(format!("Module not found: {}", path.display())))
     }
 }
 
@@ -147,19 +142,19 @@ pub fn run_program(
     loader: &mut ModuleLoader,
     interner: &Interner,
 ) -> Result<Value, VMError> {
-    let tokens = lex(source, interner).map_err(|e| VMError::runtime(format!("Lex error: {}", e)))?;
+    let tokens =
+        lex(source, interner).map_err(|e| VMError::runtime(format!("Lex error: {}", e)))?;
     let exprs = parse(&tokens).map_err(|e| VMError::runtime(format!("Parse error: {}", e)))?;
 
     if exprs.is_empty() {
         return Ok(Value::nil());
     }
 
-    let mut known_constructors: HashSet<Symbol> = [
-        "None", "Some", "Nil", "Cons", "MkPair", "Ok", "Err",
-    ]
-    .iter()
-    .map(|s| interner.intern(s))
-    .collect();
+    let mut known_constructors: HashSet<Symbol> =
+        ["None", "Some", "Nil", "Cons", "MkPair", "Ok", "Err"]
+            .iter()
+            .map(|s| interner.intern(s))
+            .collect();
 
     let mut known_effect_ops: HashMap<Symbol, Symbol> = HashMap::new();
     let mut last_value = Value::nil();
@@ -170,9 +165,8 @@ pub fn run_program(
     for expr in &exprs {
         // Check if this is an import expression
         if is_import(expr, import_sym) {
-            let file = file_path.ok_or_else(|| {
-                VMError::runtime("Cannot use import without a file context")
-            })?;
+            let file = file_path
+                .ok_or_else(|| VMError::runtime("Cannot use import without a file context"))?;
             handle_import(
                 vm,
                 expr,
@@ -186,13 +180,9 @@ pub fn run_program(
             )?;
             last_value = Value::nil();
         } else {
-            let result = compile_expr_with_context(
-                expr,
-                interner,
-                &known_constructors,
-                &known_effect_ops,
-            )
-            .map_err(|e| VMError::runtime(format!("Compile error: {}", e)))?;
+            let result =
+                compile_expr_with_context(expr, interner, &known_constructors, &known_effect_ops)
+                    .map_err(|e| VMError::runtime(format!("Compile error: {}", e)))?;
 
             // Update knowledge from this expression
             known_constructors = result.known_constructors;
@@ -314,12 +304,13 @@ fn handle_import(
     let source = loader.load_source(&resolved)?;
 
     // Save parent globals and set up module globals (start with builtins)
-    let parent_globals = vm.globals.clone();
+    // Use std::mem::take to move globals instead of cloning (O(1) vs O(n))
+    let parent_globals = std::mem::take(&mut vm.globals);
     let parent_handler_stack = std::mem::take(&mut vm.handler_stack);
     let parent_resumed = std::mem::take(&mut vm.resumed_continuations);
     let parent_dirty = vm.dirty_globals.take();
 
-    vm.globals.clear();
+    // Globals is now empty, register builtins for the module
     register_builtins(vm);
     // Enable dirty-globals tracking for the module
     vm.dirty_globals = Some(HashSet::new());
@@ -354,7 +345,14 @@ fn handle_import(
     );
 
     // Merge exports into current scope
-    merge_exports(vm, &module_globals, &form, interner, known_constructors, &path_str)?;
+    merge_exports(
+        vm,
+        &module_globals,
+        &form,
+        interner,
+        known_constructors,
+        &path_str,
+    )?;
 
     Ok(())
 }

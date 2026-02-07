@@ -1,5 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 use crate::bytecode::{Chunk, ConstantValue, FunctionPrototype, Op};
 use crate::errors::{StackTraceEntry, VMError};
@@ -44,7 +46,7 @@ pub struct VM {
     pub stack_top: usize,
     pub frames: Vec<CallFrame>,
     pub frame_count: usize,
-    pub globals: HashMap<String, Value>,
+    pub globals: FxHashMap<String, Value>,
     pub handler_stack: Vec<VMHandlerFrame>,
     /// Tracks which continuation IDs have been resumed (one-shot enforcement).
     pub(crate) resumed_continuations: HashSet<u64>,
@@ -61,7 +63,7 @@ impl VM {
             stack_top: 0,
             frames: Vec::with_capacity(64),
             frame_count: 0,
-            globals: HashMap::new(),
+            globals: FxHashMap::default(),
             handler_stack: Vec::new(),
             resumed_continuations: HashSet::new(),
             captured_output: None,
@@ -110,6 +112,21 @@ impl VM {
             self.frames[self.frame_count] = frame;
         }
         self.frame_count += 1;
+    }
+
+    /// Take a reusable locals Vec from the frame slot that will be overwritten next.
+    /// This avoids heap allocation when frames are reused (which is the common case
+    /// after the call stack has grown to its peak depth once).
+    #[inline]
+    fn take_locals(&mut self, count: usize) -> Vec<Value> {
+        if self.frame_count < self.frames.len() {
+            let mut locals = std::mem::take(&mut self.frames[self.frame_count].locals);
+            locals.clear();
+            locals.resize(count, Value::nil());
+            locals
+        } else {
+            vec![Value::nil(); count]
+        }
     }
 
     pub fn capture_stack_trace(&self, current_frame: &CallFrame) -> Vec<StackTraceEntry> {
@@ -586,67 +603,92 @@ fn try_default_handler(vm: &mut VM, op_name: &str, args: &[Value]) -> Option<Val
 // --- Main Execution Loop ---
 
 pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSignal> {
-    // Cache current frame data
     let mut frame_idx = vm.frame_count - 1;
-    let mut frame = vm.frames[frame_idx].clone();
+    let mut ip = vm.frames[frame_idx].ip;
+
+    // Cached pointers for hot-path frame access, avoiding repeated
+    // vm.frames[frame_idx].closure.proto.chunk dereference chains.
+    //
+    // SAFETY: These pointers are derived from vm.frames[frame_idx] and its
+    // Arc<FunctionPrototype>. They remain valid as long as:
+    //   - code/constants: the frame's closure holds the Arc alive
+    //   - locals: the frame's locals Vec is not reallocated (it's fixed-size after creation)
+    // We re-derive ALL cached pointers after every frame-changing operation
+    // (Call, Return, TailCall, PushHandler, Resume, Perform).
+    let mut code: *const crate::bytecode::Instruction;
+    let mut constants: *const ConstantValue;
+    let mut locals: *mut Value;
+
+    macro_rules! cache_frame {
+        () => {
+            let f = &mut vm.frames[frame_idx];
+            code = f.closure.proto.chunk.code.as_ptr();
+            constants = f.closure.proto.chunk.constants.as_ptr();
+            locals = f.locals.as_mut_ptr();
+        };
+    }
+    cache_frame!();
 
     loop {
-        let inst = &frame.closure.proto.chunk.code[frame.ip];
-        frame.ip += 1;
+        // SAFETY: ip is always in bounds (enforced by bytecode compiler)
+        let inst = unsafe { *code.add(ip) };
+        ip += 1;
 
         match inst.op {
             // --- Stack operations ---
             Op::PushConst => {
-                let val = frame.closure.proto.chunk.constants[inst.operand as usize]
-                    .as_value()
-                    .clone();
+                // SAFETY: operand is a valid constant index (from compiler)
+                let val = unsafe { &*constants.add(inst.operand as usize) }.as_value();
                 vm.push(val);
             }
 
             Op::PushLocal => {
-                let val = frame.locals[inst.operand as usize].clone();
+                // SAFETY: operand is a valid local index (from compiler)
+                let val = unsafe { (*locals.add(inst.operand as usize)).clone() };
                 vm.push(val);
             }
 
             Op::SetLocal => {
                 let val = vm.pop();
-                frame.locals[inst.operand as usize] = val;
+                // SAFETY: operand is a valid local index, pointer is valid
+                unsafe { *locals.add(inst.operand as usize) = val };
             }
 
             Op::PushUpvalue => {
-                let val = frame.closure.upvalues[inst.operand as usize].clone();
+                let val = vm.frames[frame_idx].closure.upvalues[inst.operand as usize].clone();
                 vm.push(val);
             }
 
             Op::PushGlobal => {
-                let name = match &frame.closure.proto.chunk.constants[inst.operand as usize] {
-                    ConstantValue::String(s) => s,
+                // SAFETY: operand is a valid constant index
+                let cval = unsafe { &*constants.add(inst.operand as usize) };
+                match cval {
+                    ConstantValue::String(s) => match vm.globals.get(s.as_str()) {
+                        Some(v) => vm.push(v.clone()),
+                        None => {
+                            vm.frames[frame_idx].ip = ip;
+                            return Err(VMSignal::Error(
+                                vm.vm_error(format!("Undefined variable: {}", s), &vm.frames[frame_idx]),
+                            ));
+                        }
+                    },
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
+                        vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
-                            vm.vm_error("Global name must be string", &frame),
+                            vm.vm_error("Global name must be string", &vm.frames[frame_idx]),
                         ));
                     }
-                };
-                let value = match vm.globals.get(name) {
-                    Some(v) => v.clone(),
-                    None => {
-                        save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(
-                            vm.vm_error(format!("Undefined variable: {}", name), &frame),
-                        ));
-                    }
-                };
-                vm.push(value);
+                }
             }
 
             Op::SetGlobal => {
-                let name = match &frame.closure.proto.chunk.constants[inst.operand as usize] {
+                // SAFETY: operand is a valid constant index
+                let name = match unsafe { &*constants.add(inst.operand as usize) } {
                     ConstantValue::String(s) => s.clone(),
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
+                        vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
-                            vm.vm_error("Global name must be string", &frame),
+                            vm.vm_error("Global name must be string", &vm.frames[frame_idx]),
                         ));
                     }
                 };
@@ -702,10 +744,10 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 vm.push(Value::string(result.as_str()));
                             }
                             _ => {
-                                save_frame(vm, frame_idx, &frame);
+                                vm.frames[frame_idx].ip = ip;
                                 return Err(VMSignal::Error(vm.vm_error(
                                     format!("Cannot add {} and {}", a.kind_name(), b.kind_name()),
-                                    &frame,
+                                    &vm.frames[frame_idx],
                                 )));
                             }
                         }
@@ -719,9 +761,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 match (a.as_number(), b.as_number()) {
                     (Some(na), Some(nb)) => vm.push(Value::number(na - nb)),
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
+                        vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
-                            vm.vm_error("Subtraction requires numbers", &frame),
+                            vm.vm_error("Subtraction requires numbers", &vm.frames[frame_idx]),
                         ));
                     }
                 }
@@ -733,9 +775,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 match (a.as_number(), b.as_number()) {
                     (Some(na), Some(nb)) => vm.push(Value::number(na * nb)),
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
+                        vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
-                            vm.vm_error("Multiplication requires numbers", &frame),
+                            vm.vm_error("Multiplication requires numbers", &vm.frames[frame_idx]),
                         ));
                     }
                 }
@@ -747,9 +789,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 match (a.as_number(), b.as_number()) {
                     (Some(na), Some(nb)) => vm.push(Value::number(na / nb)),
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
+                        vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
-                            vm.vm_error("Division requires numbers", &frame),
+                            vm.vm_error("Division requires numbers", &vm.frames[frame_idx]),
                         ));
                     }
                 }
@@ -760,9 +802,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 match a.as_number() {
                     Some(n) => vm.push(Value::number(-n)),
                     None => {
-                        save_frame(vm, frame_idx, &frame);
+                        vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
-                            vm.vm_error("Negate requires number", &frame),
+                            vm.vm_error("Negate requires number", &vm.frames[frame_idx]),
                         ));
                     }
                 }
@@ -781,8 +823,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 match (a.as_number(), b.as_number()) {
                     (Some(na), Some(nb)) => vm.push(Value::boolean(na < nb)),
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("< requires numbers", &frame)));
+                        vm.frames[frame_idx].ip = ip;
+                        return Err(VMSignal::Error(vm.vm_error("< requires numbers", &vm.frames[frame_idx])));
                     }
                 }
             }
@@ -793,8 +835,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 match (a.as_number(), b.as_number()) {
                     (Some(na), Some(nb)) => vm.push(Value::boolean(na > nb)),
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("> requires numbers", &frame)));
+                        vm.frames[frame_idx].ip = ip;
+                        return Err(VMSignal::Error(vm.vm_error("> requires numbers", &vm.frames[frame_idx])));
                     }
                 }
             }
@@ -805,8 +847,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 match (a.as_number(), b.as_number()) {
                     (Some(na), Some(nb)) => vm.push(Value::boolean(na <= nb)),
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error("<= requires numbers", &frame)));
+                        vm.frames[frame_idx].ip = ip;
+                        return Err(VMSignal::Error(vm.vm_error("<= requires numbers", &vm.frames[frame_idx])));
                     }
                 }
             }
@@ -817,8 +859,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 match (a.as_number(), b.as_number()) {
                     (Some(na), Some(nb)) => vm.push(Value::boolean(na >= nb)),
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
-                        return Err(VMSignal::Error(vm.vm_error(">= requires numbers", &frame)));
+                        vm.frames[frame_idx].ip = ip;
+                        return Err(VMSignal::Error(vm.vm_error(">= requires numbers", &vm.frames[frame_idx])));
                     }
                 }
             }
@@ -830,13 +872,13 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
             // --- Control flow ---
             Op::Jump => {
-                frame.ip = inst.operand as usize;
+                ip = inst.operand as usize;
             }
 
             Op::JumpIfFalse => {
                 let cond = vm.pop();
                 if !cond.is_truthy() {
-                    frame.ip = inst.operand as usize;
+                    ip = inst.operand as usize;
                 }
             }
 
@@ -845,12 +887,12 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 vm.frame_count -= 1;
 
                 if vm.frame_count <= base_frame_count {
-                    // Save frame back before returning (for stack trace accuracy)
                     return Ok(result);
                 }
 
                 frame_idx = vm.frame_count - 1;
-                frame = vm.frames[frame_idx].clone();
+                ip = vm.frames[frame_idx].ip;
+                cache_frame!();
                 vm.push(result);
             }
 
@@ -863,35 +905,39 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     match obj {
                         VMObject::Closure(closure) => {
                             if arity != closure.proto.arity as usize {
-                                save_frame(vm, frame_idx, &frame);
+                                vm.frames[frame_idx].ip = ip;
                                 return Err(VMSignal::Error(vm.vm_error(
                                     format!(
                                         "Expected {} arguments, got {}",
                                         closure.proto.arity, arity
                                     ),
-                                    &frame,
+                                    &vm.frames[frame_idx],
                                 )));
                             }
 
-                            let mut locals =
-                                vec![Value::nil(); closure.proto.chunk.local_count as usize];
+                            let cloned_closure = (**closure).clone();
+                            let local_count = cloned_closure.proto.chunk.local_count as usize;
+
+                            // Reuse locals Vec from dead frame slot when possible
+                            let mut locals = vm.take_locals(local_count);
                             for i in (0..arity).rev() {
                                 locals[i] = vm.pop();
                             }
                             vm.pop(); // pop callee
 
                             let new_frame = CallFrame {
-                                closure: (**closure).clone(),
+                                closure: cloned_closure,
                                 ip: 0,
                                 locals,
                             };
 
                             // Save current frame back
-                            save_frame(vm, frame_idx, &frame);
+                            vm.frames[frame_idx].ip = ip;
 
                             vm.push_frame(new_frame);
                             frame_idx = vm.frame_count - 1;
-                            frame = vm.frames[frame_idx].clone();
+                            ip = 0;
+                            cache_frame!();
                         }
 
                         VMObject::Builtin { func, .. } => {
@@ -902,8 +948,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             }
                             vm.pop(); // pop callee
 
-                            save_frame(vm, frame_idx, &frame);
+                            vm.frames[frame_idx].ip = ip;
                             let result = func(vm, &args).map_err(VMSignal::Error)?;
+                            cache_frame!(); // builtins may modify VM state
                             vm.push(result);
                         }
 
@@ -914,13 +961,13 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             let name = name.clone();
                             let expected_arity = *expected_arity;
                             if arity != expected_arity as usize {
-                                save_frame(vm, frame_idx, &frame);
+                                vm.frames[frame_idx].ip = ip;
                                 return Err(VMSignal::Error(vm.vm_error(
                                     format!(
                                         "Constructor {} expects {} arguments, got {}",
                                         name, expected_arity, arity
                                     ),
-                                    &frame,
+                                    &vm.frames[frame_idx],
                                 )));
                             }
                             let mut args = vec![Value::nil(); arity];
@@ -936,15 +983,15 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                         _ => {
                             let kind = obj.kind_name();
-                            save_frame(vm, frame_idx, &frame);
+                            vm.frames[frame_idx].ip = ip;
                             return Err(VMSignal::Error(
-                                vm.vm_error(format!("Cannot call {}", kind), &frame),
+                                vm.vm_error(format!("Cannot call {}", kind), &vm.frames[frame_idx]),
                             ));
                         }
                     }
                 } else {
-                    save_frame(vm, frame_idx, &frame);
-                    return Err(VMSignal::Error(vm.vm_error("Cannot call number", &frame)));
+                    vm.frames[frame_idx].ip = ip;
+                    return Err(VMSignal::Error(vm.vm_error("Cannot call number", &vm.frames[frame_idx])));
                 }
             }
 
@@ -956,27 +1003,31 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     match obj {
                         VMObject::Closure(closure) => {
                             if arity != closure.proto.arity as usize {
-                                save_frame(vm, frame_idx, &frame);
+                                vm.frames[frame_idx].ip = ip;
                                 return Err(VMSignal::Error(vm.vm_error(
                                     format!(
                                         "Expected {} arguments, got {}",
                                         closure.proto.arity, arity
                                     ),
-                                    &frame,
+                                    &vm.frames[frame_idx],
                                 )));
                             }
 
-                            let mut locals =
-                                vec![Value::nil(); closure.proto.chunk.local_count as usize];
+                            // Reuse current frame's locals Vec (avoids allocation)
+                            let mut locals = std::mem::take(&mut vm.frames[frame_idx].locals);
+                            let local_count = closure.proto.chunk.local_count as usize;
+                            locals.clear();
+                            locals.resize(local_count, Value::nil());
                             for i in (0..arity).rev() {
                                 locals[i] = vm.pop();
                             }
                             vm.pop(); // pop callee
 
                             // Reuse current frame
-                            frame.closure = (**closure).clone();
-                            frame.ip = 0;
-                            frame.locals = locals;
+                            vm.frames[frame_idx].closure = (**closure).clone();
+                            ip = 0;
+                            vm.frames[frame_idx].locals = locals;
+                            cache_frame!();
                         }
 
                         VMObject::Builtin { func, .. } => {
@@ -987,7 +1038,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             }
                             vm.pop(); // pop callee
 
-                            save_frame(vm, frame_idx, &frame);
+                            vm.frames[frame_idx].ip = ip;
                             let result = func(vm, &args).map_err(VMSignal::Error)?;
 
                             vm.frame_count -= 1;
@@ -995,7 +1046,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 return Ok(result);
                             }
                             frame_idx = vm.frame_count - 1;
-                            frame = vm.frames[frame_idx].clone();
+                            ip = vm.frames[frame_idx].ip;
+                            cache_frame!();
                             vm.push(result);
                         }
 
@@ -1006,13 +1058,13 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             let name = name.clone();
                             let expected_arity = *expected_arity;
                             if arity != expected_arity as usize {
-                                save_frame(vm, frame_idx, &frame);
+                                vm.frames[frame_idx].ip = ip;
                                 return Err(VMSignal::Error(vm.vm_error(
                                     format!(
                                         "Constructor {} expects {} arguments, got {}",
                                         name, expected_arity, arity
                                     ),
-                                    &frame,
+                                    &vm.frames[frame_idx],
                                 )));
                             }
                             let mut args = vec![Value::nil(); arity];
@@ -1030,47 +1082,50 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 return Ok(result);
                             }
                             frame_idx = vm.frame_count - 1;
-                            frame = vm.frames[frame_idx].clone();
+                            ip = vm.frames[frame_idx].ip;
+                            cache_frame!();
                             vm.push(result);
                         }
 
                         _ => {
                             let kind = obj.kind_name();
-                            save_frame(vm, frame_idx, &frame);
+                            vm.frames[frame_idx].ip = ip;
                             return Err(VMSignal::Error(
-                                vm.vm_error(format!("Cannot call {}", kind), &frame),
+                                vm.vm_error(format!("Cannot call {}", kind), &vm.frames[frame_idx]),
                             ));
                         }
                     }
                 } else {
-                    save_frame(vm, frame_idx, &frame);
-                    return Err(VMSignal::Error(vm.vm_error("Cannot call number", &frame)));
+                    vm.frames[frame_idx].ip = ip;
+                    return Err(VMSignal::Error(vm.vm_error("Cannot call number", &vm.frames[frame_idx])));
                 }
             }
 
             Op::Closure => {
-                let proto = match &frame.closure.proto.chunk.constants[inst.operand as usize] {
+                // SAFETY: operand is a valid constant index
+                let proto = match unsafe { &*constants.add(inst.operand as usize) } {
                     ConstantValue::Prototype(p) => p,
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
+                        vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
-                            vm.vm_error("CLOSURE expects a prototype constant", &frame),
+                            vm.vm_error("CLOSURE expects a prototype constant", &vm.frames[frame_idx]),
                         ));
                     }
                 };
 
-                let closure = create_closure_from_proto(&frame, proto);
+                let closure = create_closure_from_proto(&vm.frames[frame_idx], proto);
                 vm.push(Value::object(VMObject::Closure(Box::new(closure))));
             }
 
             // --- ADTs ---
             Op::Construct => {
-                let name = match &frame.closure.proto.chunk.constants[inst.operand as usize] {
+                // SAFETY: operand is a valid constant index
+                let name = match unsafe { &*constants.add(inst.operand as usize) } {
                     ConstantValue::String(s) => s.clone(),
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
+                        vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
-                            vm.vm_error("CONSTRUCT name must be string", &frame),
+                            vm.vm_error("CONSTRUCT name must be string", &vm.frames[frame_idx]),
                         ));
                     }
                 };
@@ -1093,10 +1148,10 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     match obj {
                         VMObject::AdtValue { fields, tag, .. } => {
                             if field_idx >= fields.len() {
-                                save_frame(vm, frame_idx, &frame);
+                                vm.frames[frame_idx].ip = ip;
                                 return Err(VMSignal::Error(vm.vm_error(
                                     format!("Field index {} out of bounds for {}", field_idx, tag),
-                                    &frame,
+                                    &vm.frames[frame_idx],
                                 )));
                             }
                             let field = fields[field_idx].clone();
@@ -1105,43 +1160,44 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         VMObject::List(elements) => {
                             if field_idx == 0 {
                                 if elements.is_empty() {
-                                    save_frame(vm, frame_idx, &frame);
+                                    vm.frames[frame_idx].ip = ip;
                                     return Err(VMSignal::Error(
-                                        vm.vm_error("Cannot get head of empty list", &frame),
+                                        vm.vm_error("Cannot get head of empty list", &vm.frames[frame_idx]),
                                     ));
                                 }
                                 vm.push(elements[0].clone());
                             } else if field_idx == 1 {
                                 vm.push(Value::object(VMObject::List(elements[1..].to_vec())));
                             } else {
-                                save_frame(vm, frame_idx, &frame);
+                                vm.frames[frame_idx].ip = ip;
                                 return Err(VMSignal::Error(vm.vm_error(
                                     format!("Invalid field index {} for list", field_idx),
-                                    &frame,
+                                    &vm.frames[frame_idx],
                                 )));
                             }
                         }
                         _ => {
-                            save_frame(vm, frame_idx, &frame);
+                            vm.frames[frame_idx].ip = ip;
                             return Err(VMSignal::Error(vm.vm_error(
                                 format!("GET_FIELD on non-ADT value: {}", obj.kind_name()),
-                                &frame,
+                                &vm.frames[frame_idx],
                             )));
                         }
                     }
                 } else {
-                    save_frame(vm, frame_idx, &frame);
-                    return Err(VMSignal::Error(vm.vm_error("GET_FIELD on number", &frame)));
+                    vm.frames[frame_idx].ip = ip;
+                    return Err(VMSignal::Error(vm.vm_error("GET_FIELD on number", &vm.frames[frame_idx])));
                 }
             }
 
             Op::MatchTag => {
-                let tag_name = match &frame.closure.proto.chunk.constants[inst.operand as usize] {
+                // SAFETY: operand is a valid constant index
+                let tag_name = match unsafe { &*constants.add(inst.operand as usize) } {
                     ConstantValue::String(s) => s.as_str(),
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
+                        vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
-                            vm.vm_error("MATCH_TAG name must be string", &frame),
+                            vm.vm_error("MATCH_TAG name must be string", &vm.frames[frame_idx]),
                         ));
                     }
                 };
@@ -1149,12 +1205,12 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let value = vm.peek(0);
 
                 if value.is_number() {
-                    frame.ip = target;
+                    ip = target;
                 } else if value.is_nil() {
                     if tag_name == "Nil" {
                         // match
                     } else {
-                        frame.ip = target;
+                        ip = target;
                     }
                 } else if let Some(obj) = value.as_object() {
                     let mut matches = false;
@@ -1173,22 +1229,24 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         _ => {}
                     }
                     if !matches {
-                        frame.ip = target;
+                        ip = target;
                     }
                 } else {
-                    frame.ip = target;
+                    ip = target;
                 }
             }
 
             // --- Effects ---
             Op::PushHandler => {
+                // Use cached constants for handler descriptor lookup
+                // SAFETY: operand is a valid constant index
                 let descriptor_str =
-                    match &frame.closure.proto.chunk.constants[inst.operand as usize] {
+                    match unsafe { &*constants.add(inst.operand as usize) } {
                         ConstantValue::String(s) if s.starts_with("\0handler:") => s.clone(),
                         _ => {
-                            save_frame(vm, frame_idx, &frame);
+                            vm.frames[frame_idx].ip = ip;
                             return Err(VMSignal::Error(
-                                vm.vm_error("Invalid handler descriptor", &frame),
+                                vm.vm_error("Invalid handler descriptor", &vm.frames[frame_idx]),
                             ));
                         }
                     };
@@ -1197,66 +1255,66 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let descriptor = match parse_handler_descriptor(json) {
                     Ok(d) => d,
                     Err(e) => {
-                        save_frame(vm, frame_idx, &frame);
+                        vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(vm.vm_error(
                             format!("Failed to parse handler descriptor: {}", e),
-                            &frame,
+                            &vm.frames[frame_idx],
                         )));
                     }
                 };
 
                 // Create body closure from prototype
-                let body_proto = match &frame.closure.proto.chunk.constants
-                    [descriptor.body_proto_idx as usize]
+                // SAFETY: descriptor indices are valid constant indices
+                let body_proto = match unsafe { &*constants.add(descriptor.body_proto_idx as usize) }
                 {
                     ConstantValue::Prototype(p) => p,
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
+                        vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
-                            vm.vm_error("Expected body prototype", &frame),
+                            vm.vm_error("Expected body prototype", &vm.frames[frame_idx]),
                         ));
                     }
                 };
-                let body_closure = create_closure_from_proto(&frame, body_proto);
+                let body_closure = create_closure_from_proto(&vm.frames[frame_idx], body_proto);
 
                 // Create handler clause closures
                 let mut handler_entries = Vec::new();
                 for h in &descriptor.handlers {
-                    let op_name = match &frame.closure.proto.chunk.constants[h.op_name_idx as usize]
+                    let op_name = match unsafe { &*constants.add(h.op_name_idx as usize) }
                     {
                         ConstantValue::String(s) => s.clone(),
                         _ => {
-                            save_frame(vm, frame_idx, &frame);
+                            vm.frames[frame_idx].ip = ip;
                             return Err(VMSignal::Error(
-                                vm.vm_error("Invalid handler clause", &frame),
+                                vm.vm_error("Invalid handler clause", &vm.frames[frame_idx]),
                             ));
                         }
                     };
-                    let proto = match &frame.closure.proto.chunk.constants[h.proto_idx as usize] {
+                    let proto = match unsafe { &*constants.add(h.proto_idx as usize) } {
                         ConstantValue::Prototype(p) => p,
                         _ => {
-                            save_frame(vm, frame_idx, &frame);
+                            vm.frames[frame_idx].ip = ip;
                             return Err(VMSignal::Error(
-                                vm.vm_error("Invalid handler clause", &frame),
+                                vm.vm_error("Invalid handler clause", &vm.frames[frame_idx]),
                             ));
                         }
                     };
                     handler_entries.push(HandlerEntry {
                         op_name,
-                        closure: create_closure_from_proto(&frame, proto),
+                        closure: create_closure_from_proto(&vm.frames[frame_idx], proto),
                         arity: h.arity,
                     });
                 }
 
                 // Create return handler closure
                 let return_closure = if descriptor.return_proto_idx >= 0 {
-                    match &frame.closure.proto.chunk.constants[descriptor.return_proto_idx as usize]
+                    match unsafe { &*constants.add(descriptor.return_proto_idx as usize) }
                     {
-                        ConstantValue::Prototype(p) => Some(create_closure_from_proto(&frame, p)),
+                        ConstantValue::Prototype(p) => Some(create_closure_from_proto(&vm.frames[frame_idx], p)),
                         _ => {
-                            save_frame(vm, frame_idx, &frame);
+                            vm.frames[frame_idx].ip = ip;
                             return Err(VMSignal::Error(
-                                vm.vm_error("Expected return handler prototype", &frame),
+                                vm.vm_error("Expected return handler prototype", &vm.frames[frame_idx]),
                             ));
                         }
                     }
@@ -1265,7 +1323,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 };
 
                 // Save current frame before calling handler
-                save_frame(vm, frame_idx, &frame);
+                vm.frames[frame_idx].ip = ip;
 
                 // Run body with handler installed
                 let mut result =
@@ -1277,7 +1335,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 }
 
                 // Restore frame (it may have been clobbered by handler execution)
-                frame = vm.frames[frame_idx].clone();
+                ip = vm.frames[frame_idx].ip;
+                cache_frame!();
                 vm.push(result);
             }
 
@@ -1286,12 +1345,13 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
             }
 
             Op::Perform => {
-                let op_name = match &frame.closure.proto.chunk.constants[inst.operand as usize] {
+                // SAFETY: operand is a valid constant index
+                let op_name = match unsafe { &*constants.add(inst.operand as usize) } {
                     ConstantValue::String(s) => s.clone(),
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
+                        vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
-                            vm.vm_error("PERFORM name must be string", &frame),
+                            vm.vm_error("PERFORM name must be string", &vm.frames[frame_idx]),
                         ));
                     }
                 };
@@ -1325,7 +1385,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                     // Capture continuation
                     // Save current frame first
-                    save_frame(vm, frame_idx, &frame);
+                    vm.frames[frame_idx].ip = ip;
                     let mut captured_frames = Vec::new();
                     for f_idx in capture_frame_start..vm.frame_count {
                         let f = &vm.frames[f_idx];
@@ -1371,9 +1431,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 if let Some(result) = try_default_handler(vm, &op_name, &args) {
                     vm.push(result);
                 } else {
-                    save_frame(vm, frame_idx, &frame);
+                    vm.frames[frame_idx].ip = ip;
                     return Err(VMSignal::Error(
-                        vm.vm_error(format!("Unhandled effect: {}", op_name), &frame),
+                        vm.vm_error(format!("Unhandled effect: {}", op_name), &vm.frames[frame_idx]),
                     ));
                 }
             }
@@ -1385,25 +1445,25 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let cont = match cont_val.as_object() {
                     Some(VMObject::Continuation(c)) => c,
                     _ => {
-                        save_frame(vm, frame_idx, &frame);
+                        vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
-                            vm.vm_error("resume expects a continuation", &frame),
+                            vm.vm_error("resume expects a continuation", &vm.frames[frame_idx]),
                         ));
                     }
                 };
 
                 // Enforce one-shot semantics via VM-level tracking (works across Arc aliases)
                 if !vm.resumed_continuations.insert(cont.id) {
-                    save_frame(vm, frame_idx, &frame);
+                    vm.frames[frame_idx].ip = ip;
                     return Err(VMSignal::Error(
-                        vm.vm_error("Continuation already resumed (one-shot)", &frame),
+                        vm.vm_error("Continuation already resumed (one-shot)", &vm.frames[frame_idx]),
                     ));
                 }
 
                 let cont_data = (**cont).clone();
 
                 // Update the current (top) handler frame's capture/unwind points
-                save_frame(vm, frame_idx, &frame);
+                vm.frames[frame_idx].ip = ip;
                 if let Some(top_handler) = vm.handler_stack.last_mut() {
                     top_handler.capture_frame_start = vm.frame_count;
                     top_handler.capture_stack_start = vm.stack_top;
@@ -1509,30 +1569,24 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                 // Restore frame
                 frame_idx = vm.frame_count - 1;
-                frame = vm.frames[frame_idx].clone();
+                ip = vm.frames[frame_idx].ip;
+                cache_frame!();
                 vm.push(result);
             }
 
             Op::Halt => {
                 let msg = vm.pop();
                 if let Some(s) = msg.as_string() {
-                    save_frame(vm, frame_idx, &frame);
-                    return Err(VMSignal::Error(vm.vm_error(s, &frame)));
+                    vm.frames[frame_idx].ip = ip;
+                    return Err(VMSignal::Error(vm.vm_error(s, &vm.frames[frame_idx])));
                 }
-                save_frame(vm, frame_idx, &frame);
-                return Err(VMSignal::Error(vm.vm_error("HALT", &frame)));
+                vm.frames[frame_idx].ip = ip;
+                return Err(VMSignal::Error(vm.vm_error("HALT", &vm.frames[frame_idx])));
             }
         }
     }
 }
 
-/// Save a local frame copy back to the VM's frame array.
-#[inline]
-fn save_frame(vm: &mut VM, idx: usize, frame: &CallFrame) {
-    if idx < vm.frames.len() {
-        vm.frames[idx] = frame.clone();
-    }
-}
 
 // --- Value equality ---
 
