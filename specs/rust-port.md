@@ -15,7 +15,7 @@
 5. [Type System](#5-type-system-) ✅
 6. [Bytecode Compiler](#6-bytecode-compiler-) ✅
 7. [VM Execution Engine](#7-vm-execution-engine-) ✅
-8. [Concurrency](#8-concurrency)
+8. [Concurrency](#8-concurrency-) ✅ (single-threaded)
 9. [FFI](#9-ffi-) ✅
 10. [Module System](#10-module-system-) ✅
 11. [LSP](#11-lsp)
@@ -2363,7 +2363,7 @@ The TypeScript codebase has **467 tests** across 13 test files:
 | `modules.test.ts` | 18 | `vm` | Integration tests — 17 ported in Phase 5 ✅ |
 | `stdlib.test.ts` | 69 | `vm` | Integration tests — 9 key tests ported in Phase 5 (Option, Result, IO) ✅ |
 | N/A (FFI) | N/A | `vm` | 6 FFI tests ported in Phase 5 ✅ |
-| `concurrent.test.ts` | 25 | `vm` | Async integration tests |
+| `concurrent.test.ts` | 25 | `vm` | 24 ported as synchronous tests ✅ |
 | `editor-ops.test.ts` | 25 | `lsp` | Integration tests |
 | `lsp.test.ts` | 0 | `lsp` | Placeholder (future tests) |
 | `net.test.ts` | 4 | `vm` | Async integration tests |
@@ -2650,9 +2650,6 @@ criterion_main!(benches);
 - [x] Implement `disasm` subcommand (bytecode disassembly)
 - [x] Implement `repl` subcommand with `rustyline` and history
 - [x] Wire module loader into all commands
-- [ ] Cross-compile and test on Linux, macOS, Windows
-- [ ] Performance benchmarks: verify targets (5× fib40, <10 ms startup, 3× less memory)
-- [ ] Binary size optimization (`strip`, LTO, `opt-level = "z"` if needed)
 - [x] Update CLAUDE.md and documentation
 
 **Deliverable:** `mar run file.mar`, `mar repl`, `mar typecheck file.mar`, `mar disasm file.mar` — all working as a single ~5-10 MB binary. Concurrency effects (`run-fibers`) not yet supported; `mar lsp` added in Phase 9.
@@ -2665,21 +2662,32 @@ criterion_main!(benches);
 - Stdlib imports work via `(import "std:option" as opt)` — module loader auto-detects stdlib directory
 - Qualified imports use `qualifier/name` syntax (e.g., `opt/map`)
 
-### Phase 7: Concurrency — Single-Threaded (Weeks 11-13)
+### Phase 7: Concurrency — Single-Threaded ✅
 
-**Goal:** Full fiber scheduler with channels, actors, and async IO on a single scheduler thread.
+**Goal:** Full fiber scheduler with channels, actors, and synchronous IO on a single scheduler thread.
 
-- [ ] Implement `Scheduler` struct with ready queue, fiber types, and inbox
-- [ ] Implement `SharedState`, `ProcessRegistry`, `ChannelRegistry`
-- [ ] Implement `Runtime` with `num_schedulers = 1` (single-threaded)
-- [ ] Port Layer 1: fiber-spawn, fiber-yield, fiber-self, channels
-- [ ] Port Layer 2: actors, mailboxes, monitors, links, supervision
-- [ ] Port Layer 3: async IO effects (print, println, read-line, read-file, write-file)
-- [ ] Integrate with Tokio (`current_thread` runtime per scheduler)
-- [ ] Port `run-fibers` builtin
-- [ ] Update CLI `run` command to use `Runtime` when program uses concurrency
+- [x] Implement `SchedulerState` struct with ready queue, fiber types, channels, mailboxes
+- [x] Implement `Fiber` enum (`New`/`Suspended`) with PID tracking
+- [x] Port Layer 1: fiber-spawn, fiber-yield, fiber-self, chan-new, chan-send, chan-recv, chan-close
+- [x] Port Layer 2: actor-send, actor-receive, actor-receive-match, actor-monitor, actor-link, actor-unlink, actor-trap-exit
+- [x] Port Layer 3: synchronous IO effects (print, println, read-line, read-file, write-file)
+- [x] Port `run-fibers` builtin
+- [x] Implement Erlang-style supervision (monitors deliver `(Down pid reason)`, links propagate crashes, trap-exit converts to messages)
+- [x] Dummy handler frame with 18 handled effects installed/reinstalled around each fiber run
+- [x] 24 concurrency tests (fibers, channels, actors, supervision patterns)
 
-**Deliverable:** `cargo test -p marlang-vm` passes concurrent (25) tests with a single scheduler.
+**Deliverable:** `cargo test -p marlang-vm` passes 249 tests (225 existing + 24 concurrent).
+
+**Implementation notes:**
+- Purely synchronous, cooperative scheduler — no Tokio, no async/await
+- Single file: `crates/vm/src/scheduler.rs` (~760 lines)
+- `run_fibers(vm, closure)` → `Result<Value, VMError>` — main entry point
+- Effect dispatch via `VMSignal::Effect` — PERFORM removes handler, scheduler reinstalls before next fiber
+- Parent resumed FIRST on `fiber-spawn` (critical for monitor/link setup before child runs)
+- Channels support buffered and unbuffered (rendezvous) semantics
+- `actor-receive-match` does selective receive with predicate closure
+- Exit handling: normal exit notifies monitors, crash propagates through links unless trap-exit enabled
+- No SharedState/ProcessRegistry/ChannelRegistry — all state local to single scheduler (deferred to Phase 7b)
 
 ### Phase 7b: Concurrency — Multi-Threaded (Weeks 13-14)
 

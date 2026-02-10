@@ -2083,3 +2083,502 @@ fn ffi_close_library() {
 "#;
     assert_nil(source);
 }
+
+// ===== Concurrency - Fibers =====
+
+#[test]
+fn fiber_spawn_returns_pid() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (let ((pid (perform fiber-spawn (lambda () nil))))
+    (perform println (show pid)))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert!(output.contains("#<pid"));
+}
+
+#[test]
+fn fiber_self_returns_pid() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (let ((me (perform fiber-self)))
+    (perform println (show me)))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert!(output.contains("#<pid 0>"));
+}
+
+#[test]
+fn fiber_spawn_runs_to_completion() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (perform fiber-spawn (lambda ()
+    (perform println "child")))
+  (perform println "main")))
+"#,
+    );
+    assert!(result.is_ok());
+    assert!(output.contains("main"));
+    assert!(output.contains("child"));
+}
+
+#[test]
+fn fiber_yield_interleaves() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (perform fiber-spawn (lambda ()
+    (perform println "B1")
+    (perform fiber-yield)
+    (perform println "B2")))
+  (perform println "A1")
+  (perform fiber-yield)
+  (perform println "A2")))
+"#,
+    );
+    assert!(result.is_ok());
+    assert!(output.find("A1").unwrap() < output.find("A2").unwrap());
+    assert!(output.find("B1").unwrap() < output.find("B2").unwrap());
+}
+
+#[test]
+fn fiber_multiple_run_to_completion() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (perform fiber-spawn (lambda () (perform println "f1")))
+  (perform fiber-spawn (lambda () (perform println "f2")))
+  (perform fiber-spawn (lambda () (perform println "f3")))
+  (perform println "main")))
+"#,
+    );
+    assert!(result.is_ok());
+    assert!(output.contains("f1"));
+    assert!(output.contains("f2"));
+    assert!(output.contains("f3"));
+    assert!(output.contains("main"));
+}
+
+#[test]
+fn fiber_crash_does_not_kill_main() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (perform fiber-spawn (lambda () (error "boom")))
+  (perform fiber-yield)
+  (perform println "main survived")))
+"#,
+    );
+    assert!(result.is_ok());
+    assert!(output.contains("main survived"));
+}
+
+// ===== Concurrency - Channels =====
+
+#[test]
+fn channel_buffered_send_recv() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (let ((ch (perform chan-new 10)))
+    (perform chan-send ch 42)
+    (let ((v (perform chan-recv ch)))
+      (perform println v)))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "42");
+}
+
+#[test]
+fn channel_unbuffered_synchronizes() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (let ((ch (perform chan-new 0)))
+    (perform fiber-spawn (lambda ()
+      (perform chan-send ch 99)))
+    (let ((v (perform chan-recv ch)))
+      (perform println v)))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "99");
+}
+
+#[test]
+fn channel_producer_consumer() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (let ((ch (perform chan-new 0)))
+    (perform fiber-spawn (lambda ()
+      (perform chan-send ch 1)
+      (perform chan-send ch 2)
+      (perform chan-send ch 3)
+      (perform chan-close ch)))
+    (define consume (lambda ()
+      (let ((v (perform chan-recv ch)))
+        (if (= v nil)
+          nil
+          (begin
+            (perform println v)
+            (consume))))))
+    (consume))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "1\n2\n3");
+}
+
+#[test]
+fn channel_close_wakes_receivers() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (let ((ch (perform chan-new 0)))
+    (perform fiber-spawn (lambda ()
+      (let ((v (perform chan-recv ch)))
+        (perform println (if (= v nil) "got-nil" "got-val")))))
+    (perform fiber-yield)
+    (perform chan-close ch)
+    (perform fiber-yield))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "got-nil");
+}
+
+#[test]
+fn channel_fan_out() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (let ((ch (perform chan-new 10)))
+    (perform fiber-spawn (lambda () (perform chan-send ch (+ 1 1))))
+    (perform fiber-spawn (lambda () (perform chan-send ch (+ 2 2))))
+    (perform fiber-spawn (lambda () (perform chan-send ch (+ 3 3))))
+    (let ((a (perform chan-recv ch))
+          (b (perform chan-recv ch))
+          (c (perform chan-recv ch)))
+      (perform println (+ a (+ b c)))))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "12");
+}
+
+// ===== Concurrency - Actors =====
+
+#[test]
+fn actor_send_receive_basic() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (let ((me (perform fiber-self)))
+    (perform fiber-spawn (lambda ()
+      (perform actor-send me "hello")))
+    (let ((msg (perform actor-receive)))
+      (perform println msg)))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "hello");
+}
+
+#[test]
+fn actor_receive_blocks_until_message() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (let ((me (perform fiber-self)))
+    (perform fiber-spawn (lambda ()
+      (perform fiber-yield)
+      (perform actor-send me "delayed")))
+    (let ((msg (perform actor-receive)))
+      (perform println msg)))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "delayed");
+}
+
+#[test]
+fn actor_selective_receive() {
+    let (result, output) = eval_with_output(
+        r#"
+(data Msg (A Int) (B Int))
+(run-fibers (lambda ()
+  (let ((me (perform fiber-self)))
+    (perform fiber-spawn (lambda ()
+      (perform actor-send me (A 1))
+      (perform actor-send me (B 2))
+      (perform actor-send me (A 3))))
+    (perform fiber-yield)
+    (perform fiber-yield)
+    (let ((msg (perform actor-receive-match
+                 (lambda (m)
+                   (match m
+                     ((B _) #t)
+                     (_ #f))))))
+      (match msg
+        ((B n) (perform println n)))))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "2");
+}
+
+// ===== Concurrency - Supervision =====
+
+#[test]
+fn monitor_delivers_down_on_crash() {
+    let (result, output) = eval_with_output(
+        r#"
+(data Signal (Down Pid String) (Exit Pid String))
+(run-fibers (lambda ()
+  (let ((worker (perform fiber-spawn (lambda ()
+                  (perform fiber-yield)
+                  (error "boom")))))
+    (perform actor-monitor worker)
+    (perform fiber-yield)
+    (perform fiber-yield)
+    (perform fiber-yield)
+    (let ((msg (perform actor-receive)))
+      (match msg
+        ((Down pid reason) (perform println reason)))))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "boom");
+}
+
+#[test]
+fn monitor_delivers_down_normal_on_clean_exit() {
+    let (result, output) = eval_with_output(
+        r#"
+(data Signal (Down Pid String) (Exit Pid String))
+(run-fibers (lambda ()
+  (let ((worker (perform fiber-spawn (lambda () nil))))
+    (perform actor-monitor worker)
+    (perform fiber-yield)
+    (perform fiber-yield)
+    (let ((msg (perform actor-receive)))
+      (match msg
+        ((Down pid reason) (perform println reason)))))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "normal");
+}
+
+#[test]
+fn trap_exit_converts_crash_to_message() {
+    let (result, output) = eval_with_output(
+        r#"
+(data Signal (Down Pid String) (Exit Pid String))
+(run-fibers (lambda ()
+  (perform actor-trap-exit #t)
+  (let ((worker (perform fiber-spawn (lambda ()
+                  (perform fiber-yield)
+                  (error "crash")))))
+    (perform actor-link worker)
+    (perform fiber-yield)
+    (perform fiber-yield)
+    (perform fiber-yield)
+    (let ((msg (perform actor-receive)))
+      (match msg
+        ((Exit pid reason) (perform println (+ "caught: " reason))))))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "caught: crash");
+}
+
+// ===== Concurrency - IO inside run-fibers =====
+
+#[test]
+fn io_println_inside_run_fibers() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (perform println "hello from fibers")))
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "hello from fibers");
+}
+
+#[test]
+fn io_multiple_fibers_printing() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (perform fiber-spawn (lambda () (perform println "fiber1")))
+  (perform fiber-spawn (lambda () (perform println "fiber2")))
+  (perform println "main")))
+"#,
+    );
+    assert!(result.is_ok());
+    assert!(output.contains("main"));
+    assert!(output.contains("fiber1"));
+    assert!(output.contains("fiber2"));
+}
+
+#[test]
+fn io_file_read_inside_fibers() {
+    let tmp_path = "/tmp/marlang-rust-test-read.txt";
+    std::fs::write(tmp_path, "test content").unwrap();
+    let source = format!(
+        r#"
+(run-fibers (lambda ()
+  (let ((content (perform read-file "{}")))
+    (perform println content))))
+"#,
+        tmp_path
+    );
+    let (result, output) = eval_with_output(&source);
+    std::fs::remove_file(tmp_path).ok();
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "test content");
+}
+
+#[test]
+fn io_concurrent_file_reads() {
+    let tmp1 = "/tmp/marlang-rust-cr1.txt";
+    let tmp2 = "/tmp/marlang-rust-cr2.txt";
+    std::fs::write(tmp1, "file1").unwrap();
+    std::fs::write(tmp2, "file2").unwrap();
+    let source = format!(
+        r#"
+(run-fibers (lambda ()
+  (let ((ch (perform chan-new 10)))
+    (perform fiber-spawn (lambda ()
+      (perform chan-send ch (perform read-file "{}"))))
+    (perform fiber-spawn (lambda ()
+      (perform chan-send ch (perform read-file "{}"))))
+    (let ((a (perform chan-recv ch))
+          (b (perform chan-recv ch)))
+      (perform println a)
+      (perform println b)))))
+"#,
+        tmp1, tmp2
+    );
+    let (result, output) = eval_with_output(&source);
+    std::fs::remove_file(tmp1).ok();
+    std::fs::remove_file(tmp2).ok();
+    assert!(result.is_ok());
+    assert!(output.contains("file1"));
+    assert!(output.contains("file2"));
+}
+
+// ===== Concurrency - Edge Cases =====
+
+#[test]
+fn concurrency_main_result_returned() {
+    assert_num(
+        r#"
+(run-fibers (lambda () 42))
+"#,
+        42.0,
+    );
+}
+
+#[test]
+fn io_outside_run_fibers_still_works() {
+    let (result, output) = eval_with_output(
+        r#"
+(perform println "sync io")
+"#,
+    );
+    assert!(result.is_ok());
+    assert!(output.contains("sync io"));
+}
+
+#[test]
+fn counter_actor_pattern() {
+    let (result, output) = eval_with_output(
+        r#"
+(data CounterMsg
+  (Increment Int)
+  (GetCount Pid))
+(data CounterReply
+  (Count Int))
+
+(define counter (lambda (count)
+  (let ((msg (perform actor-receive)))
+    (match msg
+      ((Increment n) (counter (+ count n)))
+      ((GetCount sender)
+        (begin
+          (perform actor-send sender (Count count))
+          (counter count)))))))
+
+(run-fibers (lambda ()
+  (let ((c (perform fiber-spawn (lambda () (counter 0))))
+        (me (perform fiber-self)))
+    (perform actor-send c (Increment 5))
+    (perform actor-send c (Increment 3))
+    (perform actor-send c (GetCount me))
+    (let ((reply (perform actor-receive)))
+      (match reply
+        ((Count n) (perform println n)))))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "8");
+}
+
+#[test]
+fn ping_pong_pattern() {
+    let (result, output) = eval_with_output(
+        r#"
+(data PingPong (Ping Pid) (Pong Pid))
+
+(define pong (lambda ()
+  (let ((msg (perform actor-receive)))
+    (match msg
+      ((Ping sender)
+        (let ((me (perform fiber-self)))
+          (perform actor-send sender (Pong me))
+          (pong)))))))
+
+(define ping (lambda (partner n)
+  (if (<= n 0)
+    (perform println "done")
+    (let ((me (perform fiber-self)))
+      (perform actor-send partner (Ping me))
+      (let ((msg (perform actor-receive)))
+        (match msg
+          ((Pong _) (ping partner (- n 1)))))))))
+
+(run-fibers (lambda ()
+  (let ((p (perform fiber-spawn pong)))
+    (ping p 100))))
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "done");
+}
+
+#[test]
+fn fiber_crash_isolation() {
+    // Multiple child fibers crash, main survives
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (perform fiber-spawn (lambda () (error "crash1")))
+  (perform fiber-spawn (lambda () (error "crash2")))
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform println "survived")))
+"#,
+    );
+    assert!(result.is_ok());
+    assert!(output.contains("survived"));
+}

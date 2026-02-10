@@ -24,7 +24,7 @@ Tests are in `spec/` directory using bun:test.
 
 ## Rust Port
 
-The Rust port lives in `port/` with a Cargo workspace. Phases 1-6 complete (lexer, parser, type system, bytecode compiler, VM execution, modules, FFI, CLI).
+The Rust port lives in `port/` with a Cargo workspace. Phases 1-7 complete (lexer, parser, type system, bytecode compiler, VM execution, modules, FFI, CLI, single-threaded scheduler).
 
 ### Rust CLI
 
@@ -44,16 +44,16 @@ cargo run -p marlang-cli -- repl                   # Interactive REPL
 ### Rust Tests
 
 ```bash
-cargo test --workspace                # Run all Rust tests (223 tests)
+cargo test --workspace                # Run all Rust tests (249 tests)
 cargo test -p marlang-core            # Core: lexer + parser (75 tests)
 cargo test -p marlang-types           # Type system (54 tests)
-cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI (223 tests)
+cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI + scheduler (249 tests)
 ```
 
 ### Rust Port Structure (`port/crates/`)
 - **`core/`** (`marlang-core`) — `span.rs`, `intern.rs`, `ast.rs`, `lexer.rs`, `parser.rs`
 - **`types/`** (`marlang-types`) — `ast.rs`, `env.rs`, `unify.rs`, `infer.rs`, `builtins.rs`, `checker.rs`, `errors.rs`
-- **`vm/`** (`marlang-vm`) — `bytecode.rs`, `value.rs`, `object.rs`, `compiler.rs`, `vm.rs`, `builtins.rs`, `debug.rs`, `errors.rs`, `modules.rs`, `ffi.rs`
+- **`vm/`** (`marlang-vm`) — `bytecode.rs`, `value.rs`, `object.rs`, `compiler.rs`, `vm.rs`, `builtins.rs`, `debug.rs`, `errors.rs`, `modules.rs`, `ffi.rs`, `scheduler.rs`
 - **`cli/`** (`marlang-cli`) — `main.rs` (clap-based CLI with run, repl, typecheck, disasm)
 
 ## Project Structure

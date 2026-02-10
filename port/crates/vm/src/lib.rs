@@ -7,6 +7,7 @@ pub mod errors;
 pub mod ffi;
 pub mod modules;
 pub mod object;
+pub mod scheduler;
 pub mod value;
 pub mod vm;
 

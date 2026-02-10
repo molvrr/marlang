@@ -33,7 +33,7 @@ pub(crate) struct EffectSignal {
 static HANDLER_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static CONTINUATION_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn next_handler_id() -> u64 {
+pub(crate) fn next_handler_id() -> u64 {
     HANDLER_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -93,7 +93,7 @@ impl VM {
     }
 
     /// Clear stack slots in range [new_top..old_top) to release Arc references.
-    fn clear_stack_slots(&mut self, new_top: usize) {
+    pub(crate) fn clear_stack_slots(&mut self, new_top: usize) {
         let end = self.stack_top.min(self.stack.len());
         for i in new_top..end {
             self.stack[i] = Value::nil();

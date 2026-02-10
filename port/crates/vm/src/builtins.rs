@@ -290,11 +290,18 @@ pub fn register_builtins(vm: &mut VM) {
         Err(VMError::runtime(msg))
     });
 
-    // Stubs for Phase 5+
-    builtin(vm, "run-fibers", |_vm, _args| {
-        Err(VMError::runtime(
-            "run-fibers is not yet supported in the Rust VM",
-        ))
+    // Concurrency
+    builtin(vm, "run-fibers", |vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime(
+                "run-fibers expects one argument (a thunk)",
+            ));
+        }
+        let closure = match args[0].as_object() {
+            Some(VMObject::Closure(c)) => (**c).clone(),
+            _ => return Err(VMError::runtime("run-fibers expects a closure")),
+        };
+        crate::scheduler::run_fibers(vm, &closure)
     });
 
     // Profiling: time a thunk and return (result ms)
