@@ -17,6 +17,12 @@ const TAG_FALSE: u64 = 3;
 #[repr(transparent)]
 pub struct Value(u64);
 
+// SAFETY: Value is a NaN-boxed u64. Non-object values are trivially Send/Sync.
+// Object values contain Arc<VMObject> — Arc<T> is Send+Sync when T: Send+Sync.
+// VMObject variants are composed of Send+Sync types (String, Vec, Arc, fn pointers).
+unsafe impl Send for Value {}
+unsafe impl Sync for Value {}
+
 impl Value {
     // --- Constructors ---
 

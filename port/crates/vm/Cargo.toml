@@ -7,6 +7,9 @@ edition.workspace = true
 marlang-core = { path = "../core" }
 libloading = { version = "0.8", optional = true }
 rustc-hash = "2"
+crossbeam-deque = "0.8"
+crossbeam-channel = "0.5"
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "time", "io-util"] }
 
 [dev-dependencies]
 criterion = { workspace = true }

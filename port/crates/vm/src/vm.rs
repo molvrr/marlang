@@ -155,6 +155,17 @@ impl VM {
     }
 }
 
+impl VM {
+    /// Create a new VM pre-populated with globals cloned from a source VM.
+    /// Used by the multi-threaded scheduler to give each thread its own VM.
+    pub fn new_with_globals(globals: FxHashMap<String, Value>) -> Self {
+        VM {
+            globals,
+            ..VM::new()
+        }
+    }
+}
+
 impl Default for VM {
     fn default() -> Self {
         Self::new()

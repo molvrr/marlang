@@ -10,6 +10,7 @@ use crate::compiler::{compile, compile_program};
 use crate::debug::disassemble;
 use crate::errors::VMError;
 use crate::modules::{run_program, ModuleLoader};
+use crate::object::VMObject;
 use crate::value::{format_value, Value};
 use crate::vm::{interpret, VM};
 
@@ -2581,4 +2582,301 @@ fn fiber_crash_isolation() {
     );
     assert!(result.is_ok());
     assert!(output.contains("survived"));
+}
+
+// ===== Parallel Scheduler (multi-threaded) =====
+
+#[test]
+fn parallel_main_result_returned() {
+    assert_num(
+        r#"
+(run-fibers-parallel (lambda () 42) 2)
+"#,
+        42.0,
+    );
+}
+
+#[test]
+fn parallel_spawn_returns_pid() {
+    let val = eval(
+        r#"
+(run-fibers-parallel (lambda ()
+  (let ((pid (perform fiber-spawn (lambda () 99))))
+    pid)) 2)
+"#,
+    )
+    .expect("eval failed");
+    // Should be a pid
+    assert!(matches!(val.as_object(), Some(VMObject::Pid(_))));
+}
+
+#[test]
+fn parallel_basic_println() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers-parallel (lambda ()
+  (perform println "hello from parallel")) 2)
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "hello from parallel");
+}
+
+#[test]
+fn parallel_multiple_fibers_printing() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers-parallel (lambda ()
+  (perform fiber-spawn (lambda () (perform println "fiber1")))
+  (perform fiber-spawn (lambda () (perform println "fiber2")))
+  (perform println "main")) 2)
+"#,
+    );
+    assert!(result.is_ok());
+    assert!(output.contains("main"));
+    assert!(output.contains("fiber1"));
+    assert!(output.contains("fiber2"));
+}
+
+#[test]
+fn parallel_fib_two_fibers() {
+    // Spawn two fib(20) computations, verify both complete
+    let (result, output) = eval_with_output(
+        r#"
+(define fib (lambda (n)
+  (if (< n 2) n
+    (+ (fib (- n 1)) (fib (- n 2))))))
+
+(run-fibers-parallel (lambda ()
+  (let ((ch (perform chan-new 10)))
+    (perform fiber-spawn (lambda ()
+      (perform chan-send ch (fib 20))))
+    (perform fiber-spawn (lambda ()
+      (perform chan-send ch (fib 20))))
+    (let ((a (perform chan-recv ch))
+          (b (perform chan-recv ch)))
+      (perform println (string-append "results: " (show a) " " (show b)))))) 2)
+"#,
+    );
+    assert!(result.is_ok());
+    assert!(output.contains("results: 6765 6765"));
+}
+
+#[test]
+fn parallel_cross_thread_channel() {
+    // Producer/consumer across threads
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers-parallel (lambda ()
+  (let ((ch (perform chan-new 0)))
+    (perform fiber-spawn (lambda ()
+      (perform chan-send ch "hello")
+      (perform chan-send ch "world")))
+    (let ((a (perform chan-recv ch))
+          (b (perform chan-recv ch)))
+      (perform println (string-append a " " b))))) 2)
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "hello world");
+}
+
+#[test]
+fn parallel_actor_send_receive() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers-parallel (lambda ()
+  (let ((worker (perform fiber-spawn (lambda ()
+                  (let ((msg (perform actor-receive)))
+                    (perform println (+ "got: " msg)))))))
+    (perform actor-send worker "ping")
+    (perform fiber-yield)
+    (perform fiber-yield)
+    (perform fiber-yield))) 2)
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "got: ping");
+}
+
+#[test]
+fn parallel_many_fibers() {
+    // Spawn several fibers via recursive helper, collect results through channel
+    let (result, output) = eval_with_output(
+        r#"
+(define spawn-workers (lambda (ch n)
+  (if (<= n 0) nil
+    (begin
+      (perform fiber-spawn (lambda () (perform chan-send ch 1)))
+      (spawn-workers ch (- n 1))))))
+
+(define collect (lambda (ch n acc)
+  (if (<= n 0) acc
+    (let ((v (perform chan-recv ch)))
+      (collect ch (- n 1) (+ acc v))))))
+
+(run-fibers-parallel (lambda ()
+  (let ((ch (perform chan-new 100)))
+    (spawn-workers ch 10)
+    (let ((total (collect ch 10 0)))
+      (perform println total)))) 2)
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "10");
+}
+
+#[test]
+fn parallel_actor_ping_pong() {
+    let (result, output) = eval_with_output(
+        r#"
+(data PingPong (Ping Pid) (Pong Pid))
+
+(define pong-loop (lambda ()
+  (let ((msg (perform actor-receive)))
+    (match msg
+      ((Ping sender)
+        (let ((me (perform fiber-self)))
+          (perform actor-send sender (Pong me))
+          (pong-loop)))))))
+
+(define ping-loop (lambda (partner n)
+  (if (<= n 0)
+    (perform println "done")
+    (let ((me (perform fiber-self)))
+      (perform actor-send partner (Ping me))
+      (let ((msg (perform actor-receive)))
+        (match msg
+          ((Pong _) (ping-loop partner (- n 1)))))))))
+
+(run-fibers-parallel (lambda ()
+  (let ((p (perform fiber-spawn pong-loop)))
+    (ping-loop p 50))) 2)
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "done");
+}
+
+#[test]
+fn parallel_monitor_cross_thread() {
+    let (result, output) = eval_with_output(
+        r#"
+(data Signal (Down Pid String))
+
+(run-fibers-parallel (lambda ()
+  (let ((worker (perform fiber-spawn (lambda ()
+                  (perform fiber-yield)
+                  (error "boom")))))
+    (perform actor-monitor worker)
+    (perform fiber-yield)
+    (perform fiber-yield)
+    (perform fiber-yield)
+    (let ((msg (perform actor-receive)))
+      (match msg
+        ((Down pid reason) (perform println (+ "down: " reason))))))) 2)
+"#,
+    );
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "down: boom");
+}
+
+#[test]
+fn parallel_fiber_crash_isolation() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers-parallel (lambda ()
+  (perform fiber-spawn (lambda () (error "crash1")))
+  (perform fiber-spawn (lambda () (error "crash2")))
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform println "survived")) 2)
+"#,
+    );
+    assert!(result.is_ok());
+    assert!(output.contains("survived"));
+}
+
+// ===== Async IO (tokio integration) =====
+
+#[test]
+fn async_read_file() {
+    let tmp_path = "/tmp/marlang-async-read-test.txt";
+    std::fs::write(tmp_path, "async content").unwrap();
+    let source = format!(
+        r#"
+(run-fibers-parallel (lambda ()
+  (let ((content (perform read-file "{}")))
+    (perform println content))) 2)
+"#,
+        tmp_path
+    );
+    let (result, output) = eval_with_output(&source);
+    std::fs::remove_file(tmp_path).ok();
+    assert!(result.is_ok());
+    assert_eq!(output.trim(), "async content");
+}
+
+#[test]
+fn async_write_file() {
+    let tmp_path = "/tmp/marlang-async-write-test.txt";
+    let _ = std::fs::remove_file(tmp_path);
+    let source = format!(
+        r#"
+(run-fibers-parallel (lambda ()
+  (perform write-file "{}" "written by tokio")) 2)
+"#,
+        tmp_path
+    );
+    let result = eval(&source);
+    assert!(result.is_ok());
+    let content = std::fs::read_to_string(tmp_path).unwrap();
+    std::fs::remove_file(tmp_path).ok();
+    assert_eq!(content, "written by tokio");
+}
+
+#[test]
+fn async_io_concurrent() {
+    // Two fibers: one reads a file, the other counts. Both complete.
+    let tmp_path = "/tmp/marlang-async-concurrent-test.txt";
+    std::fs::write(tmp_path, "from-file").unwrap();
+    let source = format!(
+        r#"
+(run-fibers-parallel (lambda ()
+  (let ((ch (perform chan-new 10)))
+    (perform fiber-spawn (lambda ()
+      (let ((content (perform read-file "{}")))
+        (perform chan-send ch content))))
+    (perform fiber-spawn (lambda ()
+      (perform chan-send ch (show (+ 1 2)))))
+    (let ((a (perform chan-recv ch))
+          (b (perform chan-recv ch)))
+      (perform println a)
+      (perform println b)))) 2)
+"#,
+        tmp_path
+    );
+    let (result, output) = eval_with_output(&source);
+    std::fs::remove_file(tmp_path).ok();
+    assert!(result.is_ok());
+    assert!(output.contains("from-file"));
+    assert!(output.contains("3"));
+}
+
+#[test]
+fn async_io_error() {
+    // read-file on nonexistent path → fiber crashes cleanly, main survives
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers-parallel (lambda ()
+  (perform fiber-spawn (lambda ()
+    (perform read-file "/tmp/marlang-no-such-file-ever.txt")))
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform println "main ok")) 2)
+"#,
+    );
+    assert!(result.is_ok());
+    assert!(output.contains("main ok"));
 }

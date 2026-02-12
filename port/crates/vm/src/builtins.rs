@@ -304,6 +304,32 @@ pub fn register_builtins(vm: &mut VM) {
         crate::scheduler::run_fibers(vm, &closure)
     });
 
+    // Parallel concurrency (multi-threaded scheduler)
+    builtin(vm, "run-fibers-parallel", |vm, args| {
+        if args.is_empty() || args.len() > 2 {
+            return Err(VMError::runtime(
+                "run-fibers-parallel expects 1-2 arguments (thunk [num-threads])",
+            ));
+        }
+        let closure = match args[0].as_object() {
+            Some(VMObject::Closure(c)) => (**c).clone(),
+            _ => return Err(VMError::runtime("run-fibers-parallel expects a closure")),
+        };
+        let threads = args
+            .get(1)
+            .and_then(|v| v.as_number())
+            .map(|n| n as usize)
+            .unwrap_or(0);
+        let threads = if threads == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        } else {
+            threads
+        };
+        crate::runtime::run_fibers_parallel(vm, &closure, threads)
+    });
+
     // Profiling: time a thunk and return (result ms)
     builtin(vm, "time-it", |vm, args| {
         if args.len() != 1 {

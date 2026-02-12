@@ -15,7 +15,7 @@
 5. [Type System](#5-type-system-) ✅
 6. [Bytecode Compiler](#6-bytecode-compiler-) ✅
 7. [VM Execution Engine](#7-vm-execution-engine-) ✅
-8. [Concurrency](#8-concurrency-) ✅ (single-threaded)
+8. [Concurrency](#8-concurrency-) ✅ (single-threaded + multi-threaded + async IO)
 9. [FFI](#9-ffi-) ✅
 10. [Module System](#10-module-system-) ✅
 11. [LSP](#11-lsp)
@@ -97,7 +97,8 @@ marlang/
 │   │       ├── builtins.rs # Built-in functions
 │   │       ├── modules.rs  # Module loader, run_program, import handling
 │   │       ├── ffi.rs      # FFI types, dlopen via libloading (behind "ffi" feature)
-│   │       ├── scheduler.rs # Fiber scheduler, channels, actors
+│   │       ├── scheduler.rs # Single-threaded fiber scheduler, channels, actors
+│   │       ├── runtime.rs  # Multi-threaded scheduler with tokio async IO
 │   │       └── debug.rs    # Disassembler
 │   │       # Module system and FFI are in the vm crate:
 │   │       # ├── modules.rs  — Module loader, run_program, import handling
@@ -2689,21 +2690,37 @@ criterion_main!(benches);
 - Exit handling: normal exit notifies monitors, crash propagates through links unless trap-exit enabled
 - No SharedState/ProcessRegistry/ChannelRegistry — all state local to single scheduler (deferred to Phase 7b)
 
-### Phase 7b: Concurrency — Multi-Threaded (Weeks 13-14)
+### Phase 7b: Concurrency — Multi-Threaded ✅
 
 **Goal:** Scale to N scheduler threads with work stealing and cross-thread messaging.
 
-- [ ] Add `crossbeam-deque` work-stealing deques
-- [ ] Add `crossbeam-channel` inboxes for inter-scheduler messaging
-- [ ] Implement `pick_scheduler_for_spawn()` with local bias
-- [ ] Implement work stealing (`try_steal()`)
-- [ ] Implement cross-thread actor message routing via `ProcessRegistry`
-- [ ] Implement cross-thread channel sends via `ChannelRegistry`
-- [ ] Implement global termination detection (atomic idle counter)
-- [ ] Runtime defaults to `num_cpus::get()` scheduler threads
-- [ ] Add multi-threaded concurrency tests (parallel fib, cross-thread actors)
+- [x] Add `crossbeam-deque` work-stealing deques
+- [x] Add `crossbeam-channel` inboxes for inter-scheduler messaging
+- [x] Implement `pick_scheduler_for_spawn()` with local bias
+- [x] Implement work stealing (`try_steal()`)
+- [x] Implement cross-thread actor message routing via shared state
+- [x] Implement cross-thread channel sends via shared state
+- [x] Implement global termination detection (atomic idle counter)
+- [x] Add multi-threaded concurrency tests (parallel fib, cross-thread actors)
 
-**Deliverable:** Multi-threaded runtime passes all 25 existing concurrent tests + new parallel scaling tests.
+**Deliverable:** Multi-threaded runtime (`runtime.rs`) passes 11 parallel tests + all existing concurrent tests. Uses `std::thread::scope` for safe spawning, `VM::new_with_globals()` per thread.
+
+### Phase 7c: Async IO (Tokio Integration) ✅
+
+**Goal:** Non-blocking IO in the multi-threaded scheduler via tokio.
+
+- [x] Add `tokio` dependency (`rt-multi-thread`, `fs`, `time`, `io-util`)
+- [x] Create shared tokio runtime (2 worker threads) in `run_fibers_parallel()`
+- [x] Convert all 5 IO effects to async: park fiber → spawn tokio task → `IoComplete` message
+- [x] `read-file`/`write-file` use `tokio::fs` for true async file IO
+- [x] `read-line` uses `tokio::task::spawn_blocking` (stdin is inherently blocking)
+- [x] `print`/`println` async for consistency (write to captured_output or stdout)
+- [x] `IoComplete { pid, result }` handled in `drain_inbox` and idle-wait path
+- [x] `pending_io: AtomicUsize` prevents premature termination while IO is in flight
+- [x] `captured_output` changed to `Arc<Mutex<Option<String>>>` for cloning into async tasks
+- [x] Add 4 async IO tests (read, write, concurrent, error handling)
+
+**Deliverable:** 264 total tests pass. Single-threaded scheduler (`scheduler.rs`) unchanged — IO stays synchronous there.
 
 ### Phase 8: Networking (Weeks 14-15)
 
@@ -2712,7 +2729,6 @@ criterion_main!(benches);
 - [ ] Port TCP: connect, listen, accept, send, recv, close
 - [ ] Port HTTP client (replace Bun fetch with `reqwest`)
 - [ ] Port HTTP server (replace Bun.serve with `hyper`)
-- [ ] Async IO tasks via `tokio::spawn` (thread pool), results routed to scheduler inbox
 - [ ] Port cleanup logic (shutdown servers, close sockets on `Runtime::shutdown()`)
 
 **Deliverable:** Net (4) + HTTP (5) = **9 tests** pass.
