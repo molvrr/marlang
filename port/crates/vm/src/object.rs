@@ -23,12 +23,7 @@ pub enum VMObject {
         func: BuiltinFn,
     },
     Pid(u64),
-    Channel(u64),
-    // Network types (Phase 4+)
-    TcpSocket(u64),
-    TcpListener(u64),
-    HttpServer(u64),
-    HttpRequest(u64),
+    Port(u64),
     // FFI types
     #[cfg(feature = "ffi")]
     FfiLibrary(std::sync::Arc<crate::ffi::FfiLibrary>),
@@ -51,11 +46,7 @@ impl VMObject {
             VMObject::Continuation(_) => "continuation",
             VMObject::Builtin { .. } => "builtin",
             VMObject::Pid(_) => "pid",
-            VMObject::Channel(_) => "channel",
-            VMObject::TcpSocket(_) => "tcp-socket",
-            VMObject::TcpListener(_) => "tcp-listener",
-            VMObject::HttpServer(_) => "http-server",
-            VMObject::HttpRequest(_) => "http-request",
+            VMObject::Port(_) => "port",
             #[cfg(feature = "ffi")]
             VMObject::FfiLibrary(_) => "ffi-library",
             #[cfg(feature = "ffi")]
@@ -94,7 +85,7 @@ impl PartialEq for VMObject {
                 },
             ) => n1 == n2 && a1 == a2,
             (VMObject::Pid(a), VMObject::Pid(b)) => a == b,
-            (VMObject::Channel(a), VMObject::Channel(b)) => a == b,
+            (VMObject::Port(a), VMObject::Port(b)) => a == b,
             #[cfg(feature = "ffi")]
             (VMObject::FfiPointer(a), VMObject::FfiPointer(b)) => a == b,
             _ => false,

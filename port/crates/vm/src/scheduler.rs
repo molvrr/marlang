@@ -116,7 +116,7 @@ fn as_pid(val: &Value) -> Option<u64> {
 
 fn as_channel(val: &Value) -> Option<u64> {
     match val.as_object() {
-        Some(VMObject::Channel(id)) => Some(*id),
+        Some(VMObject::Port(id)) => Some(*id),
         _ => None,
     }
 }
@@ -375,7 +375,7 @@ fn handle_effect(
                 state,
                 state.current_pid,
                 cont,
-                Value::object(VMObject::Channel(id)),
+                Value::object(VMObject::Port(id)),
             );
         }
 

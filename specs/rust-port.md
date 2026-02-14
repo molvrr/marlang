@@ -471,21 +471,15 @@ pub enum VMObject {
         func: BuiltinFn,
     },
 
-    // Concurrency
+    // Concurrency & IO (BEAM model: Pid for processes, Port for all IO resources)
     Pid(u64),
-    Channel(u64),
+    Port(u64),        // Channels, TCP sockets, listeners, HTTP servers, etc.
 
     // FFI (see Section 9.1)
     FfiLibrary(Box<FfiLibrary>),
     FfiPointer(*mut u8),
     FfiStructDef(Arc<FfiStructDef>),
     FfiStruct(Box<FfiStruct>),
-
-    // Networking
-    TcpSocket(u64),    // Socket ID, resolved by scheduler
-    TcpListener(u64),
-    HttpServer(u64),
-    HttpRequest(u64),
 }
 
 // Phase 3 (compiler only): simple signature without VM access
@@ -1541,7 +1535,7 @@ impl Scheduler {
                 let id = self.vm.shared.channel_registry.create();
                 self.ready_queue.push_back(Fiber::Suspended {
                     continuation: signal.continuation,
-                    resume_value: Value::from_object(Arc::new(VMObject::Channel(id))),
+                    resume_value: Value::from_object(Arc::new(VMObject::Port(id))),
                     pid,
                 });
             }
@@ -1862,7 +1856,7 @@ TCP and HTTP IO use Tokio's **multi-threaded runtime** features. Unlike the sing
         let value = match result {
             Ok(stream) => {
                 let socket_id = register_socket(stream);
-                Value::from_object(Arc::new(VMObject::TcpSocket(socket_id)))
+                Value::from_object(Arc::new(VMObject::Port(socket_id)))
             }
             Err(e) => make_error_value(e),
         };

@@ -1671,7 +1671,7 @@ fn objects_equal(a: &VMObject, b: &VMObject) -> bool {
             elements.is_empty() && tag == "Nil" && fields.is_empty()
         }
         (VMObject::Pid(a), VMObject::Pid(b)) => a == b,
-        (VMObject::Channel(a), VMObject::Channel(b)) => a == b,
+        (VMObject::Port(a), VMObject::Port(b)) => a == b,
         _ => false,
     }
 }

@@ -165,7 +165,7 @@ fn as_pid(val: &Value) -> Option<u64> {
 
 fn as_channel(val: &Value) -> Option<u64> {
     match val.as_object() {
-        Some(VMObject::Channel(id)) => Some(*id),
+        Some(VMObject::Port(id)) => Some(*id),
         _ => None,
     }
 }
@@ -318,7 +318,7 @@ fn handle_effect(
             }
             sched.ready_queue.push_back(Fiber::Suspended {
                 continuation: cont,
-                resume_value: Value::object(VMObject::Channel(id)),
+                resume_value: Value::object(VMObject::Port(id)),
                 pid: sched.current_pid,
             });
         }

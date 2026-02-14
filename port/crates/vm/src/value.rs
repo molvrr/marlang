@@ -285,11 +285,7 @@ fn format_object(obj: &VMObject) -> String {
             format!("#<vm-builtin {}>", name)
         }
         VMObject::Pid(id) => format!("#<pid {}>", id),
-        VMObject::Channel(id) => format!("#<channel {}>", id),
-        VMObject::TcpSocket(id) => format!("#<tcp-socket {}>", id),
-        VMObject::TcpListener(id) => format!("#<tcp-listener {}>", id),
-        VMObject::HttpServer(id) => format!("#<http-server {}>", id),
-        VMObject::HttpRequest(id) => format!("#<http-request {}>", id),
+        VMObject::Port(id) => format!("#<port {}>", id),
         #[cfg(feature = "ffi")]
         VMObject::FfiLibrary(lib) => format!("#<ffi-library {}>", lib.path),
         #[cfg(feature = "ffi")]
