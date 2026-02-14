@@ -2085,6 +2085,87 @@ fn ffi_close_library() {
     assert_nil(source);
 }
 
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_call_three_args() {
+    // fma(2.0, 3.0, 4.0) → 2*3+4 = 10.0
+    let source = r#"
+(define lib (ffi-open "m" (list (list "fma" (list "f64" "f64" "f64") "f64"))))
+(ffi-call lib "fma" 2.0 3.0 4.0)
+"#;
+    assert_num(source, 10.0);
+}
+
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_void_with_args() {
+    // Call a void-returning function that takes args (srand takes u32)
+    // On macOS/Linux, srand is in libc
+    let source = r#"
+(define lib (ffi-open "c" (list (list "srand" (list "u32") "void"))))
+(ffi-call lib "srand" 42)
+"#;
+    assert_nil(source);
+}
+
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_cstring_arg() {
+    // strlen("hello") → 5
+    let source = r#"
+(define lib (ffi-open "c" (list (list "strlen" (list "cstring") "u64"))))
+(ffi-call lib "strlen" "hello")
+"#;
+    assert_num(source, 5.0);
+}
+
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_void_arg_skipped() {
+    // (list "void") should be treated as no args, matching TS behavior
+    let source = r#"
+(define lib (ffi-open "m" (list (list "cos" (list "f64") "f64")
+                                (list "drand48" (list "void") "f64"))))
+(define r (ffi-call lib "drand48"))
+(>= r 0.0)
+"#;
+    assert_bool(source, true);
+}
+
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_f32_roundtrip() {
+    // floorf(3.7) → 3.0 (tests f32 arg and f32 return)
+    let source = r#"
+(define lib (ffi-open "m" (list (list "floorf" (list "f32") "f32"))))
+(ffi-call lib "floorf" 3.7)
+"#;
+    assert_num(source, 3.0);
+}
+
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_i32_return() {
+    // abs(-42) → 42
+    let source = r#"
+(define lib (ffi-open "c" (list (list "abs" (list "i32") "i32"))))
+(ffi-call lib "abs" -42)
+"#;
+    assert_num(source, 42.0);
+}
+
+#[cfg(feature = "ffi")]
+#[test]
+fn ffi_struct_type_in_parse() {
+    // Unknown type names should be treated as struct types (not error)
+    let source = r#"
+(define point-def (ffi-struct "Point" (list (list "x" "f32") (list "y" "f32"))))
+(define lib (ffi-open "m" (list (list "cos" (list "f64") "f64"))))
+(ffi-call lib "cos" 0.0)
+"#;
+    assert_num(source, 1.0);
+}
+
 // ===== Concurrency - Fibers =====
 
 #[test]

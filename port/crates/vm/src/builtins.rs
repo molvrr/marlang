@@ -361,12 +361,6 @@ fn register_ffi_builtins(
     use crate::ffi;
     use std::sync::Arc;
 
-    // Global struct registry (like TS vmStructRegistry)
-    use std::sync::Mutex;
-    static STRUCT_REGISTRY: std::sync::LazyLock<
-        Mutex<std::collections::HashMap<String, Arc<ffi::FfiStructDef>>>,
-    > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
-
     // ffi-open: (ffi-open "libname" (list (list "fn_name" (list "arg_type" ...) "ret_type") ...))
     builtin(vm, "ffi-open", |_vm, args| {
         if args.len() < 2 {
@@ -412,6 +406,9 @@ fn register_ffi_builtins(
                 let type_str = at
                     .as_string()
                     .ok_or_else(|| VMError::runtime("ffi-open: arg type must be string"))?;
+                if type_str == "void" {
+                    continue;
+                }
                 arg_types.push(ffi::parse_ffi_type(type_str)?);
             }
             let ret_str = parts[2]
@@ -450,7 +447,8 @@ fn register_ffi_builtins(
             .as_string()
             .ok_or_else(|| VMError::runtime("ffi-call: second arg must be function name string"))?;
         let call_args = &args[2..];
-        ffi::ffi_call(lib, fn_name, call_args)
+        let registry = ffi::STRUCT_REGISTRY.lock().unwrap();
+        ffi::ffi_call(lib, fn_name, call_args, &registry)
     });
 
     // ffi-close: (ffi-close lib) → nil (library dropped when last reference is gone)
@@ -500,7 +498,7 @@ fn register_ffi_builtins(
 
         let def = ffi::compute_struct_layout(name, &fields);
         let def = Arc::new(def);
-        STRUCT_REGISTRY
+        ffi::STRUCT_REGISTRY
             .lock()
             .unwrap()
             .insert(name.to_string(), Arc::clone(&def));

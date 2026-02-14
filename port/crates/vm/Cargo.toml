@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 marlang-core = { path = "../core" }
 libloading = { version = "0.8", optional = true }
+libffi = { version = "5", optional = true }
 rustc-hash = "2"
 crossbeam-deque = "0.8"
 crossbeam-channel = "0.5"
@@ -17,7 +18,7 @@ marlang-types = { path = "../types" }
 
 [features]
 default = ["ffi"]
-ffi = ["libloading"]
+ffi = ["libloading", "libffi"]
 
 [[bench]]
 name = "vm_benchmark"
