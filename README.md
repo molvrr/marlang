@@ -652,14 +652,17 @@ Marlang has two execution backends:
 
 ### Rust Port (`port/`)
 
-A native Rust port is in progress under `port/`, targeting a standalone binary with improved performance. Phases 1-4 are complete:
+A native Rust port lives under `port/`, providing a standalone binary with ~2.5x better performance. Phases 1-7c complete (lexer, parser, type system, bytecode compiler, VM, modules, FFI, CLI, single-threaded scheduler, multi-threaded scheduler, async IO):
 
-- **`marlang-core`** — Lexer, parser, string interning, spans (75 tests)
-- **`marlang-types`** — HM type inference, typeclasses, exhaustiveness checking (54 tests)
-- **`marlang-vm`** — Bytecode compiler, NaN-boxed values, VM execution engine with algebraic effects (191 tests)
+- **`marlang-core`** — Lexer, parser, string interning, spans
+- **`marlang-types`** — HM type inference, typeclasses, exhaustiveness checking, FFI struct type validation
+- **`marlang-vm`** — Bytecode compiler, NaN-boxed values, VM execution, modules, FFI (libffi), schedulers, async IO
+- **`marlang-cli`** — Clap-based CLI with `run`, `repl`, `typecheck`, `disasm` subcommands
 
 ```bash
-cargo test --workspace    # Run all 320 Rust tests (from port/ directory)
+cargo test --workspace    # Run all Rust tests (from port/ directory)
+cargo run -p marlang-cli -- run file.mar   # Run a file
+cargo run -p marlang-cli -- repl           # Interactive REPL
 ```
 
 ### Bytecode VM (`src/vm/`)
@@ -713,8 +716,9 @@ marlang/
 ├── port/                 # Rust port (Cargo workspace)
 │   └── crates/
 │       ├── core/         # marlang-core: lexer, parser
-│       ├── types/        # marlang-types: type inference
-│       └── vm/           # marlang-vm: compiler, VM engine
+│       ├── types/        # marlang-types: type inference, FFI struct validation
+│       ├── vm/           # marlang-vm: compiler, VM, modules, FFI, schedulers
+│       └── cli/          # marlang-cli: standalone binary
 ├── bench/                # Benchmarks (tree-walker vs VM)
 │   ├── run.ts            # Benchmark runner
 │   ├── fib.mar           # Recursive fibonacci

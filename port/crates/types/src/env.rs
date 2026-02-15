@@ -94,6 +94,8 @@ pub fn apply_subst_env(subst: &Substitution, env: &TypeEnv) -> TypeEnv {
         instances: env.instances.clone(),
         aliases: env.aliases.clone(),
         effects: env.effects.clone(),
+        foreign_libs: env.foreign_libs.clone(),
+        ffi_struct_types: env.ffi_struct_types.clone(),
         parent,
     }
 }
@@ -154,6 +156,8 @@ pub struct TypeEnv {
     pub instances: HashMap<String, Vec<ClassInstance>>,
     pub aliases: HashMap<String, TypeAlias>,
     pub effects: HashMap<String, EffectDeclaration>,
+    pub foreign_libs: HashMap<String, Vec<ForeignFnDecl>>,
+    pub ffi_struct_types: HashMap<String, FfiStructInfo>,
     pub parent: Option<Box<TypeEnv>>,
 }
 
@@ -166,6 +170,8 @@ pub fn empty_env() -> TypeEnv {
         instances: HashMap::new(),
         aliases: HashMap::new(),
         effects: HashMap::new(),
+        foreign_libs: HashMap::new(),
+        ffi_struct_types: HashMap::new(),
         parent: None,
     }
 }
@@ -179,6 +185,8 @@ pub fn child_env(parent: &TypeEnv) -> TypeEnv {
         instances: HashMap::new(),
         aliases: HashMap::new(),
         effects: HashMap::new(),
+        foreign_libs: HashMap::new(),
+        ffi_struct_types: HashMap::new(),
         parent: Some(Box::new(parent.clone())),
     }
 }
@@ -299,6 +307,66 @@ pub fn define_effect(env: &TypeEnv, effect: EffectDeclaration) -> TypeEnv {
     let mut new_env = env.clone();
     new_env.effects.insert(effect.name.clone(), effect);
     new_env
+}
+
+pub fn define_foreign(env: &TypeEnv, lib_name: &str, functions: Vec<ForeignFnDecl>) -> TypeEnv {
+    let mut new_env = env.clone();
+    new_env
+        .foreign_libs
+        .insert(lib_name.to_string(), functions);
+    new_env
+}
+
+pub fn lookup_foreign_fn<'a>(
+    env: &'a TypeEnv,
+    lib_name: &str,
+    fn_name: &str,
+) -> Option<&'a ForeignFnDecl> {
+    if let Some(fns) = env.foreign_libs.get(lib_name) {
+        for f in fns {
+            if f.name == fn_name {
+                return Some(f);
+            }
+        }
+    }
+    if let Some(parent) = &env.parent {
+        return lookup_foreign_fn(parent, lib_name, fn_name);
+    }
+    None
+}
+
+pub fn has_foreign_lib(env: &TypeEnv, lib_name: &str) -> bool {
+    if env.foreign_libs.contains_key(lib_name) {
+        return true;
+    }
+    if let Some(parent) = &env.parent {
+        return has_foreign_lib(parent, lib_name);
+    }
+    false
+}
+
+pub fn register_ffi_struct_type(env: &mut TypeEnv, name: &str, info: FfiStructInfo) {
+    env.ffi_struct_types.insert(name.to_string(), info);
+}
+
+pub fn is_ffi_struct_type(env: &TypeEnv, name: &str) -> bool {
+    if env.ffi_struct_types.contains_key(name) {
+        return true;
+    }
+    if let Some(parent) = &env.parent {
+        return is_ffi_struct_type(parent, name);
+    }
+    false
+}
+
+pub fn lookup_ffi_struct_info<'a>(env: &'a TypeEnv, name: &str) -> Option<&'a FfiStructInfo> {
+    if let Some(info) = env.ffi_struct_types.get(name) {
+        return Some(info);
+    }
+    if let Some(parent) = &env.parent {
+        return lookup_ffi_struct_info(parent, name);
+    }
+    None
 }
 
 // ===== Generalization and Instantiation =====

@@ -44,10 +44,10 @@ cargo run -p marlang-cli -- repl                   # Interactive REPL
 ### Rust Tests
 
 ```bash
-cargo test --workspace                # Run all Rust tests (264 tests)
+cargo test --workspace                # Run all Rust tests
 cargo test -p marlang-core            # Core: lexer + parser (75 tests)
-cargo test -p marlang-types           # Type system (54 tests)
-cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI + scheduler (264 tests)
+cargo test -p marlang-types           # Type system (81 tests)
+cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI + scheduler (271 tests)
 ```
 
 ### Rust Port Structure (`port/crates/`)

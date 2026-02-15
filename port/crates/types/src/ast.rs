@@ -34,6 +34,33 @@ pub struct EffectDeclaration {
     pub operations: Vec<EffectOp>,
 }
 
+// ===== FFI Foreign Declarations =====
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignFnDecl {
+    pub name: String,
+    pub params: Vec<Type>,
+    pub result: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignDeclaration {
+    pub lib_name: String,
+    pub functions: Vec<ForeignFnDecl>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FfiStructFieldInfo {
+    pub name: String,
+    pub marlang_type: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FfiStructInfo {
+    pub name: String,
+    pub fields: Vec<FfiStructFieldInfo>,
+}
+
 // ===== Core Type Representation =====
 
 #[derive(Debug, Clone, PartialEq)]

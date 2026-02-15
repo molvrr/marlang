@@ -992,6 +992,54 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             }));
                         }
 
+                        #[cfg(feature = "ffi")]
+                        VMObject::FfiBound {
+                            lib_global_name,
+                            fn_name,
+                        } => {
+                            let lib_global = lib_global_name.clone();
+                            let fn_name = fn_name.clone();
+                            let mut args = vec![Value::nil(); arity];
+                            for i in (0..arity).rev() {
+                                args[i] = vm.pop();
+                            }
+                            vm.pop(); // pop callee
+                            vm.frames[frame_idx].ip = ip;
+
+                            let lib_val = vm
+                                .globals
+                                .get(lib_global.as_ref())
+                                .cloned()
+                                .ok_or_else(|| {
+                                    VMSignal::Error(vm.vm_error(
+                                        format!(
+                                            "FFI library '{}' not found in globals",
+                                            lib_global
+                                        ),
+                                        &vm.frames[frame_idx],
+                                    ))
+                                })?;
+                            let lib = match lib_val.as_object() {
+                                Some(VMObject::FfiLibrary(l)) => l.clone(),
+                                _ => {
+                                    return Err(VMSignal::Error(vm.vm_error(
+                                        format!(
+                                            "'{}' is not an FFI library",
+                                            lib_global
+                                        ),
+                                        &vm.frames[frame_idx],
+                                    )));
+                                }
+                            };
+                            let registry =
+                                crate::ffi::STRUCT_REGISTRY.lock().unwrap();
+                            let result =
+                                crate::ffi::ffi_call(&lib, &fn_name, &args, &registry)
+                                    .map_err(VMSignal::Error)?;
+                            cache_frame!();
+                            vm.push(result);
+                        }
+
                         _ => {
                             let kind = obj.kind_name();
                             vm.frames[frame_idx].ip = ip;
@@ -1087,6 +1135,61 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 tag: name,
                                 fields: args,
                             });
+
+                            vm.frame_count -= 1;
+                            if vm.frame_count <= base_frame_count {
+                                return Ok(result);
+                            }
+                            frame_idx = vm.frame_count - 1;
+                            ip = vm.frames[frame_idx].ip;
+                            cache_frame!();
+                            vm.push(result);
+                        }
+
+                        #[cfg(feature = "ffi")]
+                        VMObject::FfiBound {
+                            lib_global_name,
+                            fn_name,
+                        } => {
+                            let lib_global = lib_global_name.clone();
+                            let fn_name = fn_name.clone();
+                            let mut args = vec![Value::nil(); arity];
+                            for i in (0..arity).rev() {
+                                args[i] = vm.pop();
+                            }
+                            vm.pop(); // pop callee
+                            vm.frames[frame_idx].ip = ip;
+
+                            let lib_val = vm
+                                .globals
+                                .get(lib_global.as_ref())
+                                .cloned()
+                                .ok_or_else(|| {
+                                    VMSignal::Error(vm.vm_error(
+                                        format!(
+                                            "FFI library '{}' not found in globals",
+                                            lib_global
+                                        ),
+                                        &vm.frames[frame_idx],
+                                    ))
+                                })?;
+                            let lib = match lib_val.as_object() {
+                                Some(VMObject::FfiLibrary(l)) => l.clone(),
+                                _ => {
+                                    return Err(VMSignal::Error(vm.vm_error(
+                                        format!(
+                                            "'{}' is not an FFI library",
+                                            lib_global
+                                        ),
+                                        &vm.frames[frame_idx],
+                                    )));
+                                }
+                            };
+                            let registry =
+                                crate::ffi::STRUCT_REGISTRY.lock().unwrap();
+                            let result =
+                                crate::ffi::ffi_call(&lib, &fn_name, &args, &registry)
+                                    .map_err(VMSignal::Error)?;
 
                             vm.frame_count -= 1;
                             if vm.frame_count <= base_frame_count {

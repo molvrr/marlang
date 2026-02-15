@@ -459,3 +459,312 @@ fn fold_function_on_adt_list() {
          (foldl + 0 (Cons 1 (Cons 2 (Cons 3 Nil))))",
     );
 }
+
+// ===== Foreign Declarations =====
+
+#[test]
+fn foreign_basic_declaration() {
+    let types = check_ok(
+        "(define lib 42)
+         (foreign lib
+           (InitWindow (-> Int Int String Unit))
+           (CloseWindow (-> Unit)))
+         (ffi-call lib \"InitWindow\" 800 600 \"hello\")
+         (ffi-call lib \"CloseWindow\")",
+    );
+    assert_eq!(last_type(&types), "Unit");
+}
+
+#[test]
+fn foreign_return_type_checking() {
+    let types = check_ok(
+        "(define lib 42)
+         (foreign lib
+           (GetValue (-> Int))
+           (IsReady (-> Bool)))
+         (+ (ffi-call lib \"GetValue\") 1)
+         (if (ffi-call lib \"IsReady\") 1 0)",
+    );
+    assert_eq!(format_type(&types[2]), "Int");
+    assert_eq!(format_type(&types[3]), "Int");
+}
+
+#[test]
+fn foreign_arity_mismatch() {
+    let err = check_err(
+        "(define lib 42)
+         (foreign lib
+           (InitWindow (-> Int Int String Unit)))
+         (ffi-call lib \"InitWindow\" 800)",
+    );
+    assert!(err.contains("expected 3"), "got: {err}");
+    assert!(err.contains("got 1"), "got: {err}");
+}
+
+#[test]
+fn foreign_type_mismatch() {
+    let err = check_err(
+        "(define lib 42)
+         (foreign lib
+           (InitWindow (-> Int Int String Unit)))
+         (ffi-call lib \"InitWindow\" 800 600 42)",
+    );
+    assert!(err.contains("cannot unify"), "got: {err}");
+}
+
+#[test]
+fn foreign_unknown_function_errors() {
+    let err = check_err(
+        "(define lib 42)
+         (foreign lib
+           (InitWindow (-> Int Int String Unit)))
+         (ffi-call lib \"SomeOtherFn\" 1 2 3)",
+    );
+    assert!(err.contains("not declared"), "got: {err}");
+}
+
+#[test]
+fn foreign_no_declaration_errors() {
+    let err = check_err(
+        "(define lib 42)
+         (ffi-call lib \"anything\" 1 \"hello\" #t)",
+    );
+    assert!(err.contains("requires a (foreign"), "got: {err}");
+}
+
+#[test]
+fn foreign_return_type_constrains_usage() {
+    let err = check_err(
+        "(define lib 42)
+         (foreign lib
+           (CloseWindow (-> Unit)))
+         (+ (ffi-call lib \"CloseWindow\") 1)",
+    );
+    assert!(err.contains("cannot unify"), "got: {err}");
+}
+
+#[test]
+fn foreign_multiple_libraries() {
+    let types = check_ok(
+        "(define rl 1)
+         (define gl 2)
+         (foreign rl
+           (InitWindow (-> Int Int String Unit)))
+         (foreign gl
+           (Init (-> Bool)))
+         (ffi-call rl \"InitWindow\" 800 600 \"test\")
+         (ffi-call gl \"Init\")",
+    );
+    // define rl (0), define gl (1), foreign rl (2), foreign gl (3), ffi-call rl (4), ffi-call gl (5)
+    assert_eq!(format_type(&types[4]), "Unit");
+    assert_eq!(format_type(&types[5]), "Bool");
+}
+
+#[test]
+fn foreign_with_ffi_types() {
+    check_ok(
+        "(define lib 42)
+         (foreign lib
+           (GetStruct (-> String FFIStruct))
+           (GetPointer (-> FFIPointer)))
+         (ffi-call lib \"GetStruct\" \"test\")
+         (ffi-call lib \"GetPointer\")",
+    );
+}
+
+// ===== foreign-lib Declarations =====
+
+#[test]
+fn ffi_lib_basic() {
+    let types = check_ok(
+        "(foreign-lib rl \"libraylib.dylib\"
+           (InitWindow (-> I32 I32 CString Void))
+           (CloseWindow (-> Void))
+           (IsReady (-> Bool)))
+         (rl/InitWindow 800 600 \"hello\")
+         (rl/CloseWindow)
+         (rl/IsReady)",
+    );
+    // foreign-lib (0), call InitWindow (1), call CloseWindow (2), call IsReady (3)
+    assert_eq!(format_type(&types[1]), "Unit");
+    assert_eq!(format_type(&types[2]), "Unit");
+    assert_eq!(format_type(&types[3]), "Bool");
+}
+
+#[test]
+fn ffi_lib_wrong_args() {
+    let err = check_err(
+        "(foreign-lib rl \"libtest.dylib\"
+           (InitWindow (-> I32 I32 CString Void)))
+         (rl/InitWindow 800)",
+    );
+    assert!(err.contains("cannot unify") || err.contains("arity") || err.contains("expected"),
+        "got: {err}");
+}
+
+#[test]
+fn ffi_lib_ffi_call_still_works() {
+    let types = check_ok(
+        "(foreign-lib rl \"libtest.dylib\"
+           (InitWindow (-> I32 I32 CString Void)))
+         (ffi-call rl \"InitWindow\" 800 600 \"hello\")",
+    );
+    assert_eq!(last_type(&types), "Unit");
+}
+
+#[test]
+fn ffi_lib_void_return() {
+    let types = check_ok(
+        "(foreign-lib rl \"libtest.dylib\"
+           (CloseWindow (-> Void)))
+         (rl/CloseWindow)",
+    );
+    assert_eq!(last_type(&types), "Unit");
+}
+
+#[test]
+fn ffi_lib_numeric_types() {
+    let types = check_ok(
+        "(foreign-lib rl \"libtest.dylib\"
+           (GetWidth (-> I32))
+           (GetTime (-> F64))
+           (GetFrameTime (-> F32)))
+         (+ (rl/GetWidth) 1)
+         (+ (rl/GetTime) 1.0)
+         (+ (rl/GetFrameTime) 1.0)",
+    );
+    assert_eq!(format_type(&types[1]), "Int");
+    assert_eq!(format_type(&types[2]), "Float");
+    assert_eq!(format_type(&types[3]), "Float");
+}
+
+#[test]
+fn ffi_struct_creates_distinct_type() {
+    let types = check_ok(
+        "(define Color (ffi-struct \"Color\" (list (list \"r\" \"u8\") (list \"g\" \"u8\") (list \"b\" \"u8\") (list \"a\" \"u8\"))))
+         (struct-new Color 255 0 0 255)",
+    );
+    assert_eq!(last_type(&types), "Color");
+}
+
+#[test]
+fn ffi_lib_struct_type() {
+    let types = check_ok(
+        "(define Color (ffi-struct \"Color\" (list (list \"r\" \"u8\"))))
+         (foreign-lib rl \"libtest.dylib\"
+           (ClearBackground (-> Color Void)))
+         (rl/ClearBackground (struct-new Color 255))",
+    );
+    assert_eq!(last_type(&types), "Unit");
+}
+
+// ===== FFI Struct Type Validation =====
+
+#[test]
+fn ffi_lib_undefined_struct_type_errors() {
+    let err = check_err(
+        "(foreign-lib rl \"libtest.dylib\"
+           (ClearBackground (-> Color Void)))",
+    );
+    assert!(err.contains("Undefined type") || err.contains("not defined"), "got: {err}");
+    assert!(err.contains("Color"), "got: {err}");
+}
+
+#[test]
+fn ffi_lib_defined_struct_type_ok() {
+    check_ok(
+        "(define Color (ffi-struct \"Color\" (list (list \"r\" \"u8\") (list \"g\" \"u8\") (list \"b\" \"u8\") (list \"a\" \"u8\"))))
+         (foreign-lib rl \"libtest.dylib\"
+           (ClearBackground (-> Color Void))
+           (GetColor (-> Color)))",
+    );
+}
+
+#[test]
+fn struct_new_wrong_arity_errors() {
+    let err = check_err(
+        "(define Color (ffi-struct \"Color\" (list (list \"r\" \"u8\") (list \"g\" \"u8\") (list \"b\" \"u8\") (list \"a\" \"u8\"))))
+         (struct-new Color 255 0 0)",
+    );
+    assert!(err.contains("expected 4"), "got: {err}");
+    assert!(err.contains("got 3"), "got: {err}");
+}
+
+#[test]
+fn struct_new_wrong_field_type_errors() {
+    let err = check_err(
+        "(define Color (ffi-struct \"Color\" (list (list \"r\" \"u8\") (list \"g\" \"u8\"))))
+         (struct-new Color 255 \"not-a-number\")",
+    );
+    assert!(err.contains("cannot unify"), "got: {err}");
+}
+
+#[test]
+fn struct_get_returns_correct_field_type_int() {
+    let types = check_ok(
+        "(define Color (ffi-struct \"Color\" (list (list \"r\" \"u8\") (list \"g\" \"u8\") (list \"b\" \"u8\") (list \"a\" \"u8\"))))
+         (define c (struct-new Color 255 0 0 255))
+         (+ (struct-get c \"r\") 1)",
+    );
+    assert_eq!(last_type(&types), "Int");
+}
+
+#[test]
+fn struct_get_returns_correct_field_type_float() {
+    let types = check_ok(
+        "(define Vec2 (ffi-struct \"Vec2\" (list (list \"x\" \"f32\") (list \"y\" \"f32\"))))
+         (define v (struct-new Vec2 1.0 2.0))
+         (+ (struct-get v \"x\") 1.0)",
+    );
+    assert_eq!(last_type(&types), "Float");
+}
+
+#[test]
+fn struct_get_unknown_field_errors() {
+    let err = check_err(
+        "(define Color (ffi-struct \"Color\" (list (list \"r\" \"u8\") (list \"g\" \"u8\"))))
+         (define c (struct-new Color 255 0))
+         (struct-get c \"z\")",
+    );
+    assert!(err.contains("no field") && err.contains("z"), "got: {err}");
+}
+
+#[test]
+fn struct_set_wrong_value_type_errors() {
+    let err = check_err(
+        "(define Color (ffi-struct \"Color\" (list (list \"r\" \"u8\") (list \"g\" \"u8\"))))
+         (define c (struct-new Color 255 0))
+         (struct-set c \"r\" \"not-a-number\")",
+    );
+    assert!(err.contains("cannot unify"), "got: {err}");
+}
+
+#[test]
+fn struct_set_unknown_field_errors() {
+    let err = check_err(
+        "(define Color (ffi-struct \"Color\" (list (list \"r\" \"u8\") (list \"g\" \"u8\"))))
+         (define c (struct-new Color 255 0))
+         (struct-set c \"z\" 42)",
+    );
+    assert!(err.contains("no field") && err.contains("z"), "got: {err}");
+}
+
+#[test]
+fn struct_new_unknown_def_polymorphic_fallback() {
+    // When struct def is not known, fall back to generic FFIStruct
+    let types = check_ok(
+        "(define unknown-def 42)
+         (struct-new unknown-def 1 2 3)",
+    );
+    assert_eq!(last_type(&types), "FFIStruct");
+}
+
+#[test]
+fn struct_get_unknown_def_polymorphic_fallback() {
+    // When struct type can't be determined, struct-get returns a fresh type var
+    check_ok(
+        "(define unknown-def 42)
+         (define s (struct-new unknown-def 1 2))
+         (struct-get s \"field\")",
+    );
+}

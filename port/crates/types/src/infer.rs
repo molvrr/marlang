@@ -296,7 +296,7 @@ pub fn infer_expr(
                     "cond" => return infer_cond(env, &elements, interner),
                     "match" => return infer_match(env, &elements, interner),
                     "data" => return infer_data_def(env, &elements, interner),
-                    "class" | "instance" | "type" => return Ok(pure_result(t_unit())),
+                    "class" | "instance" | "type" | "foreign" | "foreign-lib" => return Ok(pure_result(t_unit())),
                     "effect" => return infer_effect_def(env, &elements, interner),
                     "perform" => return infer_perform(env, &elements, interner),
                     "handle" => return infer_handle(env, &elements, interner),
@@ -1059,15 +1059,123 @@ fn infer_variadic_arith(
     })
 }
 
+fn get_string_literal(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Atom(LispValue::String(s), _) => Some(s),
+        _ => None,
+    }
+}
+
 fn infer_ffi_application(
     env: &TypeEnv,
     fn_name: &str,
     arg_exprs: &[&Expr],
     interner: &Interner,
 ) -> Result<InferResult, TypeError> {
+    // ffi-call requires a foreign declaration for type checking
+    if fn_name == "ffi-call" {
+        if arg_exprs.len() < 2 {
+            return Err(TypeError::ArityMismatch {
+                expected: 2,
+                got: arg_exprs.len(),
+                context: "ffi-call requires at least a library and function name".into(),
+                span: None,
+            });
+        }
+
+        let lib_name = get_symbol(arg_exprs[0], interner).ok_or_else(|| {
+            TypeError::InvalidTypeAnnotation {
+                message: "ffi-call first argument must be a library variable".into(),
+                span: None,
+            }
+        })?;
+
+        let foreign_fn_name = get_string_literal(arg_exprs[1]).ok_or_else(|| {
+            TypeError::InvalidTypeAnnotation {
+                message: "ffi-call second argument must be a string literal function name".into(),
+                span: None,
+            }
+        })?;
+
+        if !has_foreign_lib(env, lib_name) {
+            return Err(TypeError::InvalidTypeAnnotation {
+                message: format!(
+                    "ffi-call on '{lib_name}' requires a (foreign {lib_name} ...) declaration"
+                ),
+                span: None,
+            });
+        }
+
+        let decl = lookup_foreign_fn(env, lib_name, foreign_fn_name).ok_or_else(|| {
+            TypeError::InvalidTypeAnnotation {
+                message: format!(
+                    "foreign function '{foreign_fn_name}' not declared in (foreign {lib_name} ...)"
+                ),
+                span: None,
+            }
+        })?;
+
+        let decl_params = decl.params.clone();
+        let decl_result = decl.result.clone();
+        let call_args = &arg_exprs[2..]; // skip lib and fn-name
+
+        if call_args.len() != decl_params.len() {
+            return Err(TypeError::ArityMismatch {
+                expected: decl_params.len(),
+                got: call_args.len(),
+                context: format!("foreign function {foreign_fn_name}"),
+                span: None,
+            });
+        }
+
+        let mut subst = empty_subst();
+        let mut all_constraints = Vec::new();
+        let mut all_effects = effect_row_empty();
+
+        // Infer lib arg
+        let env_for_lib = apply_subst_env(&subst, env);
+        let lib_result = infer_expr(&env_for_lib, arg_exprs[0], interner)?;
+        subst = compose_subst(&lib_result.subst, &subst);
+        all_constraints.extend(lib_result.constraints);
+        all_effects = combine_effect_rows(&all_effects, &lib_result.effects);
+
+        // Infer fn-name arg
+        let env_for_fn = apply_subst_env(&subst, env);
+        let fn_result = infer_expr(&env_for_fn, arg_exprs[1], interner)?;
+        subst = compose_subst(&fn_result.subst, &subst);
+        all_constraints.extend(fn_result.constraints);
+        all_effects = combine_effect_rows(&all_effects, &fn_result.effects);
+
+        // Infer and unify each call arg with declared param type
+        for (arg_expr, param_type) in call_args.iter().zip(&decl_params) {
+            let env_for_arg = apply_subst_env(&subst, env);
+            let arg_result = infer_expr(&env_for_arg, arg_expr, interner)?;
+            subst = compose_subst(&arg_result.subst, &subst);
+            all_constraints.extend(arg_result.constraints);
+            all_effects = combine_effect_rows(&all_effects, &arg_result.effects);
+
+            let arg_type = apply_subst(&subst, &arg_result.ty);
+            let unify_result = unify_with_context(
+                &arg_type,
+                param_type,
+                &format!("argument to foreign function {foreign_fn_name}"),
+            )?;
+            subst = compose_subst(&unify_result, &subst);
+        }
+
+        return Ok(InferResult {
+            ty: decl_result,
+            subst,
+            constraints: all_constraints,
+            effects: all_effects,
+        });
+    }
+
+    // Non-ffi-call variadic functions: struct-new, struct-get, struct-set, list
     let mut subst = empty_subst();
     let mut all_constraints = Vec::new();
     let mut all_effects = effect_row_empty();
+    let mut arg_types = Vec::new();
 
     for arg_expr in arg_exprs {
         let env_for_arg = apply_subst_env(&subst, env);
@@ -1075,12 +1183,119 @@ fn infer_ffi_application(
         subst = compose_subst(&arg_result.subst, &subst);
         all_constraints.extend(arg_result.constraints);
         all_effects = combine_effect_rows(&all_effects, &arg_result.effects);
+        arg_types.push(arg_result.ty);
     }
 
     let result_type = match fn_name {
-        "ffi-call" | "struct-get" => fresh_type_var(),
-        "struct-new" => t_ffi_struct(),
-        "struct-set" => t_unit(),
+        "struct-new" => {
+            // (struct-new StructDef val1 val2 ...)
+            // First arg is the struct def, remaining are field values
+            if !arg_exprs.is_empty() {
+                if let Some(sym_name) = get_symbol(arg_exprs[0], interner) {
+                    if let Some(info) = lookup_ffi_struct_info(env, sym_name) {
+                        let value_args = &arg_types[1..]; // skip struct def arg
+                        if value_args.len() != info.fields.len() {
+                            return Err(TypeError::ArityMismatch {
+                                expected: info.fields.len(),
+                                got: value_args.len(),
+                                context: format!("struct-new {}", sym_name),
+                                span: None,
+                            });
+                        }
+                        // Unify each value arg with its field's Marlang type
+                        for (i, field) in info.fields.iter().enumerate() {
+                            let val_type = apply_subst(&subst, &value_args[i]);
+                            let unify_result = unify_with_context(
+                                &val_type,
+                                &field.marlang_type,
+                                &format!("field '{}' of struct-new {}", field.name, sym_name),
+                            )?;
+                            subst = compose_subst(&unify_result, &subst);
+                        }
+                        type_const(sym_name)
+                    } else if is_ffi_struct_type(env, sym_name) {
+                        type_const(sym_name)
+                    } else {
+                        t_ffi_struct()
+                    }
+                } else {
+                    t_ffi_struct()
+                }
+            } else {
+                t_ffi_struct()
+            }
+        }
+        "struct-get" => {
+            // (struct-get struct-instance "field-name")
+            if arg_exprs.len() >= 2 {
+                if let Some(field_name) = get_string_literal(arg_exprs[1]) {
+                    // Try to determine the struct type from the first argument
+                    let struct_type = apply_subst(&subst, &arg_types[0]);
+                    if let Type::Const(ref type_name) = struct_type {
+                        if let Some(info) = lookup_ffi_struct_info(env, type_name) {
+                            let field = info.fields.iter().find(|f| f.name == field_name);
+                            match field {
+                                Some(f) => f.marlang_type.clone(),
+                                None => {
+                                    return Err(TypeError::InvalidTypeAnnotation {
+                                        message: format!(
+                                            "struct '{}' has no field '{}'",
+                                            type_name, field_name
+                                        ),
+                                        span: None,
+                                    });
+                                }
+                            }
+                        } else {
+                            fresh_type_var() // unknown struct def → polymorphic fallback
+                        }
+                    } else {
+                        fresh_type_var() // can't determine struct type → polymorphic fallback
+                    }
+                } else {
+                    fresh_type_var() // field name not a string literal
+                }
+            } else {
+                fresh_type_var()
+            }
+        }
+        "struct-set" => {
+            // (struct-set struct-instance "field-name" value)
+            if arg_exprs.len() >= 3 {
+                if let Some(field_name) = get_string_literal(arg_exprs[1]) {
+                    let struct_type = apply_subst(&subst, &arg_types[0]);
+                    if let Type::Const(ref type_name) = struct_type {
+                        if let Some(info) = lookup_ffi_struct_info(env, type_name) {
+                            let field = info.fields.iter().find(|f| f.name == field_name);
+                            match field {
+                                Some(f) => {
+                                    let val_type = apply_subst(&subst, &arg_types[2]);
+                                    let unify_result = unify_with_context(
+                                        &val_type,
+                                        &f.marlang_type,
+                                        &format!(
+                                            "field '{}' of struct-set {}",
+                                            field_name, type_name
+                                        ),
+                                    )?;
+                                    subst = compose_subst(&unify_result, &subst);
+                                }
+                                None => {
+                                    return Err(TypeError::InvalidTypeAnnotation {
+                                        message: format!(
+                                            "struct '{}' has no field '{}'",
+                                            type_name, field_name
+                                        ),
+                                        span: None,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            t_unit()
+        }
         "list" => type_app(type_const("List"), vec![fresh_type_var()]),
         _ => fresh_type_var(),
     };
@@ -1756,6 +1971,263 @@ fn process_effect_def(
     Ok(define_effect(env, effect_decl))
 }
 
+fn process_foreign_def(
+    env: &TypeEnv,
+    elements: &[&Expr],
+    interner: &Interner,
+) -> Result<TypeEnv, TypeError> {
+    if elements.len() < 2 {
+        return Err(TypeError::ArityMismatch {
+            expected: 1,
+            got: elements.len() - 1,
+            context: "foreign".into(),
+            span: None,
+        });
+    }
+
+    let lib_name = get_symbol(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
+        message: "foreign library name must be a symbol".into(),
+        span: None,
+    })?;
+
+    let mut functions = Vec::new();
+    for e in &elements[2..] {
+        let op_elements = list_to_array(e);
+        if op_elements.len() != 2 {
+            return Err(TypeError::InvalidTypeAnnotation {
+                message: "foreign function entry must be (FnName ArrowType)".into(),
+                span: None,
+            });
+        }
+
+        let fn_name = get_symbol(op_elements[0], interner).ok_or(
+            TypeError::InvalidTypeAnnotation {
+                message: "foreign function name must be a symbol".into(),
+                span: None,
+            },
+        )?;
+
+        let fn_type = parse_type_expr(op_elements[1], env, interner)?;
+        let (params, result) = match &fn_type {
+            Type::Arrow { params, result, .. } => (params.clone(), result.as_ref().clone()),
+            _ => {
+                return Err(TypeError::InvalidTypeAnnotation {
+                    message: "foreign function type must be a function type (-> ...)".into(),
+                    span: None,
+                });
+            }
+        };
+
+        functions.push(ForeignFnDecl {
+            name: fn_name.to_string(),
+            params,
+            result,
+        });
+    }
+
+    Ok(define_foreign(env, lib_name, functions))
+}
+
+/// Convert FFI type names in arrow signatures to Marlang types for type checking.
+/// E.g. I32 → Int, F32 → Float, CString → String, Void → Unit, etc.
+/// Returns an error if an unknown struct type is referenced that wasn't defined via ffi-struct.
+fn ffi_type_to_marlang(ty: &Type, env: &TypeEnv) -> Result<Type, TypeError> {
+    match ty {
+        Type::Const(name) => match name.as_str() {
+            "I8" | "U8" | "I16" | "U16" | "I32" | "U32" | "I64" | "U64" | "Int" => Ok(t_int()),
+            "F32" | "F64" | "Float" => Ok(t_float()),
+            "CString" => Ok(t_string()),
+            "Bool" => Ok(t_bool()),
+            "Void" => Ok(t_unit()),
+            "Ptr" => Ok(t_ffi_pointer()),
+            "FFIStruct" | "FFIPointer" | "FFILibrary" | "String" | "Unit" => Ok(ty.clone()),
+            _ => {
+                if is_ffi_struct_type(env, name) {
+                    Ok(type_const(name)) // distinct struct type
+                } else {
+                    Err(TypeError::UndefinedType {
+                        name: format!("struct type '{}' used in foreign-lib but not defined via ffi-struct", name),
+                        span: None,
+                    })
+                }
+            }
+        },
+        Type::Arrow {
+            params,
+            effects,
+            result,
+        } => {
+            let mut new_params = Vec::new();
+            for p in params {
+                new_params.push(ffi_type_to_marlang(p, env)?);
+            }
+            let new_result = ffi_type_to_marlang(result, env)?;
+            Ok(Type::Arrow {
+                params: new_params,
+                effects: effects.clone(),
+                result: Box::new(new_result),
+            })
+        }
+        _ => Ok(ty.clone()),
+    }
+}
+
+/// Map lowercase FFI type strings ("u8", "f64", etc.) to Type::Const values.
+fn ffi_type_string_to_type_const(s: &str) -> Type {
+    match s {
+        "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "i64" | "u64" => t_int(),
+        "f32" | "f64" => t_float(),
+        "bool" => t_bool(),
+        "string" | "cstring" => t_string(),
+        "void" => t_unit(),
+        "ptr" | "pointer" => t_ffi_pointer(),
+        _ => type_const(s), // unknown → pass through as named type
+    }
+}
+
+/// Check if an expression is `(ffi-struct "Name" (list (list "field" "type") ...))` and extract info.
+fn try_extract_ffi_struct_info(expr: &Expr, interner: &Interner) -> Option<FfiStructInfo> {
+    if let Expr::List { .. } = expr {
+        let elements = list_to_array(expr);
+        if elements.len() >= 2 && is_symbol(elements[0], interner, "ffi-struct") {
+            if let Expr::Atom(LispValue::String(name), _) = elements[1] {
+                let mut fields = Vec::new();
+                // Try to parse field definitions from the second argument: (list (list "field" "type") ...)
+                if elements.len() >= 3 {
+                    if let Expr::List { .. } = elements[2] {
+                        let list_elements = list_to_array(elements[2]);
+                        // Skip the leading `list` symbol
+                        let field_entries = if !list_elements.is_empty()
+                            && is_symbol(list_elements[0], interner, "list")
+                        {
+                            &list_elements[1..]
+                        } else {
+                            &list_elements[..]
+                        };
+                        for entry in field_entries {
+                            if let Expr::List { .. } = entry {
+                                let pair = list_to_array(entry);
+                                // (list "field_name" "type_string")
+                                let inner = if pair.len() >= 3
+                                    && is_symbol(pair[0], interner, "list")
+                                {
+                                    &pair[1..]
+                                } else {
+                                    &pair[..]
+                                };
+                                if inner.len() == 2 {
+                                    if let (
+                                        Expr::Atom(LispValue::String(fname), _),
+                                        Expr::Atom(LispValue::String(ftype), _),
+                                    ) = (inner[0], inner[1])
+                                    {
+                                        fields.push(FfiStructFieldInfo {
+                                            name: fname.to_string(),
+                                            marlang_type: ffi_type_string_to_type_const(ftype),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return Some(FfiStructInfo {
+                    name: name.to_string(),
+                    fields,
+                });
+            }
+        }
+    }
+    None
+}
+
+fn process_ffi_lib_def(
+    env: &TypeEnv,
+    elements: &[&Expr],
+    interner: &Interner,
+) -> Result<TypeEnv, TypeError> {
+    // (foreign-lib <name> <path> (<FnName> (-> <Types>...)) ...)
+    if elements.len() < 3 {
+        return Err(TypeError::ArityMismatch {
+            expected: 2,
+            got: elements.len() - 1,
+            context: "foreign-lib".into(),
+            span: None,
+        });
+    }
+
+    let lib_name = get_symbol(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
+        message: "foreign-lib library name must be a symbol".into(),
+        span: None,
+    })?;
+
+    // elements[2] is the path string (we just check it's a string)
+    match elements[2] {
+        Expr::Atom(LispValue::String(_), _) => {}
+        _ => {
+            return Err(TypeError::InvalidTypeAnnotation {
+                message: "foreign-lib second argument must be a path string".into(),
+                span: None,
+            });
+        }
+    }
+
+    let mut functions = Vec::new();
+    let mut new_env = env.clone();
+
+    for e in &elements[3..] {
+        let op_elements = list_to_array(e);
+        if op_elements.len() != 2 {
+            return Err(TypeError::InvalidTypeAnnotation {
+                message: "foreign-lib function entry must be (FnName ArrowType)".into(),
+                span: None,
+            });
+        }
+
+        let fn_name = get_symbol(op_elements[0], interner).ok_or(
+            TypeError::InvalidTypeAnnotation {
+                message: "foreign-lib function name must be a symbol".into(),
+                span: None,
+            },
+        )?;
+
+        // Parse the type in FFI type namespace
+        let raw_type = parse_type_expr(op_elements[1], env, interner)?;
+        // Convert FFI types to Marlang types (errors on unknown struct types)
+        let marlang_type = ffi_type_to_marlang(&raw_type, &new_env)?;
+
+        let (params, result) = match &marlang_type {
+            Type::Arrow { params, result, .. } => (params.clone(), result.as_ref().clone()),
+            _ => {
+                return Err(TypeError::InvalidTypeAnnotation {
+                    message: "foreign-lib function type must be a function type (-> ...)".into(),
+                    span: None,
+                });
+            }
+        };
+
+        // Register in foreign_libs (for ffi-call backward compat)
+        functions.push(ForeignFnDecl {
+            name: fn_name.to_string(),
+            params: params.clone(),
+            result: result.clone(),
+        });
+
+        // Register qualified binding: lib_name/FnName
+        let qualified_name = format!("{}/{}", lib_name, fn_name);
+        let fn_type = type_arrow(params, result);
+        new_env = extend_env(&new_env, &qualified_name, monotype(fn_type));
+    }
+
+    // Register foreign lib for ffi-call backward compatibility
+    new_env = define_foreign(&new_env, lib_name, functions);
+
+    // Register lib_name with type FFILibrary
+    new_env = extend_env(&new_env, lib_name, monotype(t_ffi_library()));
+
+    Ok(new_env)
+}
+
 pub fn infer_program(
     env: &TypeEnv,
     exprs: &[Expr],
@@ -1778,6 +2250,11 @@ pub fn infer_program(
                 }
 
                 if first_sym == Some("define") && elements.len() >= 3 {
+                    // Check if this define is binding an ffi-struct call
+                    if let Some(info) = try_extract_ffi_struct_info(elements[2], interner) {
+                        let name = info.name.clone();
+                        register_ffi_struct_type(&mut current_env, &name, info);
+                    }
                     let (new_env, new_subst) =
                         process_define(&current_env, &elements, &global_subst, interner)?;
                     current_env = new_env;
@@ -1788,6 +2265,18 @@ pub fn infer_program(
 
                 if first_sym == Some("effect") && elements.len() >= 2 {
                     current_env = process_effect_def(&current_env, &elements, interner)?;
+                    types.push(t_unit());
+                    continue;
+                }
+
+                if first_sym == Some("foreign") && elements.len() >= 2 {
+                    current_env = process_foreign_def(&current_env, &elements, interner)?;
+                    types.push(t_unit());
+                    continue;
+                }
+
+                if first_sym == Some("foreign-lib") && elements.len() >= 3 {
+                    current_env = process_ffi_lib_def(&current_env, &elements, interner)?;
                     types.push(t_unit());
                     continue;
                 }

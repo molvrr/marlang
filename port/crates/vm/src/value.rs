@@ -294,6 +294,10 @@ fn format_object(obj: &VMObject) -> String {
         VMObject::FfiStructDef(def) => format!("#<ffi-struct-def {}>", def.name),
         #[cfg(feature = "ffi")]
         VMObject::FfiStruct(s) => format!("#<ffi-struct {}>", s.def.name),
+        #[cfg(feature = "ffi")]
+        VMObject::FfiBound { lib_global_name, fn_name } => {
+            format!("#<ffi-bound {}/{}>", lib_global_name, fn_name)
+        }
     }
 }
 
@@ -318,6 +322,7 @@ pub fn preconvert_constants(constants: &[ConstantValue]) -> Vec<Value> {
             ConstantValue::Boolean(b) => Value::boolean(*b),
             ConstantValue::Nil => Value::nil(),
             ConstantValue::Prototype(_) => Value::nil(), // placeholder
+            ConstantValue::FfiSigs(_) | ConstantValue::FfiBound { .. } => c.as_value(),
         })
         .collect()
 }

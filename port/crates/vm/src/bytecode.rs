@@ -131,6 +131,14 @@ impl Instruction {
     }
 }
 
+/// An FFI function signature entry for foreign-lib.
+#[derive(Debug, Clone)]
+pub struct FfiSigEntry {
+    pub name: String,
+    pub arg_types: Vec<String>, // C type strings: "i32", "f32", "cstring", etc.
+    pub ret_type: String,
+}
+
 /// Compile-time constant values stored in a chunk's constant pool.
 #[derive(Debug, Clone)]
 pub enum ConstantValue {
@@ -139,6 +147,13 @@ pub enum ConstantValue {
     Boolean(bool),
     Nil,
     Prototype(FunctionPrototype),
+    /// FFI function signatures for ffi-open. Converted to nested list at runtime.
+    FfiSigs(Vec<FfiSigEntry>),
+    /// A bound FFI function reference: lib global name + function name.
+    FfiBound {
+        lib_name: String,
+        fn_name: String,
+    },
 }
 
 impl ConstantValue {
@@ -149,18 +164,58 @@ impl ConstantValue {
             (ConstantValue::String(a), ConstantValue::String(b)) => a == b,
             (ConstantValue::Boolean(a), ConstantValue::Boolean(b)) => a == b,
             (ConstantValue::Nil, ConstantValue::Nil) => true,
+            (
+                ConstantValue::FfiBound {
+                    lib_name: l1,
+                    fn_name: f1,
+                },
+                ConstantValue::FfiBound {
+                    lib_name: l2,
+                    fn_name: f2,
+                },
+            ) => l1 == l2 && f1 == f2,
             _ => false,
         }
     }
 
     /// Convert to a VM Value. Prototypes become nil.
     pub fn as_value(&self) -> crate::value::Value {
+        use crate::object::VMObject;
+        use crate::value::Value;
+        use std::sync::Arc;
+
         match self {
-            ConstantValue::Number(n) => crate::value::Value::number(*n),
-            ConstantValue::String(s) => crate::value::Value::string(s.as_str()),
-            ConstantValue::Boolean(b) => crate::value::Value::boolean(*b),
-            ConstantValue::Nil => crate::value::Value::nil(),
-            ConstantValue::Prototype(_) => crate::value::Value::nil(),
+            ConstantValue::Number(n) => Value::number(*n),
+            ConstantValue::String(s) => Value::string(s.as_str()),
+            ConstantValue::Boolean(b) => Value::boolean(*b),
+            ConstantValue::Nil => Value::nil(),
+            ConstantValue::Prototype(_) => Value::nil(),
+            ConstantValue::FfiSigs(sigs) => {
+                // Convert to nested list matching ffi-open's expected format:
+                // (list (list "FnName" (list "arg1" "arg2") "ret") ...)
+                let entries: Vec<Value> = sigs
+                    .iter()
+                    .map(|sig| {
+                        let arg_values: Vec<Value> = sig
+                            .arg_types
+                            .iter()
+                            .map(|a| Value::string(a.as_str()))
+                            .collect();
+                        Value::object(VMObject::List(vec![
+                            Value::string(sig.name.as_str()),
+                            Value::object(VMObject::List(arg_values)),
+                            Value::string(sig.ret_type.as_str()),
+                        ]))
+                    })
+                    .collect();
+                Value::object(VMObject::List(entries))
+            }
+            ConstantValue::FfiBound { lib_name, fn_name } => {
+                Value::object(VMObject::FfiBound {
+                    lib_global_name: Arc::from(lib_name.as_str()),
+                    fn_name: Arc::from(fn_name.as_str()),
+                })
+            }
         }
     }
 }

@@ -24,6 +24,13 @@ pub enum VMObject {
     },
     Pid(u64),
     Port(u64),
+    /// A bound FFI function: stores the library global name and function name.
+    /// When called, looks up the library from globals and dispatches via ffi_call.
+    #[cfg(feature = "ffi")]
+    FfiBound {
+        lib_global_name: Arc<str>,
+        fn_name: Arc<str>,
+    },
     // FFI types
     #[cfg(feature = "ffi")]
     FfiLibrary(std::sync::Arc<crate::ffi::FfiLibrary>),
@@ -47,6 +54,8 @@ impl VMObject {
             VMObject::Builtin { .. } => "builtin",
             VMObject::Pid(_) => "pid",
             VMObject::Port(_) => "port",
+            #[cfg(feature = "ffi")]
+            VMObject::FfiBound { .. } => "ffi-bound",
             #[cfg(feature = "ffi")]
             VMObject::FfiLibrary(_) => "ffi-library",
             #[cfg(feature = "ffi")]
@@ -88,6 +97,17 @@ impl PartialEq for VMObject {
             (VMObject::Port(a), VMObject::Port(b)) => a == b,
             #[cfg(feature = "ffi")]
             (VMObject::FfiPointer(a), VMObject::FfiPointer(b)) => a == b,
+            #[cfg(feature = "ffi")]
+            (
+                VMObject::FfiBound {
+                    lib_global_name: l1,
+                    fn_name: f1,
+                },
+                VMObject::FfiBound {
+                    lib_global_name: l2,
+                    fn_name: f2,
+                },
+            ) => l1 == l2 && f1 == f2,
             _ => false,
         }
     }

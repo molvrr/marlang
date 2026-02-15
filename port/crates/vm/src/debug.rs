@@ -84,6 +84,12 @@ fn format_constant(constant: &ConstantValue) -> String {
         ConstantValue::Prototype(proto) => {
             format!("<fn {}/{}>", proto.name, proto.arity)
         }
+        ConstantValue::FfiSigs(sigs) => {
+            format!("<ffi-sigs({})>", sigs.len())
+        }
+        ConstantValue::FfiBound { lib_name, fn_name } => {
+            format!("<ffi-bound {}/{}>", lib_name, fn_name)
+        }
     }
 }
 

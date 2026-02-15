@@ -4,7 +4,7 @@ use marlang_core::ast::{self, Expr, LispValue};
 use marlang_core::intern::{Interner, Symbol};
 
 use crate::bytecode::{
-    Chunk, ConstantValue, FunctionPrototype, Instruction, Op, UpvalueDescriptor,
+    Chunk, ConstantValue, FfiSigEntry, FunctionPrototype, Instruction, Op, UpvalueDescriptor,
 };
 use crate::errors::CompileError;
 
@@ -55,6 +55,8 @@ struct KnownSymbols {
     nil: Symbol,
     negate: Symbol,
     minus: Symbol,
+    foreign: Symbol,
+    ffi_lib: Symbol,
 }
 
 impl KnownSymbols {
@@ -86,7 +88,31 @@ impl KnownSymbols {
             nil: interner.intern("nil"),
             negate: interner.intern("negate"),
             minus: interner.intern("-"),
+            foreign: interner.intern("foreign"),
+            ffi_lib: interner.intern("foreign-lib"),
         }
+    }
+}
+
+/// Convert an FFI type name (from foreign-lib syntax) to a C type string for ffi-open.
+fn ffi_type_to_c_string(name: &str) -> String {
+    match name {
+        "I8" => "i8".to_string(),
+        "U8" => "u8".to_string(),
+        "I16" => "i16".to_string(),
+        "U16" => "u16".to_string(),
+        "I32" => "i32".to_string(),
+        "U32" => "u32".to_string(),
+        "I64" | "Int" => "i64".to_string(),
+        "U64" => "u64".to_string(),
+        "F32" => "f32".to_string(),
+        "F64" | "Float" => "f64".to_string(),
+        "CString" => "cstring".to_string(),
+        "Bool" => "bool".to_string(),
+        "Void" => "void".to_string(),
+        "Ptr" => "ptr".to_string(),
+        // Struct names pass through as-is (e.g. "Color" → "Color")
+        other => other.to_string(),
     }
 }
 
@@ -462,7 +488,9 @@ impl<'a> Compiler<'a> {
                             "import is not yet supported in the VM",
                             line,
                         ));
-                    } else if sym == ks.class || sym == ks.instance || sym == ks.type_ {
+                    } else if sym == ks.ffi_lib {
+                        return self.compile_ffi_lib(&elements, line);
+                    } else if sym == ks.class || sym == ks.instance || sym == ks.type_ || sym == ks.foreign {
                         self.emit_constant(ConstantValue::Nil, line);
                         return Ok(());
                     }
@@ -1204,6 +1232,134 @@ impl<'a> Compiler<'a> {
         self.compile_expr(elements[1], false)?; // continuation
         self.compile_expr(elements[2], false)?; // value
         self.emit(Op::Resume, line);
+        Ok(())
+    }
+
+    fn compile_ffi_lib(&mut self, elements: &[&Expr], line: u32) -> Result<(), CompileError> {
+        // (foreign-lib <name> <path> (<FnName> (-> <Types>...)) ...)
+        if elements.len() < 3 {
+            return Err(CompileError::new(
+                "foreign-lib expects at least name and path",
+                line,
+            ));
+        }
+
+        let name_sym = Self::get_symbol(elements[1]).ok_or_else(|| {
+            CompileError::new("foreign-lib name must be a symbol", line)
+        })?;
+        let lib_name = self.interner.resolve(name_sym).to_string();
+
+        let path_str = match elements[2] {
+            Expr::Atom(LispValue::String(s), _) => s.to_string(),
+            _ => {
+                return Err(CompileError::new(
+                    "foreign-lib path must be a string",
+                    line,
+                ));
+            }
+        };
+
+        // Parse function entries and build FfiSigEntry list
+        let mut sigs = Vec::new();
+        let mut fn_names = Vec::new();
+
+        for e in &elements[3..] {
+            let entry_elements = ast::list_to_array(e);
+            if entry_elements.len() != 2 {
+                return Err(CompileError::new(
+                    "foreign-lib function entry must be (FnName ArrowType)",
+                    line,
+                ));
+            }
+
+            let fn_sym = Self::get_symbol(entry_elements[0]).ok_or_else(|| {
+                CompileError::new("foreign-lib function name must be a symbol", line)
+            })?;
+            let fn_name = self.interner.resolve(fn_sym).to_string();
+
+            // Parse the arrow type from AST to extract C type strings
+            let type_elements = ast::list_to_array(entry_elements[1]);
+            if type_elements.is_empty() {
+                return Err(CompileError::new(
+                    "foreign-lib function type must be (-> ...)",
+                    line,
+                ));
+            }
+
+            // First element should be ->
+            let first = Self::get_symbol(type_elements[0]);
+            if first != Some(self.known_symbols.arrow) {
+                return Err(CompileError::new(
+                    "foreign-lib function type must start with ->",
+                    line,
+                ));
+            }
+
+            let type_names: Vec<String> = type_elements[1..]
+                .iter()
+                .map(|te| {
+                    Self::get_symbol(te)
+                        .map(|s| self.interner.resolve(s).to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
+                })
+                .collect();
+
+            if type_names.is_empty() {
+                return Err(CompileError::new(
+                    "foreign-lib arrow type must have at least a return type",
+                    line,
+                ));
+            }
+
+            let (arg_type_names, ret_type_name) = type_names.split_at(type_names.len() - 1);
+
+            // Convert FFI type names to C type strings
+            let arg_types: Vec<String> = arg_type_names
+                .iter()
+                .filter(|t| t.as_str() != "Void") // Void as param means no args
+                .map(|t| ffi_type_to_c_string(t))
+                .collect();
+            let ret_type = ffi_type_to_c_string(&ret_type_name[0]);
+
+            sigs.push(FfiSigEntry {
+                name: fn_name.clone(),
+                arg_types,
+                ret_type,
+            });
+            fn_names.push(fn_name);
+        }
+
+        // Emit: ffi-open(path, sigs) → library value
+        let ffi_open_name_idx = self.add_constant(ConstantValue::String("ffi-open".to_string()));
+        self.emit_op(Op::PushGlobal, line, ffi_open_name_idx);
+
+        let path_idx = self.add_constant(ConstantValue::String(path_str));
+        self.emit_op(Op::PushConst, line, path_idx);
+
+        let sigs_idx = self.add_constant(ConstantValue::FfiSigs(sigs));
+        self.emit_op(Op::PushConst, line, sigs_idx);
+
+        self.emit_op(Op::Call, line, 2); // call ffi-open with 2 args
+
+        // Store library as global
+        let lib_name_idx = self.add_constant(ConstantValue::String(lib_name.clone()));
+        self.emit_op(Op::SetGlobal, line, lib_name_idx);
+
+        // For each function, emit FfiBound as global
+        for fn_name in &fn_names {
+            let bound = ConstantValue::FfiBound {
+                lib_name: lib_name.clone(),
+                fn_name: fn_name.clone(),
+            };
+            let bound_idx = self.add_constant(bound);
+            self.emit_op(Op::PushConst, line, bound_idx);
+            let qualified_name = format!("{}/{}", lib_name, fn_name);
+            let qualified_idx = self.add_constant(ConstantValue::String(qualified_name));
+            self.emit_op(Op::SetGlobal, line, qualified_idx);
+        }
+
+        // foreign-lib returns nil
+        self.emit_constant(ConstantValue::Nil, line);
         Ok(())
     }
 
