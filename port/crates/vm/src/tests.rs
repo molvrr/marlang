@@ -9,10 +9,11 @@ use crate::bytecode::{Chunk, ConstantValue, Op};
 use crate::compiler::{compile, compile_program};
 use crate::debug::disassemble;
 use crate::errors::VMError;
-use crate::modules::{run_program, ModuleLoader};
+use crate::expand::MacroExpander;
+use crate::modules::{expand_macros, run_program, run_program_from_exprs, ModuleLoader};
 use crate::object::VMObject;
 use crate::value::{format_value, Value};
-use crate::vm::{interpret, VM};
+use crate::vm::VM;
 
 // --- Test Helpers ---
 
@@ -533,10 +534,12 @@ fn eval(source: &str) -> Result<Value, VMError> {
     let interner = Interner::new();
     let tokens = lex(source, &interner).expect("lex failed");
     let exprs = parse(&tokens).expect("parse failed");
-    let chunk = compile_program(&exprs, &interner).expect("compile failed");
+    let loader = ModuleLoader::new();
+    let expanded = expand_macros(&interner, &exprs, None, &loader).expect("expand failed");
     let mut vm = VM::new();
     register_builtins(&mut vm);
-    interpret(&mut vm, &chunk)
+    let mut loader = ModuleLoader::new();
+    run_program_from_exprs(&mut vm, &expanded.exprs, expanded.prelude_count, None, &mut loader, &interner)
 }
 
 fn eval_to_string(source: &str) -> String {
@@ -547,11 +550,13 @@ fn eval_with_output(source: &str) -> (Result<Value, VMError>, String) {
     let interner = Interner::new();
     let tokens = lex(source, &interner).expect("lex failed");
     let exprs = parse(&tokens).expect("parse failed");
-    let chunk = compile_program(&exprs, &interner).expect("compile failed");
+    let loader = ModuleLoader::new();
+    let expanded = expand_macros(&interner, &exprs, None, &loader).expect("expand failed");
     let mut vm = VM::new();
     register_builtins(&mut vm);
     vm.captured_output = Some(String::new());
-    let result = interpret(&mut vm, &chunk);
+    let mut loader = ModuleLoader::new();
+    let result = run_program_from_exprs(&mut vm, &expanded.exprs, expanded.prelude_count, None, &mut loader, &interner);
     let output = vm.captured_output.take().unwrap_or_default();
     (result, output)
 }
@@ -2960,4 +2965,379 @@ fn async_io_error() {
     );
     assert!(result.is_ok());
     assert!(output.contains("main ok"));
+}
+
+// ===== Quote / Symbol Tests =====
+
+#[test]
+fn quote_number() {
+    assert_num("(quote 42)", 42.0);
+}
+
+#[test]
+fn quote_symbol() {
+    let val = eval("(quote foo)").expect("eval failed");
+    match val.as_object() {
+        Some(VMObject::Symbol(s)) => assert_eq!(s.as_str(), "foo"),
+        other => panic!("expected symbol, got {:?}", other),
+    }
+}
+
+#[test]
+fn quote_list() {
+    let val = eval("(quote (a b c))").expect("eval failed");
+    let s = format_value(&val);
+    assert_eq!(s, "(Cons a (Cons b (Cons c Nil)))");
+}
+
+#[test]
+fn quote_empty_list() {
+    let val = eval("(quote ())").expect("eval failed");
+    let s = format_value(&val);
+    assert_eq!(s, "Nil");
+}
+
+#[test]
+fn quote_nested() {
+    let val = eval("(quote (a (b c)))").expect("eval failed");
+    // Should create nested Cons structure
+    assert!(val.as_object().is_some());
+}
+
+#[test]
+fn quote_sugar_number() {
+    assert_num("'42", 42.0);
+}
+
+#[test]
+fn quote_sugar_symbol() {
+    let val = eval("'foo").expect("eval failed");
+    match val.as_object() {
+        Some(VMObject::Symbol(s)) => assert_eq!(s.as_str(), "foo"),
+        other => panic!("expected symbol, got {:?}", other),
+    }
+}
+
+#[test]
+fn quote_sugar_list() {
+    let val = eval("'(a b c)").expect("eval failed");
+    let s = format_value(&val);
+    assert_eq!(s, "(Cons a (Cons b (Cons c Nil)))");
+}
+
+// ===== Quasiquote Tests =====
+
+#[test]
+fn quasiquote_no_unquote() {
+    let val = eval("`(a b c)").expect("eval failed");
+    let s = format_value(&val);
+    assert_eq!(s, "(Cons a (Cons b (Cons c Nil)))");
+}
+
+#[test]
+fn quasiquote_unquote() {
+    let val = eval("(define x 42) `(a ,x c)").expect("eval failed");
+    let s = format_value(&val);
+    assert_eq!(s, "(Cons a (Cons 42 (Cons c Nil)))");
+}
+
+#[test]
+fn quasiquote_splicing() {
+    let val = eval(r#"
+(define xs (Cons 1 (Cons 2 Nil)))
+`(a ,@xs c)
+"#).expect("eval failed");
+    let s = format_value(&val);
+    assert_eq!(s, "(Cons a (Cons 1 (Cons 2 (Cons c Nil))))");
+}
+
+#[test]
+fn quasiquote_nested_unquote() {
+    let val = eval("(define x 10) (define y 20) `(,x ,y)").expect("eval failed");
+    let s = format_value(&val);
+    assert_eq!(s, "(Cons 10 (Cons 20 Nil))");
+}
+
+// ===== Builtin Tests =====
+
+#[test]
+fn cons_car_cdr() {
+    assert_num("(car (cons 1 (cons 2 Nil)))", 1.0);
+    assert_num("(car (cdr (cons 1 (cons 2 Nil))))", 2.0);
+}
+
+#[test]
+fn append_lists() {
+    let val = eval("(append (Cons 1 (Cons 2 Nil)) (Cons 3 Nil))").expect("eval failed");
+    let s = format_value(&val);
+    assert_eq!(s, "(Cons 1 (Cons 2 (Cons 3 Nil)))");
+}
+
+#[test]
+fn symbol_predicates() {
+    assert_eq!(eval_to_string("(symbol? (make-symbol \"x\"))"), "#t");
+    assert_eq!(eval_to_string("(symbol? 42)"), "#f");
+    assert_eq!(eval_to_string("(pair? (cons 1 Nil))"), "#t");
+    assert_eq!(eval_to_string("(nil? Nil)"), "#t");
+    assert_eq!(eval_to_string("(number? 3)"), "#t");
+    assert_eq!(eval_to_string("(string? \"hi\")"), "#t");
+}
+
+#[test]
+fn gensym_unique() {
+    let val1 = eval("(gensym)").expect("eval failed");
+    let val2 = eval("(gensym)").expect("eval failed");
+    let s1 = format_value(&val1);
+    let s2 = format_value(&val2);
+    assert_ne!(s1, s2);
+}
+
+#[test]
+fn symbol_string_conversion() {
+    assert_eq!(eval_to_string("(symbol->string (make-symbol \"hello\"))"), "\"hello\"");
+    let val = eval("(string->symbol \"world\")").expect("eval failed");
+    match val.as_object() {
+        Some(VMObject::Symbol(s)) => assert_eq!(s.as_str(), "world"),
+        other => panic!("expected symbol, got {:?}", other),
+    }
+}
+
+// ===== Macro Basic Tests =====
+
+#[test]
+fn defmacro_when() {
+    assert_num(r#"
+(defmacro when (cond body)
+  `(if ,cond ,body nil))
+(when #t 42)
+"#, 42.0);
+}
+
+#[test]
+fn defmacro_when_false() {
+    assert_eq!(eval_to_string(r#"
+(defmacro when (cond body)
+  `(if ,cond ,body nil))
+(when #f 42)
+"#), "nil");
+}
+
+#[test]
+fn defmacro_unless() {
+    assert_num(r#"
+(defmacro unless (cond body)
+  `(if ,cond nil ,body))
+(unless #f 99)
+"#, 99.0);
+}
+
+#[test]
+fn defmacro_nested_expansion() {
+    assert_num(r#"
+(defmacro when (cond body)
+  `(if ,cond ,body nil))
+(defmacro unless (cond body)
+  `(when (not ,cond) ,body))
+(unless #f 77)
+"#, 77.0);
+}
+
+#[test]
+fn defmacro_with_splicing() {
+    assert_num(r#"
+(defmacro my-begin (first rest)
+  `(let ((unused ,first)) ,rest))
+(my-begin (+ 1 2) (+ 3 4))
+"#, 7.0);
+}
+
+#[test]
+fn defmacro_with_data_types() {
+    // Macro generates match expressions using user-defined ADTs.
+    // The body doesn't reference the pattern variable — it's self-contained.
+    assert_num(r#"
+(data (MyOpt a) MyNone (MySome a))
+(defmacro is-some (opt)
+  `(match ,opt
+    ((MySome _) 1)
+    (MyNone 0)))
+(is-some (MySome 42))
+"#, 1.0);
+}
+
+// ===== Hygiene Tests =====
+
+#[test]
+fn macro_hygiene_no_capture() {
+    // Macro introduces 'tmp' binding. Caller also has 'tmp'.
+    // With hygiene, macro's tmp is distinct from caller's tmp.
+    assert_num(r#"
+(defmacro my-or (a b)
+  `(let ((tmp ,a))
+     (if tmp tmp ,b)))
+(let ((tmp 42))
+  (my-or #f tmp))
+"#, 42.0);
+}
+
+#[test]
+fn macro_hygiene_nested() {
+    // Two expansions of the same macro should have distinct marks
+    assert_num(r#"
+(defmacro my-or (a b)
+  `(let ((tmp ,a))
+     (if tmp tmp ,b)))
+(my-or #f (my-or #f 99))
+"#, 99.0);
+}
+
+#[test]
+fn macro_hygiene_global_ref() {
+    // Macro template references a global function — should still resolve
+    assert_num(r#"
+(define double (lambda (x) (* x 2)))
+(defmacro apply-double (x)
+  `(double ,x))
+(apply-double 21)
+"#, 42.0);
+}
+
+#[test]
+fn macro_hygiene_constructor() {
+    // Macro generates match expressions with constructor patterns
+    assert_num(r#"
+(defmacro unwrap-or (opt default)
+  `(match ,opt
+    ((Some v) v)
+    (None ,default)))
+(unwrap-or (Some 42) 0)
+"#, 42.0);
+}
+
+#[test]
+fn macro_hygiene_constructor_none() {
+    assert_num(r#"
+(defmacro unwrap-or (opt default)
+  `(match ,opt
+    ((Some v) v)
+    (None ,default)))
+(unwrap-or None 99)
+"#, 99.0);
+}
+
+// ===== Cross-Module Macro Tests =====
+
+#[test]
+fn macro_import_basic() {
+    let val = eval_with_virtual_modules(
+        r#"
+(import "./macros.mar" as m)
+(m/when #t 42)
+"#,
+        "test.mar",
+        vec![
+            ("macros.mar", r#"
+(defmacro when (cond body)
+  `(if ,cond ,body nil))
+(defmacro unless (cond body)
+  `(if ,cond nil ,body))
+"#),
+        ],
+    )
+    .expect("eval failed");
+    assert_eq!(val.as_number(), Some(42.0));
+}
+
+#[test]
+fn macro_import_hygiene() {
+    // Imported macro should maintain hygiene in the importing file
+    let val = eval_with_virtual_modules(
+        r#"
+(import "./macros.mar" as m)
+(let ((tmp 42))
+  (m/my-or #f tmp))
+"#,
+        "test.mar",
+        vec![
+            ("macros.mar", r#"
+(defmacro my-or (a b)
+  `(let ((tmp ,a))
+     (if tmp tmp ,b)))
+"#),
+        ],
+    )
+    .expect("eval failed");
+    assert_eq!(val.as_number(), Some(42.0));
+}
+
+#[test]
+fn macro_import_chain() {
+    // Module A defines macro, module B imports A and defines derived macro, file imports B
+    let val = eval_with_virtual_modules(
+        r#"
+(import "./b.mar" as b)
+(b/when-true 42)
+"#,
+        "test.mar",
+        vec![
+            ("a.mar", r#"
+(defmacro when (cond body)
+  `(if ,cond ,body nil))
+"#),
+            ("b.mar", r#"
+(import "./a.mar" as a)
+(defmacro when-true (body)
+  `(a/when #t ,body))
+"#),
+        ],
+    )
+    .expect("eval failed");
+    assert_eq!(val.as_number(), Some(42.0));
+}
+
+// ===== Error Cases =====
+
+#[test]
+fn defmacro_expansion_error() {
+    // Macro transformer that calls error should produce an expansion-time error
+    let interner = Interner::new();
+    let tokens = lex(r#"
+(defmacro bad-macro (x)
+  (error "macro went wrong"))
+(bad-macro 1)
+"#, &interner).unwrap();
+    let exprs = parse(&tokens).unwrap();
+    let mut expander = MacroExpander::new(&interner);
+    let result = expander.expand_all(exprs);
+    assert!(result.is_err());
+}
+
+#[test]
+fn defmacro_result_not_ast() {
+    // If macro returns a non-convertible value, should error
+    let interner = Interner::new();
+    let tokens = lex(r#"
+(defmacro bad-macro (x)
+  (lambda (y) y))
+(bad-macro 1)
+"#, &interner).unwrap();
+    let exprs = parse(&tokens).unwrap();
+    let mut expander = MacroExpander::new(&interner);
+    let result = expander.expand_all(exprs);
+    assert!(result.is_err());
+}
+
+#[test]
+fn defmacro_arity_error() {
+    // Calling macro transformer with wrong arity
+    let interner = Interner::new();
+    let tokens = lex(r#"
+(defmacro needs-two (a b)
+  `(+ ,a ,b))
+(needs-two 1)
+"#, &interner).unwrap();
+    let exprs = parse(&tokens).unwrap();
+    let mut expander = MacroExpander::new(&interner);
+    let result = expander.expand_all(exprs);
+    assert!(result.is_err());
 }

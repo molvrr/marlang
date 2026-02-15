@@ -1,6 +1,4 @@
 ; Result type and utilities
-; Result represents either success (Ok) or failure (Err)
-
 (data (Result e a) (Err e) (Ok a))
 
 ; map : (-> (-> a b) (Result e a) (Result e b))

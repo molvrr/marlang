@@ -24,7 +24,7 @@ Tests are in `spec/` directory using bun:test.
 
 ## Rust Port
 
-The Rust port lives in `port/` with a Cargo workspace. Phases 1-7c complete (lexer, parser, type system, bytecode compiler, VM execution, modules, FFI, CLI, single-threaded scheduler, multi-threaded scheduler, async IO).
+The Rust port lives in `port/` with a Cargo workspace. Phases 1-8 complete (lexer, parser, type system, bytecode compiler, VM execution, modules, FFI, CLI, single-threaded scheduler, multi-threaded scheduler, async IO, macros, prelude).
 
 ### Rust CLI
 
@@ -47,13 +47,24 @@ cargo run -p marlang-cli -- repl                   # Interactive REPL
 cargo test --workspace                # Run all Rust tests
 cargo test -p marlang-core            # Core: lexer + parser (75 tests)
 cargo test -p marlang-types           # Type system (81 tests)
-cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI + scheduler (271 tests)
+cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI + scheduler + macros (305 tests)
 ```
+
+### Running .mar Programs
+
+When running `.mar` files to verify changes, **always test both with and without type checking**:
+
+```bash
+cargo run -p marlang-cli -- run file.mar                # With type checking
+cargo run -p marlang-cli -- run file.mar --no-typecheck  # Without type checking
+```
+
+The type checker and the VM have separate code paths (macro expansion fallbacks, variable/constructor resolution, etc.), so a program can succeed in one mode but fail in the other.
 
 ### Rust Port Structure (`port/crates/`)
 - **`core/`** (`marlang-core`) — `span.rs`, `intern.rs`, `ast.rs`, `lexer.rs`, `parser.rs`
 - **`types/`** (`marlang-types`) — `ast.rs`, `env.rs`, `unify.rs`, `infer.rs`, `builtins.rs`, `checker.rs`, `errors.rs`
-- **`vm/`** (`marlang-vm`) — `bytecode.rs`, `value.rs`, `object.rs`, `compiler.rs`, `vm.rs`, `builtins.rs`, `debug.rs`, `errors.rs`, `modules.rs`, `ffi.rs`, `scheduler.rs`, `runtime.rs`
+- **`vm/`** (`marlang-vm`) — `bytecode.rs`, `value.rs`, `object.rs`, `compiler.rs`, `vm.rs`, `builtins.rs`, `debug.rs`, `errors.rs`, `modules.rs`, `ffi.rs`, `scheduler.rs`, `runtime.rs`, `expand.rs`
 - **`cli/`** (`marlang-cli`) — `main.rs` (clap-based CLI with run, repl, typecheck, disasm)
 
 ## Project Structure
@@ -103,9 +114,11 @@ web/          - Web playground
 
 ### Standard Library
 Located in `stdlib/`:
+- `prelude.mar` - Auto-loaded prelude: data types (Option, List, Pair, Result), `when` macro, utility functions (not, cons, car, cdr, append)
 - `option.mar` - Option type utilities (map, flat-map, unwrap-or, etc.)
 - `result.mar` - Result type and utilities (Ok, Err, map, flat-map, etc.)
 - `io.mar` - IO effect and operations (print, println, read-line, read-file, write-file)
+- `list.mar` - List utilities (foldl, foldr, map, filter, zip, etc.)
 
 ### Special Forms
 Handled in `interpreter.ts`:
@@ -128,12 +141,17 @@ Effect operations use arrow type syntax:
 
 ### Built-in Functions
 Defined in `interpreter.ts` builtins array (tree-walker) and `builtins.ts` (VM):
-- Arithmetic: `+`, `-`, `*`, `/`
+- Arithmetic: `+`, `-`, `*`, `/`, `negate`
 - Comparison: `<`, `>`, `=`, `<=`, `>=`
 - Lists: `list`
+- Strings: `show`, `string-length`, `string-append`, `number->string`, `string->number`
 - FFI: `ffi-open`, `ffi-call`, `ffi-close` (both tree-walker and VM)
 - Structs: `ffi-struct`, `struct-new`, `struct-get`, `struct-set` (both tree-walker and VM)
+- Macros: `make-symbol`, `gensym`, `symbol->string`, `string->symbol` (VM only)
+- Type predicates: `symbol?`, `pair?`, `nil?`, `number?`, `string?`, `list?` (VM only)
 - Environment: `env-bindings`, `env-get`, `env-parent` (tree-walker only)
+
+Note: In the Rust port, ADT constructors (None, Some, Nil, Cons, MkPair, Ok, Err) and utility functions (not, cons, car, cdr, append) are defined in `stdlib/prelude.mar`, not as Rust builtins. The prelude is auto-loaded before every program.
 
 ### Default IO Effect Handlers
 Both tree-walker and VM provide built-in handlers for IO effects (no `handle` block needed):

@@ -10,6 +10,10 @@ pub enum Token {
     Identifier(Symbol, Span),
     Number(f64, bool, Span), // (value, is_float, span)
     String(Arc<str>, Span),
+    Quote(Symbol, Span),
+    Quasiquote(Symbol, Span),
+    Unquote(Symbol, Span),
+    UnquoteSplicing(Symbol, Span),
     Eof(Span),
 }
 
@@ -21,6 +25,10 @@ impl Token {
             | Token::Identifier(_, s)
             | Token::Number(_, _, s)
             | Token::String(_, s)
+            | Token::Quote(_, s)
+            | Token::Quasiquote(_, s)
+            | Token::Unquote(_, s)
+            | Token::UnquoteSplicing(_, s)
             | Token::Eof(s) => *s,
         }
     }
@@ -117,6 +125,30 @@ impl<'a> Lexer<'a> {
                 let start = self.pos;
                 self.advance();
                 Ok(Token::RParen(self.span_from(start)))
+            }
+            b'\'' => {
+                let start = self.pos;
+                self.advance();
+                let sym = self.interner.intern("quote");
+                Ok(Token::Quote(sym, self.span_from(start)))
+            }
+            b'`' => {
+                let start = self.pos;
+                self.advance();
+                let sym = self.interner.intern("quasiquote");
+                Ok(Token::Quasiquote(sym, self.span_from(start)))
+            }
+            b',' => {
+                let start = self.pos;
+                self.advance();
+                if self.peek() == Some(b'@') {
+                    self.advance();
+                    let sym = self.interner.intern("unquote-splicing");
+                    Ok(Token::UnquoteSplicing(sym, self.span_from(start)))
+                } else {
+                    let sym = self.interner.intern("unquote");
+                    Ok(Token::Unquote(sym, self.span_from(start)))
+                }
             }
             b'"' => self.lex_string(),
             b'0'..=b'9' => self.lex_number_or_ident(),
@@ -299,6 +331,10 @@ mod tests {
                 Token::Identifier(_, _) => "identifier",
                 Token::Number(_, _, _) => "number",
                 Token::String(_, _) => "string",
+                Token::Quote(_, _) => "quote",
+                Token::Quasiquote(_, _) => "quasiquote",
+                Token::Unquote(_, _) => "unquote",
+                Token::UnquoteSplicing(_, _) => "unquote-splicing",
                 Token::Eof(_) => "eof",
             })
             .collect()

@@ -677,10 +677,23 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     ConstantValue::String(s) => match vm.globals.get(s.as_str()) {
                         Some(v) => vm.push(v.clone()),
                         None => {
-                            vm.frames[frame_idx].ip = ip;
-                            return Err(VMSignal::Error(
-                                vm.vm_error(format!("Undefined variable: {}", s), &vm.frames[frame_idx]),
-                            ));
+                            // Fallback: strip hygiene marks and retry
+                            let stripped = crate::expand::strip_all_marks(s);
+                            if stripped != s.as_str() {
+                                if let Some(v) = vm.globals.get(stripped) {
+                                    vm.push(v.clone());
+                                } else {
+                                    vm.frames[frame_idx].ip = ip;
+                                    return Err(VMSignal::Error(
+                                        vm.vm_error(format!("Undefined variable: {}", stripped), &vm.frames[frame_idx]),
+                                    ));
+                                }
+                            } else {
+                                vm.frames[frame_idx].ip = ip;
+                                return Err(VMSignal::Error(
+                                    vm.vm_error(format!("Undefined variable: {}", s), &vm.frames[frame_idx]),
+                                ));
+                            }
                         }
                     },
                     _ => {

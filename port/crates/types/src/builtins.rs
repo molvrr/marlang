@@ -126,61 +126,6 @@ fn ord_compare() -> TypeScheme {
     )
 }
 
-// ===== Built-in Data Types =====
-
-fn option_data_type() -> DataType {
-    DataType {
-        name: "Option".into(),
-        type_params: vec!["a".into()],
-        constructors: vec![
-            Constructor {
-                name: "None".into(),
-                params: vec![],
-                result_type: type_app(type_const("Option"), vec![type_var("a")]),
-            },
-            Constructor {
-                name: "Some".into(),
-                params: vec![type_var("a")],
-                result_type: type_app(type_const("Option"), vec![type_var("a")]),
-            },
-        ],
-    }
-}
-
-fn list_data_type() -> DataType {
-    DataType {
-        name: "List".into(),
-        type_params: vec!["a".into()],
-        constructors: vec![
-            Constructor {
-                name: "Nil".into(),
-                params: vec![],
-                result_type: type_app(type_const("List"), vec![type_var("a")]),
-            },
-            Constructor {
-                name: "Cons".into(),
-                params: vec![
-                    type_var("a"),
-                    type_app(type_const("List"), vec![type_var("a")]),
-                ],
-                result_type: type_app(type_const("List"), vec![type_var("a")]),
-            },
-        ],
-    }
-}
-
-fn pair_data_type() -> DataType {
-    DataType {
-        name: "Pair".into(),
-        type_params: vec!["a".into(), "b".into()],
-        constructors: vec![Constructor {
-            name: "MkPair".into(),
-            params: vec![type_var("a"), type_var("b")],
-            result_type: type_app(type_const("Pair"), vec![type_var("a"), type_var("b")]),
-        }],
-    }
-}
-
 // ===== Create Initial Type Environment =====
 
 pub fn create_builtin_env() -> TypeEnv {
@@ -191,62 +136,6 @@ pub fn create_builtin_env() -> TypeEnv {
     env = define_class(&env, eq_class());
     env = define_class(&env, ord_class());
     env = define_class(&env, show_class());
-
-    // Add built-in data types
-    env = define_data_type(&env, option_data_type());
-    env = define_data_type(&env, list_data_type());
-    env = define_data_type(&env, pair_data_type());
-
-    // Add constructor types
-    env = extend_env(
-        &env,
-        "None",
-        polytype(
-            vec!["a"],
-            type_app(type_const("Option"), vec![type_var("a")]),
-        ),
-    );
-    env = extend_env(
-        &env,
-        "Some",
-        polytype(
-            vec!["a"],
-            type_arrow(
-                vec![type_var("a")],
-                type_app(type_const("Option"), vec![type_var("a")]),
-            ),
-        ),
-    );
-    env = extend_env(
-        &env,
-        "Nil",
-        polytype(vec!["a"], type_app(type_const("List"), vec![type_var("a")])),
-    );
-    env = extend_env(
-        &env,
-        "Cons",
-        polytype(
-            vec!["a"],
-            type_arrow(
-                vec![
-                    type_var("a"),
-                    type_app(type_const("List"), vec![type_var("a")]),
-                ],
-                type_app(type_const("List"), vec![type_var("a")]),
-            ),
-        ),
-    );
-    env = extend_env(
-        &env,
-        "MkPair",
-        polytype(
-            vec!["a", "b"],
-            type_arrow(
-                vec![type_var("a"), type_var("b")],
-                type_app(type_const("Pair"), vec![type_var("a"), type_var("b")]),
-            ),
-        ),
-    );
 
     // Arithmetic operators
     env = extend_env(&env, "+", num_bin_op());
@@ -734,6 +623,37 @@ pub fn create_builtin_env() -> TypeEnv {
         ),
     );
 
+    // Macro/quote builtins
+    env = extend_env(
+        &env,
+        "make-symbol",
+        monotype(type_arrow(vec![t_string()], t_symbol())),
+    );
+    env = extend_env(
+        &env,
+        "gensym",
+        monotype(type_arrow(vec![], t_symbol())),
+    );
+    env = extend_env(
+        &env,
+        "symbol->string",
+        monotype(type_arrow(vec![t_symbol()], t_string())),
+    );
+    env = extend_env(
+        &env,
+        "string->symbol",
+        monotype(type_arrow(vec![t_string()], t_symbol())),
+    );
+    // Type predicates — polymorphic, return Bool
+    for name in &[
+        "symbol?", "pair?", "nil?", "number?", "string?", "list?",
+    ] {
+        env = extend_env(
+            &env,
+            name,
+            polytype(vec!["a"], type_arrow(vec![type_var("a")], t_bool())),
+        );
+    }
     env
 }
 

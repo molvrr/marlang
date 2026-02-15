@@ -9,6 +9,7 @@ use marlang_core::parser::parse;
 use crate::builtins::register_builtins;
 use crate::compiler::compile_expr_with_context;
 use crate::errors::VMError;
+use crate::expand::MacroExpander;
 use crate::value::Value;
 use crate::vm::{interpret, VM};
 
@@ -32,8 +33,8 @@ enum ImportForm {
 
 pub struct ModuleLoader {
     cache: HashMap<PathBuf, ModuleState>,
-    virtual_modules: HashMap<PathBuf, String>,
-    stdlib_dir: Option<PathBuf>,
+    pub(crate) virtual_modules: HashMap<PathBuf, String>,
+    pub(crate) stdlib_dir: Option<PathBuf>,
 }
 
 impl ModuleLoader {
@@ -129,7 +130,13 @@ impl ModuleLoader {
     }
 }
 
-// (no static builtin_names — we snapshot globals before/after module execution)
+// --- ExpandedProgram ---
+
+/// Result of macro expansion, including prelude expressions prepended to user code.
+pub struct ExpandedProgram {
+    pub exprs: Vec<Expr>,
+    pub prelude_count: usize,
+}
 
 // --- run_program ---
 
@@ -150,19 +157,78 @@ pub fn run_program(
         return Ok(Value::nil());
     }
 
-    let mut known_constructors: HashSet<Symbol> =
-        ["None", "Some", "Nil", "Cons", "MkPair", "Ok", "Err"]
-            .iter()
-            .map(|s| interner.intern(s))
-            .collect();
+    // Macro expansion
+    let expanded = expand_macros(interner, &exprs, file_path, loader)?;
 
+    run_program_from_exprs(vm, &expanded.exprs, expanded.prelude_count, file_path, loader, interner)
+}
+
+/// Expand macros in a list of expressions.
+/// Public so the CLI can expand before type checking.
+/// Returns an ExpandedProgram with prelude expressions prepended.
+pub fn expand_macros(
+    interner: &Interner,
+    exprs: &[Expr],
+    file_path: Option<&Path>,
+    loader: &ModuleLoader,
+) -> Result<ExpandedProgram, VMError> {
+    let mut expander = MacroExpander::new(interner);
+    if let Some(fp) = file_path {
+        expander = expander.with_file_path(fp);
+    }
+    if let Some(ref stdlib) = loader.stdlib_dir {
+        expander = expander.with_stdlib_dir(stdlib.clone());
+    }
+    if !loader.virtual_modules.is_empty() {
+        expander = expander.with_virtual_modules(loader.virtual_modules.clone());
+    }
+
+    // Load prelude (data types, macros, utility functions)
+    let prelude_exprs = expander.load_prelude();
+    let prelude_count = prelude_exprs.len();
+
+    // Run prelude in expansion VM so quasiquote has access to Nil, Cons, etc.
+    expander.run_prelude_in_vm(&prelude_exprs);
+
+    // Expand user expressions
+    let user_exprs = expander.expand_all(exprs.to_vec())
+        .map_err(|e| VMError::runtime(format!("{}", e)))?;
+
+    // Concatenate: prelude first, then user code
+    let mut all_exprs = prelude_exprs;
+    all_exprs.extend(user_exprs);
+
+    Ok(ExpandedProgram {
+        exprs: all_exprs,
+        prelude_count,
+    })
+}
+
+/// Run pre-expanded expressions. Use this when macro expansion and type checking
+/// have already been done (e.g. by the CLI).
+/// `prelude_count` indicates how many leading expressions are from the prelude;
+/// after executing them, dirty_globals is cleared so prelude definitions don't
+/// leak as module exports.
+pub fn run_program_from_exprs(
+    vm: &mut VM,
+    exprs: &[Expr],
+    prelude_count: usize,
+    file_path: Option<&Path>,
+    loader: &mut ModuleLoader,
+    interner: &Interner,
+) -> Result<Value, VMError> {
+    if exprs.is_empty() {
+        return Ok(Value::nil());
+    }
+
+    let mut known_constructors: HashSet<Symbol> = HashSet::new();
     let mut known_effect_ops: HashMap<Symbol, Symbol> = HashMap::new();
     let mut last_value = Value::nil();
 
     let import_sym = interner.intern("import");
     let as_sym = interner.intern("as");
 
-    for expr in &exprs {
+    for (i, expr) in exprs.iter().enumerate() {
         // Check if this is an import expression
         if is_import(expr, import_sym) {
             let file = file_path
@@ -190,6 +256,14 @@ pub fn run_program(
 
             // Execute
             last_value = interpret(vm, &result.chunk)?;
+        }
+
+        // After prelude expressions, clear dirty_globals so prelude
+        // definitions don't leak as module exports
+        if i + 1 == prelude_count {
+            if let Some(ref mut dirty) = vm.dirty_globals {
+                dirty.clear();
+            }
         }
     }
 

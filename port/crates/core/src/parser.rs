@@ -59,6 +59,16 @@ impl<'t> Parser<'t> {
                 message: "Unexpected ')'".to_string(),
                 span: *span,
             }),
+            Token::Quote(sym, span) | Token::Quasiquote(sym, span)
+            | Token::Unquote(sym, span) | Token::UnquoteSplicing(sym, span) => {
+                let sym = *sym;
+                let start_span = *span;
+                self.advance();
+                let inner = self.parse_expr()?;
+                let end_span = inner.span();
+                let full_span = Span::new(start_span.start, end_span.end);
+                Ok(Self::build_sugar_list(sym, inner, full_span))
+            }
             Token::Number(value, is_float, span) => {
                 let expr = Expr::Atom(LispValue::Number(*value, *is_float), *span);
                 self.advance();
@@ -75,6 +85,20 @@ impl<'t> Parser<'t> {
                 Ok(expr)
             }
             Token::Eof(span) => Ok(Expr::Nil(*span)),
+        }
+    }
+
+    /// Build a 2-element cons list `(sym inner)` for reader sugar.
+    fn build_sugar_list(sym: crate::intern::Symbol, inner: Expr, span: Span) -> Expr {
+        let sym_atom = Expr::Atom(LispValue::Symbol(sym), span);
+        Expr::List {
+            head: Box::new(sym_atom),
+            tail: Box::new(Expr::List {
+                head: Box::new(inner),
+                tail: Box::new(Expr::Nil(span)),
+                span,
+            }),
+            span,
         }
     }
 

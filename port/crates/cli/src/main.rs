@@ -15,7 +15,7 @@ use marlang_types::errors::format_error;
 use marlang_vm::builtins::register_builtins;
 use marlang_vm::compiler::compile_program;
 use marlang_vm::debug::disassemble;
-use marlang_vm::modules::{run_program, ModuleLoader};
+use marlang_vm::modules::{expand_macros, run_program, run_program_from_exprs, ModuleLoader};
 use marlang_vm::value::format_value;
 use marlang_vm::vm::VM;
 
@@ -74,8 +74,9 @@ fn cmd_run(file: &PathBuf, no_typecheck: bool) -> ExitCode {
     };
 
     let interner = Interner::new();
+    let loader = ModuleLoader::new();
 
-    // Parse first to get AST for type checking
+    // Parse
     let tokens = match lex(&source, &interner) {
         Ok(t) => t,
         Err(e) => {
@@ -92,9 +93,18 @@ fn cmd_run(file: &PathBuf, no_typecheck: bool) -> ExitCode {
         }
     };
 
-    // Type check if not disabled
+    // Macro expansion (before type checking)
+    let expanded = match expand_macros(&interner, &exprs, Some(file.as_path()), &loader) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Macro expansion error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Type check the expanded AST
     if !no_typecheck {
-        match type_check(&exprs, &interner) {
+        match type_check(&expanded.exprs, &interner) {
             TypeCheckResult::Ok { .. } => {}
             TypeCheckResult::Err { error } => {
                 eprintln!("Type error: {}", format_error(&error));
@@ -103,14 +113,15 @@ fn cmd_run(file: &PathBuf, no_typecheck: bool) -> ExitCode {
         }
     }
 
-    // Run with module support
+    // Run from expanded expressions
     let mut vm = VM::new();
     register_builtins(&mut vm);
     let mut loader = ModuleLoader::new();
 
-    match run_program(
+    match run_program_from_exprs(
         &mut vm,
-        &source,
+        &expanded.exprs,
+        expanded.prelude_count,
         Some(file.as_path()),
         &mut loader,
         &interner,
@@ -136,6 +147,7 @@ fn cmd_typecheck(file: &PathBuf, verbose: bool) -> ExitCode {
     };
 
     let interner = Interner::new();
+    let loader = ModuleLoader::new();
 
     let tokens = match lex(&source, &interner) {
         Ok(t) => t,
@@ -153,7 +165,16 @@ fn cmd_typecheck(file: &PathBuf, verbose: bool) -> ExitCode {
         }
     };
 
-    match type_check(&exprs, &interner) {
+    // Macro expansion before type checking
+    let expanded = match expand_macros(&interner, &exprs, Some(file.as_path()), &loader) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Macro expansion error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match type_check(&expanded.exprs, &interner) {
         TypeCheckResult::Ok { types, .. } => {
             if verbose {
                 for (i, ty) in types.iter().enumerate() {
@@ -180,6 +201,7 @@ fn cmd_disasm(file: &PathBuf) -> ExitCode {
     };
 
     let interner = Interner::new();
+    let loader = ModuleLoader::new();
 
     let tokens = match lex(&source, &interner) {
         Ok(t) => t,
@@ -197,7 +219,16 @@ fn cmd_disasm(file: &PathBuf) -> ExitCode {
         }
     };
 
-    let chunk = match compile_program(&exprs, &interner) {
+    // Macro expansion before compilation
+    let expanded = match expand_macros(&interner, &exprs, Some(file.as_path()), &loader) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Macro expansion error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let chunk = match compile_program(&expanded.exprs, &interner) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Compile error: {}", e);

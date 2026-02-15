@@ -57,6 +57,11 @@ struct KnownSymbols {
     minus: Symbol,
     foreign: Symbol,
     ffi_lib: Symbol,
+    quote: Symbol,
+    quasiquote: Symbol,
+    unquote: Symbol,
+    unquote_splicing: Symbol,
+    defmacro: Symbol,
 }
 
 impl KnownSymbols {
@@ -90,6 +95,11 @@ impl KnownSymbols {
             minus: interner.intern("-"),
             foreign: interner.intern("foreign"),
             ffi_lib: interner.intern("foreign-lib"),
+            quote: interner.intern("quote"),
+            quasiquote: interner.intern("quasiquote"),
+            unquote: interner.intern("unquote"),
+            unquote_splicing: interner.intern("unquote-splicing"),
+            defmacro: interner.intern("defmacro"),
         }
     }
 }
@@ -389,6 +399,31 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    /// Check if a symbol is a known constructor, with fallback to stripped name.
+    fn is_known_constructor(&self, sym: Symbol) -> bool {
+        if self.known_constructors.contains(&sym) {
+            return true;
+        }
+        // Fallback: strip hygiene marks and check again
+        let name = self.interner.resolve(sym);
+        let stripped = crate::expand::strip_all_marks(name);
+        if stripped != name {
+            let stripped_sym = self.interner.intern(stripped);
+            return self.known_constructors.contains(&stripped_sym);
+        }
+        false
+    }
+
+    /// Resolve a constructor name, stripping marks if needed to match the actual tag.
+    fn resolve_constructor_name(&self, sym: Symbol) -> String {
+        let name = self.interner.resolve(sym);
+        if self.known_constructors.contains(&sym) {
+            return name.to_string();
+        }
+        let stripped = crate::expand::strip_all_marks(name);
+        stripped.to_string()
+    }
+
     fn get_define_name(&self, expr: &Expr) -> Result<Symbol, CompileError> {
         match expr {
             Expr::Atom(LispValue::Symbol(sym), _) => Ok(*sym),
@@ -490,6 +525,14 @@ impl<'a> Compiler<'a> {
                         ));
                     } else if sym == ks.ffi_lib {
                         return self.compile_ffi_lib(&elements, line);
+                    } else if sym == ks.quote {
+                        return self.compile_quote(&elements, line);
+                    } else if sym == ks.quasiquote {
+                        return self.compile_quasiquote(&elements, line);
+                    } else if sym == ks.defmacro {
+                        // defmacro should be consumed by the macro expander; at compile time, emit nil
+                        self.emit_constant(ConstantValue::Nil, line);
+                        return Ok(());
                     } else if sym == ks.class || sym == ks.instance || sym == ks.type_ || sym == ks.foreign {
                         self.emit_constant(ConstantValue::Nil, line);
                         return Ok(());
@@ -802,9 +845,9 @@ impl<'a> Compiler<'a> {
 
             // Variable or nullary constructor
             Expr::Atom(LispValue::Symbol(sym), _) => {
-                if self.known_constructors.contains(sym) {
-                    // Nullary constructor pattern
-                    let name_str = self.interner.resolve(*sym).to_string();
+                if self.is_known_constructor(*sym) {
+                    // Nullary constructor pattern — use stripped name for the tag
+                    let name_str = self.resolve_constructor_name(*sym);
                     let name_idx = self.add_constant(ConstantValue::String(name_str));
                     let idx = self.emit_match_tag(name_idx, line);
                     self.emit(Op::Pop, line);
@@ -880,7 +923,7 @@ impl<'a> Compiler<'a> {
                     CompileError::new("Pattern constructor must be a symbol", line)
                 })?;
 
-                let ctor_name = self.interner.resolve(ctor_sym).to_string();
+                let ctor_name = self.resolve_constructor_name(ctor_sym);
                 let arg_patterns = &pattern_elements[1..];
 
                 // MATCH_TAG
@@ -1235,6 +1278,116 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    // --- Quote and Quasiquote ---
+
+    fn compile_quote(&mut self, elements: &[&Expr], line: u32) -> Result<(), CompileError> {
+        if elements.len() != 2 {
+            return Err(CompileError::new("quote expects exactly 1 argument", line));
+        }
+        self.compile_quoted_datum(elements[1], line)
+    }
+
+    fn compile_quoted_datum(&mut self, expr: &Expr, line: u32) -> Result<(), CompileError> {
+        match expr {
+            Expr::Atom(LispValue::Number(n, _), _) => {
+                self.emit_constant(ConstantValue::Number(*n), line);
+            }
+            Expr::Atom(LispValue::String(s), _) => {
+                self.emit_constant(ConstantValue::String(s.to_string()), line);
+            }
+            Expr::Atom(LispValue::Symbol(sym), _) => {
+                // Push make-symbol global, push name string, call with 1 arg
+                let make_sym_name = self.add_constant(ConstantValue::String("make-symbol".to_string()));
+                self.emit_op(Op::PushGlobal, line, make_sym_name);
+                let name_str = self.interner.resolve(*sym).to_string();
+                self.emit_constant(ConstantValue::String(name_str), line);
+                self.emit_op(Op::Call, line, 1);
+            }
+            Expr::Nil(_) => {
+                // Nil ADT value
+                let tag_idx = self.add_constant(ConstantValue::String("Nil".to_string()));
+                self.emit_op2(Op::Construct, line, tag_idx, 0);
+            }
+            Expr::List { head, tail, .. } => {
+                self.compile_quoted_datum(head, line)?;
+                self.compile_quoted_datum(tail, line)?;
+                let tag_idx = self.add_constant(ConstantValue::String("Cons".to_string()));
+                self.emit_op2(Op::Construct, line, tag_idx, 2);
+            }
+        }
+        Ok(())
+    }
+
+    fn compile_quasiquote(&mut self, elements: &[&Expr], line: u32) -> Result<(), CompileError> {
+        if elements.len() != 2 {
+            return Err(CompileError::new("quasiquote expects exactly 1 argument", line));
+        }
+        self.compile_qq(elements[1], line)
+    }
+
+    fn compile_qq(&mut self, expr: &Expr, line: u32) -> Result<(), CompileError> {
+        match expr {
+            Expr::List { .. } => {
+                let elems = ast::list_to_array(expr);
+                // Check if this is (unquote x)
+                if !elems.is_empty() {
+                    if let Some(sym) = Self::get_symbol(elems[0]) {
+                        if sym == self.known_symbols.unquote {
+                            if elems.len() != 2 {
+                                return Err(CompileError::new("unquote expects 1 argument", line));
+                            }
+                            return self.compile_expr(elems[1], false);
+                        }
+                    }
+                }
+                // It's a list — walk the cons structure
+                self.compile_qq_list(expr, line)
+            }
+            _ => self.compile_quoted_datum(expr, line),
+        }
+    }
+
+    fn compile_qq_list(&mut self, expr: &Expr, line: u32) -> Result<(), CompileError> {
+        match expr {
+            Expr::Nil(_) => {
+                let tag_idx = self.add_constant(ConstantValue::String("Nil".to_string()));
+                self.emit_op2(Op::Construct, line, tag_idx, 0);
+            }
+            Expr::List { head, tail, .. } => {
+                // Check if head is (unquote-splicing x)
+                if let Expr::List { .. } = head.as_ref() {
+                    let head_elems = ast::list_to_array(head);
+                    if !head_elems.is_empty() {
+                        if let Some(sym) = Self::get_symbol(head_elems[0]) {
+                            if sym == self.known_symbols.unquote_splicing {
+                                if head_elems.len() != 2 {
+                                    return Err(CompileError::new("unquote-splicing expects 1 argument", line));
+                                }
+                                // Push append global, compile spliced expr, compile rest, call append
+                                let append_name = self.add_constant(ConstantValue::String("append".to_string()));
+                                self.emit_op(Op::PushGlobal, line, append_name);
+                                self.compile_expr(head_elems[1], false)?;
+                                self.compile_qq_list(tail, line)?;
+                                self.emit_op(Op::Call, line, 2);
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                // Normal element: compile_qq(head), compile_qq_list(tail), Construct Cons
+                self.compile_qq(head, line)?;
+                self.compile_qq_list(tail, line)?;
+                let tag_idx = self.add_constant(ConstantValue::String("Cons".to_string()));
+                self.emit_op2(Op::Construct, line, tag_idx, 2);
+            }
+            _ => {
+                // Improper tail — just quote it
+                self.compile_quoted_datum(expr, line)?;
+            }
+        }
+        Ok(())
+    }
+
     fn compile_ffi_lib(&mut self, elements: &[&Expr], line: u32) -> Result<(), CompileError> {
         // (foreign-lib <name> <path> (<FnName> (-> <Types>...)) ...)
         if elements.len() < 3 {
@@ -1445,12 +1598,7 @@ pub fn compile_expr_with_context(
 /// Compile a single expression to bytecode.
 pub fn compile(expr: &Expr, interner: &Interner) -> Result<Chunk, CompileError> {
     let ks = KnownSymbols::new(interner);
-    let default_ctors: HashSet<Symbol> = [
-        "None", "Some", "Nil", "Cons", "MkPair", "Ok", "Err",
-    ]
-    .iter()
-    .map(|s| interner.intern(s))
-    .collect();
+    let default_ctors: HashSet<Symbol> = HashSet::new();
 
     let mut compiler = Compiler::new("<script>", interner, &ks, None, default_ctors, HashMap::new());
     compiler.compile_expr(expr, false)?;
@@ -1462,12 +1610,7 @@ pub fn compile(expr: &Expr, interner: &Interner) -> Result<Chunk, CompileError> 
 /// Compile a sequence of top-level expressions to bytecode.
 pub fn compile_program(exprs: &[Expr], interner: &Interner) -> Result<Chunk, CompileError> {
     let ks = KnownSymbols::new(interner);
-    let default_ctors: HashSet<Symbol> = [
-        "None", "Some", "Nil", "Cons", "MkPair", "Ok", "Err",
-    ]
-    .iter()
-    .map(|s| interner.intern(s))
-    .collect();
+    let default_ctors: HashSet<Symbol> = HashSet::new();
 
     let mut compiler = Compiler::new("<script>", interner, &ks, None, default_ctors, HashMap::new());
 

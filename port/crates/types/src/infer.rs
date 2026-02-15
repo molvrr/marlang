@@ -9,6 +9,23 @@ use crate::env::*;
 use crate::errors::TypeError;
 use crate::unify::*;
 
+// ===== Hygiene mark stripping =====
+
+/// Strip all hygiene marks (~N suffixes) from a name for fallback lookups.
+fn strip_marks(name: &str) -> &str {
+    match name.find('~') {
+        Some(pos) => {
+            let rest = &name[pos + 1..];
+            if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit() || b == b'~') {
+                &name[..pos]
+            } else {
+                name
+            }
+        }
+        None => name,
+    }
+}
+
 // ===== Inference Result =====
 
 pub struct InferResult {
@@ -296,7 +313,11 @@ pub fn infer_expr(
                     "cond" => return infer_cond(env, &elements, interner),
                     "match" => return infer_match(env, &elements, interner),
                     "data" => return infer_data_def(env, &elements, interner),
-                    "class" | "instance" | "type" | "foreign" | "foreign-lib" => return Ok(pure_result(t_unit())),
+                    "class" | "instance" | "type" | "foreign" | "foreign-lib" | "defmacro" => return Ok(pure_result(t_unit())),
+                    "quote" | "quasiquote" => {
+                        let tv = fresh_type_var();
+                        return Ok(pure_result(tv));
+                    }
                     "effect" => return infer_effect_def(env, &elements, interner),
                     "perform" => return infer_perform(env, &elements, interner),
                     "handle" => return infer_handle(env, &elements, interner),
@@ -328,10 +349,16 @@ fn infer_atom(
             if name == "#t" || name == "#f" {
                 return Ok(pure_result(t_bool()));
             }
-            let scheme = lookup_var(env, name).ok_or(TypeError::UndefinedVariable {
-                name: name.to_string(),
-                span: None,
-            })?;
+            let scheme = lookup_var(env, name)
+                .or_else(|| {
+                    // Fallback: strip hygiene marks from macro expansion
+                    let stripped = strip_marks(name);
+                    if stripped != name { lookup_var(env, stripped) } else { None }
+                })
+                .ok_or(TypeError::UndefinedVariable {
+                    name: strip_marks(name).to_string(),
+                    span: None,
+                })?;
             let (ty, constraints) = instantiate(&scheme);
             Ok(pure_result_with(ty, empty_subst(), constraints))
         }
@@ -946,10 +973,15 @@ fn infer_pattern(
             })
         }
         Pattern::Constructor { name, args } => {
-            let (data_type, constructor) = lookup_constructor(env, name).ok_or(TypeError::UndefinedConstructor {
-                name: name.clone(),
-                span: None,
-            })?;
+            let (data_type, constructor) = lookup_constructor(env, name)
+                .or_else(|| {
+                    let stripped = strip_marks(name);
+                    if stripped != name { lookup_constructor(env, stripped) } else { None }
+                })
+                .ok_or(TypeError::UndefinedConstructor {
+                    name: strip_marks(name).to_string(),
+                    span: None,
+                })?;
 
             if args.len() != constructor.params.len() {
                 return Err(TypeError::ArityMismatch {

@@ -234,6 +234,9 @@ pub fn t_ffi_struct() -> Type {
 pub fn t_ffi_pointer() -> Type {
     type_const("FFIPointer")
 }
+pub fn t_symbol() -> Type {
+    type_const("Symbol")
+}
 pub fn t_pid() -> Type {
     type_const("Pid")
 }

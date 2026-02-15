@@ -1,5 +1,5 @@
-; Option utilities for the built-in Option type
-; Option is already defined as: (data (Option a) None (Some a))
+; Option utilities
+(data (Option a) None (Some a))
 
 ; map : (-> (-> a b) (Option a) (Option b))
 ; Apply a function to the value inside Some, or return None

@@ -10,57 +10,6 @@ pub fn register_builtins(vm: &mut VM) {
     vm.globals.insert("#t".to_string(), Value::boolean(true));
     vm.globals.insert("#f".to_string(), Value::boolean(false));
 
-    // --- Built-in ADT constructors ---
-    vm.globals.insert(
-        "None".to_string(),
-        Value::object(VMObject::AdtValue {
-            tag: "None".to_string(),
-            fields: vec![],
-        }),
-    );
-    vm.globals.insert(
-        "Some".to_string(),
-        Value::object(VMObject::AdtConstructor {
-            name: "Some".to_string(),
-            arity: 1,
-        }),
-    );
-    vm.globals.insert(
-        "Nil".to_string(),
-        Value::object(VMObject::AdtValue {
-            tag: "Nil".to_string(),
-            fields: vec![],
-        }),
-    );
-    vm.globals.insert(
-        "Cons".to_string(),
-        Value::object(VMObject::AdtConstructor {
-            name: "Cons".to_string(),
-            arity: 2,
-        }),
-    );
-    vm.globals.insert(
-        "MkPair".to_string(),
-        Value::object(VMObject::AdtConstructor {
-            name: "MkPair".to_string(),
-            arity: 2,
-        }),
-    );
-    vm.globals.insert(
-        "Ok".to_string(),
-        Value::object(VMObject::AdtConstructor {
-            name: "Ok".to_string(),
-            arity: 1,
-        }),
-    );
-    vm.globals.insert(
-        "Err".to_string(),
-        Value::object(VMObject::AdtConstructor {
-            name: "Err".to_string(),
-            arity: 1,
-        }),
-    );
-
     // --- Built-in functions ---
 
     fn builtin(vm: &mut VM, name: &str, func: fn(&mut VM, &[Value]) -> Result<Value, VMError>) {
@@ -220,14 +169,6 @@ pub fn register_builtins(vm: &mut VM) {
         Ok(Value::string(format_value(&args[0]).as_str()))
     });
 
-    // Not
-    builtin(vm, "not", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("not expects exactly 1 argument"));
-        }
-        Ok(Value::boolean(!args[0].is_truthy()))
-    });
-
     // String operations
     builtin(vm, "string-length", |_vm, args| {
         if args.len() != 1 {
@@ -277,6 +218,99 @@ pub fn register_builtins(vm: &mut VM) {
             Err(_) => Ok(Value::nil()),
         }
     });
+
+    // --- Symbol and list operations (for macro system) ---
+
+    builtin(vm, "make-symbol", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("make-symbol expects 1 argument"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("make-symbol expects a string"))?;
+        Ok(Value::symbol(s))
+    });
+
+    // Type predicates
+    builtin(vm, "symbol?", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("symbol? expects 1 argument"));
+        }
+        Ok(Value::boolean(matches!(args[0].as_object(), Some(VMObject::Symbol(_)))))
+    });
+
+    builtin(vm, "pair?", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("pair? expects 1 argument"));
+        }
+        Ok(Value::boolean(matches!(
+            args[0].as_object(),
+            Some(VMObject::AdtValue { tag, fields }) if tag == "Cons" && fields.len() == 2
+        )))
+    });
+
+    builtin(vm, "nil?", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("nil? expects 1 argument"));
+        }
+        let is_nil = args[0].is_nil() || matches!(
+            args[0].as_object(),
+            Some(VMObject::AdtValue { tag, fields }) if tag == "Nil" && fields.is_empty()
+        );
+        Ok(Value::boolean(is_nil))
+    });
+
+    builtin(vm, "number?", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("number? expects 1 argument"));
+        }
+        Ok(Value::boolean(args[0].is_number()))
+    });
+
+    builtin(vm, "string?", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("string? expects 1 argument"));
+        }
+        Ok(Value::boolean(args[0].as_string().is_some()))
+    });
+
+    builtin(vm, "list?", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("list? expects 1 argument"));
+        }
+        let is_list = args[0].is_nil()
+            || matches!(args[0].as_object(), Some(VMObject::AdtValue { tag, .. }) if tag == "Nil" || tag == "Cons");
+        Ok(Value::boolean(is_list))
+    });
+
+    builtin(vm, "symbol->string", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("symbol->string expects 1 argument"));
+        }
+        match args[0].as_object() {
+            Some(VMObject::Symbol(s)) => Ok(Value::string(s.as_str())),
+            _ => Err(VMError::runtime("symbol->string expects a symbol")),
+        }
+    });
+
+    builtin(vm, "string->symbol", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("string->symbol expects 1 argument"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string->symbol expects a string"))?;
+        Ok(Value::symbol(s))
+    });
+
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static GENSYM_COUNTER: AtomicU64 = AtomicU64::new(0);
+        builtin(vm, "gensym", |_vm, _args| {
+            let id = GENSYM_COUNTER.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::symbol(format!("__gensym_{}", id)))
+        });
+    }
 
     // Error
     builtin(vm, "error", |_vm, args| {

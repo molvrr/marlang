@@ -1,0 +1,22 @@
+; Prelude — auto-loaded into every Marlang program
+
+; --- Data Types ---
+(data (Option a) None (Some a))
+(data (List a) Nil (Cons a (List a)))
+(data (Pair a b) (MkPair a b))
+(data (Result e a) (Err e) (Ok a))
+
+; --- Macros ---
+(defmacro when (cond body)
+  `(if ,cond (begin ,body nil) nil))
+
+; --- Core Functions ---
+(define not (lambda (x) (if x #f #t)))
+(define cons (lambda (h t) (Cons h t)))
+(define car (lambda (l) (match l ((Cons h _) h) (Nil (error "car: empty list")))))
+(define cdr (lambda (l) (match l ((Cons _ t) t) (Nil (error "cdr: empty list")))))
+(define append
+  (lambda (xs ys)
+    (match xs
+      (Nil ys)
+      ((Cons h t) (Cons h (append t ys))))))

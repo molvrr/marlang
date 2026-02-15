@@ -1,5 +1,5 @@
-; List utilities for the built-in List type
-; List is already defined as: (data (List a) Nil (Cons a (List a)))
+; List utilities
+(data (List a) Nil (Cons a (List a)))
 
 ; Pair type for zip operations
 (data (Pair a b) (Pair a b))

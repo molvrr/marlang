@@ -56,6 +56,10 @@ impl Value {
         Value::object(VMObject::String(s.into()))
     }
 
+    pub fn symbol(name: impl Into<String>) -> Self {
+        Value::object(VMObject::Symbol(name.into()))
+    }
+
     // --- Type checks ---
 
     #[inline]
@@ -262,6 +266,7 @@ pub fn format_value(value: &Value) -> String {
 fn format_object(obj: &VMObject) -> String {
     match obj {
         VMObject::String(s) => format!("\"{}\"", s),
+        VMObject::Symbol(s) => s.clone(),
         VMObject::List(elements) => {
             let parts: Vec<String> = elements.iter().map(format_value).collect();
             format!("({})", parts.join(" "))

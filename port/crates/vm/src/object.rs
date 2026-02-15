@@ -7,6 +7,7 @@ use crate::value::Value;
 #[derive(Debug, Clone)]
 pub enum VMObject {
     String(Arc<str>),
+    Symbol(String),
     List(Vec<Value>),
     AdtValue {
         tag: String,
@@ -46,6 +47,7 @@ impl VMObject {
     pub fn kind_name(&self) -> &'static str {
         match self {
             VMObject::String(_) => "string",
+            VMObject::Symbol(_) => "symbol",
             VMObject::List(_) => "list",
             VMObject::AdtValue { .. } => "adt-value",
             VMObject::AdtConstructor { .. } => "adt-constructor",
@@ -72,6 +74,7 @@ impl PartialEq for VMObject {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (VMObject::String(a), VMObject::String(b)) => a == b,
+            (VMObject::Symbol(a), VMObject::Symbol(b)) => a == b,
             (VMObject::List(a), VMObject::List(b)) => a == b,
             (
                 VMObject::AdtValue {

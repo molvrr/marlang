@@ -10,7 +10,7 @@ A Lisp-like language written in TypeScript, running on Bun. Features include a b
 - **Pattern Matching**: Destructure values with `match` expressions
 - **Algebraic Effects**: Delimited continuations with `effect`, `perform`, and `handle`
 - **Module System**: Import code with `std:` prefix for stdlib or relative paths
-- **Standard Library**: Option and Result utilities out of the box
+- **Standard Library**: Auto-loaded prelude with Option, List, Pair, Result types; stdlib utilities out of the box
 - **Tail Call Optimization**: Efficient recursion without stack overflow
 - **LSP Server**: Language Server Protocol support for IDE integration
 - First-class functions with lexical closures
@@ -559,12 +559,22 @@ Use the `std:` prefix to import from the standard library:
   ((println msg k) -> (begin (io/print "LOG: ") (io/println msg) (resume k nil))))
 ```
 
+### Prelude (Auto-Loaded)
+
+Every Marlang program automatically has access to the prelude (`stdlib/prelude.mar`), which defines:
+- **Data types**: `Option` (None, Some), `List` (Nil, Cons), `Pair` (MkPair), `Result` (Ok, Err)
+- **Macros**: `when`
+- **Functions**: `not`, `cons`, `car`, `cdr`, `append`
+
+No import is needed for these — they are available everywhere.
+
 ### Available stdlib modules
 
 | Module | Description |
 |--------|-------------|
-| `std:option` | Utilities for the built-in `Option` type: `map`, `flat-map`, `unwrap-or`, `unwrap-or-else`, `is-some`, `is-none`, `filter`, `and-then`, `or-else` |
-| `std:result` | `Result` type and utilities: `Ok`, `Err`, `map`, `map-err`, `flat-map`, `unwrap-or`, `unwrap-or-else`, `is-ok`, `is-err`, `ok`, `err`, `and-then`, `or-else` |
+| `std:option` | Utilities for the `Option` type: `map`, `flat-map`, `unwrap-or`, `unwrap-or-else`, `is-some`, `is-none`, `filter`, `and-then`, `or-else` |
+| `std:result` | Utilities for the `Result` type: `map`, `map-err`, `flat-map`, `unwrap-or`, `unwrap-or-else`, `is-ok`, `is-err`, `ok`, `err`, `and-then`, `or-else` |
+| `std:list` | List utilities: `foldl`, `foldr`, `length`, `reverse`, `concat`, `map`, `filter`, `any`, `all`, `find`, `take`, `drop`, `zip`, `zip-with` |
 | `std:io` | IO effect with **built-in handlers**: `print`, `println`, `read-line`, `read-file`, `write-file`. Handlers work automatically without explicit `handle` blocks. Custom handlers can override defaults. |
 
 ## Environment Introspection
@@ -652,7 +662,7 @@ Marlang has two execution backends:
 
 ### Rust Port (`port/`)
 
-A native Rust port lives under `port/`, providing a standalone binary with ~2.5x better performance. Phases 1-7c complete (lexer, parser, type system, bytecode compiler, VM, modules, FFI, CLI, single-threaded scheduler, multi-threaded scheduler, async IO):
+A native Rust port lives under `port/`, providing a standalone binary with ~2.5x better performance. Phases 1-8 complete (lexer, parser, type system, bytecode compiler, VM, modules, FFI, CLI, schedulers, async IO, macros, prelude):
 
 - **`marlang-core`** — Lexer, parser, string interning, spans
 - **`marlang-types`** — HM type inference, typeclasses, exhaustiveness checking, FFI struct type validation
@@ -670,7 +680,7 @@ cargo run -p marlang-cli -- repl           # Interactive REPL
 - **`bytecode.ts`** - Bytecode IR: opcodes, instructions, chunks, VM value types
 - **`compiler.ts`** - Compiles AST to bytecode with flat closures and upvalue capture
 - **`vm.ts`** - Stack-based virtual machine with algebraic effect support
-- **`builtins.ts`** - Built-in globals for the VM (arithmetic, comparison, ADT constructors)
+- **`builtins.ts`** - Built-in globals for the VM (arithmetic, comparison, string ops)
 - **`debug.ts`** - Bytecode disassembler
 
 ### Type System Architecture
@@ -704,7 +714,9 @@ marlang/
 │   ├── types/            # Type system modules
 │   └── modules/          # Module system
 ├── stdlib/               # Standard library
+│   ├── prelude.mar       # Auto-loaded prelude (data types, macros, core functions)
 │   ├── option.mar        # Option type utilities
+│   ├── list.mar          # List type utilities
 │   ├── result.mar        # Result type and utilities
 │   └── io.mar            # IO effect and operations
 ├── lsp/                  # Language Server Protocol
