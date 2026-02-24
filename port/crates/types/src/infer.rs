@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use marlang_core::ast::{self, Expr, LispValue};
 use marlang_core::intern::Interner;
 
 use crate::ast::*;
 use crate::builtins::resolve_constraints;
+use crate::checker::{ModuleCacheState, TypeModuleCache, TypeModuleLoader};
 use crate::env::*;
 use crate::errors::TypeError;
 use crate::unify::*;
@@ -2265,6 +2267,29 @@ pub fn infer_program(
     exprs: &[Expr],
     interner: &Interner,
 ) -> Result<(TypeEnv, Vec<Type>), TypeError> {
+    infer_program_inner(env, exprs, interner, None, None, None)
+}
+
+/// Type-check a program with module/import support.
+pub fn infer_program_with_context(
+    env: &TypeEnv,
+    exprs: &[Expr],
+    interner: &Interner,
+    file_path: Option<&Path>,
+    loader: &dyn TypeModuleLoader,
+    cache: &TypeModuleCache,
+) -> Result<(TypeEnv, Vec<Type>), TypeError> {
+    infer_program_inner(env, exprs, interner, file_path, Some(loader), Some(cache))
+}
+
+fn infer_program_inner(
+    env: &TypeEnv,
+    exprs: &[Expr],
+    interner: &Interner,
+    file_path: Option<&Path>,
+    loader: Option<&dyn TypeModuleLoader>,
+    cache: Option<&TypeModuleCache>,
+) -> Result<(TypeEnv, Vec<Type>), TypeError> {
     let mut current_env = env.clone();
     let mut types = Vec::new();
     let mut global_subst = empty_subst();
@@ -2314,7 +2339,17 @@ pub fn infer_program(
                 }
 
                 if first_sym == Some("import") {
-                    // Import stubbed — skip
+                    if let (Some(loader), Some(cache)) = (loader, cache) {
+                        current_env = process_import(
+                            &current_env,
+                            &elements,
+                            interner,
+                            file_path,
+                            loader,
+                            cache,
+                        )?;
+                    }
+                    // If no loader, silently skip (backward compat)
                     types.push(t_unit());
                     continue;
                 }
@@ -2350,4 +2385,186 @@ pub fn infer_program(
     }
 
     Ok((current_env, types))
+}
+
+// ===== Import Processing =====
+
+fn parse_import_form(
+    elements: &[&Expr],
+    interner: &Interner,
+) -> Result<(String, ImportForm), TypeError> {
+    // (import "path")                → All
+    // (import "path" (name1 name2))  → Selective
+    // (import "path" as alias)       → Qualified
+
+    if elements.len() < 2 {
+        return Err(TypeError::InvalidTypeAnnotation {
+            message: "import expects a module path".into(),
+            span: None,
+        });
+    }
+
+    let path = match elements[1] {
+        Expr::Atom(LispValue::String(s), _) => s.to_string(),
+        _ => {
+            return Err(TypeError::InvalidTypeAnnotation {
+                message: "import expects a string path".into(),
+                span: None,
+            })
+        }
+    };
+
+    if elements.len() == 2 {
+        return Ok((path, ImportForm::All));
+    }
+
+    // Check for `as alias`
+    if elements.len() == 4 {
+        if is_symbol(elements[2], interner, "as") {
+            if let Some(alias) = get_symbol(elements[3], interner) {
+                return Ok((path, ImportForm::Qualified(alias.to_string())));
+            }
+        }
+    }
+
+    // Check for selective: (import "path" (name1 name2 ...))
+    if elements.len() == 3 {
+        if let Expr::List { .. } = elements[2] {
+            let name_exprs = list_to_array(elements[2]);
+            let mut names = Vec::new();
+            for ne in &name_exprs {
+                if let Some(name) = get_symbol(ne, interner) {
+                    names.push(name.to_string());
+                } else {
+                    return Err(TypeError::InvalidTypeAnnotation {
+                        message: "Selective import expects symbols".into(),
+                        span: None,
+                    });
+                }
+            }
+            return Ok((path, ImportForm::Selective(names)));
+        }
+    }
+
+    Err(TypeError::InvalidTypeAnnotation {
+        message: "Invalid import form".into(),
+        span: None,
+    })
+}
+
+fn process_import(
+    env: &TypeEnv,
+    elements: &[&Expr],
+    interner: &Interner,
+    file_path: Option<&Path>,
+    loader: &dyn TypeModuleLoader,
+    cache: &TypeModuleCache,
+) -> Result<TypeEnv, TypeError> {
+    let (path_str, form) = parse_import_form(elements, interner)?;
+
+    // Resolve and load module
+    let (module_exprs, resolved_path) =
+        loader.resolve_and_load(&path_str, file_path, interner)?;
+
+    // Check cache
+    match cache.get_state(&resolved_path) {
+        Some(ModuleCacheState::Loading) => {
+            return Err(TypeError::InternalError {
+                message: format!(
+                    "Circular dependency detected: {}",
+                    resolved_path.display()
+                ),
+                span: None,
+            });
+        }
+        Some(ModuleCacheState::Loaded(module_env)) => {
+            return Ok(merge_module_env(env, &module_env, &form));
+        }
+        None => {}
+    }
+
+    // Mark as loading
+    cache.mark_loading(resolved_path.clone());
+
+    // Create a fresh builtins env for the module (like the VM does).
+    // This way, after type-checking, we can extract everything the module
+    // added on top of builtins as its exports.
+    let builtins = crate::builtins::create_builtin_env();
+    let builtin_binding_keys: HashSet<String> = builtins.bindings.keys().cloned().collect();
+    let builtin_data_type_keys: HashSet<String> = builtins.data_types.keys().cloned().collect();
+    let builtin_constructor_keys: HashSet<String> = builtins.constructors.keys().cloned().collect();
+    let builtin_effect_keys: HashSet<String> = builtins.effects.keys().cloned().collect();
+    let builtin_alias_keys: HashSet<String> = builtins.aliases.keys().cloned().collect();
+
+    // Type-check the module using the current env as base (has builtins + prelude).
+    // The prelude types (Option, Result, etc.) are available for the module code.
+    let (module_env, _) = infer_program_inner(
+        env,
+        &module_exprs,
+        interner,
+        Some(&resolved_path),
+        Some(loader),
+        Some(cache),
+    )?;
+
+    // Extract everything the module defines beyond builtins.
+    // This includes prelude re-declarations (like Ok, Err) since modules
+    // typically re-export data types they define.
+    let module_own_env = extract_module_exports(
+        &module_env,
+        &builtin_binding_keys,
+        &builtin_data_type_keys,
+        &builtin_constructor_keys,
+        &builtin_effect_keys,
+        &builtin_alias_keys,
+    );
+
+    cache.mark_loaded(resolved_path, module_own_env.clone());
+
+    // Merge into current env
+    Ok(merge_module_env(env, &module_own_env, &form))
+}
+
+/// Extract definitions that are new relative to the builtin key sets.
+fn extract_module_exports(
+    full: &TypeEnv,
+    base_bindings: &HashSet<String>,
+    base_data_types: &HashSet<String>,
+    base_constructors: &HashSet<String>,
+    base_effects: &HashSet<String>,
+    base_aliases: &HashSet<String>,
+) -> TypeEnv {
+    let mut exports = empty_env();
+
+    for (name, scheme) in &full.bindings {
+        if !base_bindings.contains(name) {
+            exports.bindings.insert(name.clone(), scheme.clone());
+        }
+    }
+
+    for (name, dt) in &full.data_types {
+        if !base_data_types.contains(name) {
+            exports.data_types.insert(name.clone(), dt.clone());
+        }
+    }
+
+    for (name, entry) in &full.constructors {
+        if !base_constructors.contains(name) {
+            exports.constructors.insert(name.clone(), entry.clone());
+        }
+    }
+
+    for (name, effect) in &full.effects {
+        if !base_effects.contains(name) {
+            exports.effects.insert(name.clone(), effect.clone());
+        }
+    }
+
+    for (name, alias) in &full.aliases {
+        if !base_aliases.contains(name) {
+            exports.aliases.insert(name.clone(), alias.clone());
+        }
+    }
+
+    exports
 }

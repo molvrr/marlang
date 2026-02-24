@@ -34,7 +34,7 @@ enum ImportForm {
 pub struct ModuleLoader {
     cache: HashMap<PathBuf, ModuleState>,
     pub(crate) virtual_modules: HashMap<PathBuf, String>,
-    pub(crate) stdlib_dir: Option<PathBuf>,
+    pub stdlib_dir: Option<PathBuf>,
 }
 
 impl ModuleLoader {

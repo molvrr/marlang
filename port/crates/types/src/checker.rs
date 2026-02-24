@@ -1,3 +1,7 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
 use marlang_core::ast::Expr;
 use marlang_core::intern::Interner;
 
@@ -5,13 +9,73 @@ use crate::ast::{reset_effect_row_var_counter, reset_type_var_counter, Type};
 use crate::builtins::create_builtin_env;
 use crate::env::TypeEnv;
 use crate::errors::TypeError;
-use crate::infer::infer_program;
+use crate::infer::{infer_program, infer_program_with_context};
+
+// ===== Module Loading Trait =====
+
+/// Trait for resolving and loading modules during type checking.
+/// Implemented by the CLI crate which has access to the VM for macro expansion.
+pub trait TypeModuleLoader {
+    /// Resolve an import path, load source, lex/parse/expand macros,
+    /// and return the module expressions (without prelude) and the resolved path.
+    fn resolve_and_load(
+        &self,
+        import_path: &str,
+        from_file: Option<&Path>,
+        interner: &Interner,
+    ) -> Result<(Vec<Expr>, PathBuf), TypeError>;
+}
+
+// ===== Module Cache =====
+
+enum ModuleCacheEntry {
+    Loading,
+    Loaded(TypeEnv),
+}
+
+/// Cache for type-checked modules, preventing duplicate work and detecting cycles.
+pub struct TypeModuleCache {
+    entries: RefCell<HashMap<PathBuf, ModuleCacheEntry>>,
+}
+
+impl TypeModuleCache {
+    pub fn new() -> Self {
+        TypeModuleCache {
+            entries: RefCell::new(HashMap::new()),
+        }
+    }
+
+    pub fn get_state(&self, path: &Path) -> Option<ModuleCacheState> {
+        let entries = self.entries.borrow();
+        match entries.get(path) {
+            None => None,
+            Some(ModuleCacheEntry::Loading) => Some(ModuleCacheState::Loading),
+            Some(ModuleCacheEntry::Loaded(env)) => Some(ModuleCacheState::Loaded(env.clone())),
+        }
+    }
+
+    pub fn mark_loading(&self, path: PathBuf) {
+        self.entries.borrow_mut().insert(path, ModuleCacheEntry::Loading);
+    }
+
+    pub fn mark_loaded(&self, path: PathBuf, env: TypeEnv) {
+        self.entries.borrow_mut().insert(path, ModuleCacheEntry::Loaded(env));
+    }
+}
+
+pub enum ModuleCacheState {
+    Loading,
+    Loaded(TypeEnv),
+}
+
+// ===== Type Check Entry Points =====
 
 pub enum TypeCheckResult {
     Ok { env: TypeEnv, types: Vec<Type> },
     Err { error: TypeError },
 }
 
+/// Type check without module support (backward compatible).
 pub fn type_check(exprs: &[Expr], interner: &Interner) -> TypeCheckResult {
     reset_type_var_counter();
     reset_effect_row_var_counter();
@@ -19,6 +83,25 @@ pub fn type_check(exprs: &[Expr], interner: &Interner) -> TypeCheckResult {
     let env = create_builtin_env();
 
     match infer_program(&env, exprs, interner) {
+        Ok((env, types)) => TypeCheckResult::Ok { env, types },
+        Err(error) => TypeCheckResult::Err { error },
+    }
+}
+
+/// Type check with module/import support.
+pub fn type_check_with_modules(
+    exprs: &[Expr],
+    interner: &Interner,
+    file_path: Option<&Path>,
+    loader: &dyn TypeModuleLoader,
+) -> TypeCheckResult {
+    reset_type_var_counter();
+    reset_effect_row_var_counter();
+
+    let env = create_builtin_env();
+    let cache = TypeModuleCache::new();
+
+    match infer_program_with_context(&env, exprs, interner, file_path, loader, &cache) {
         Ok((env, types)) => TypeCheckResult::Ok { env, types },
         Err(error) => TypeCheckResult::Err { error },
     }

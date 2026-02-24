@@ -369,6 +369,217 @@ pub fn lookup_ffi_struct_info<'a>(env: &'a TypeEnv, name: &str) -> Option<&'a Ff
     None
 }
 
+// ===== Import Form =====
+
+pub enum ImportForm {
+    All,
+    Selective(Vec<String>),
+    Qualified(String),
+}
+
+// ===== Type Rewriting (for qualified imports) =====
+
+/// Rewrite Type::Const names based on a name mapping.
+fn rewrite_type(t: &Type, name_map: &HashMap<String, String>) -> Type {
+    match t {
+        Type::Var(_) => t.clone(),
+        Type::Const(name) => match name_map.get(name) {
+            Some(new_name) => Type::Const(new_name.clone()),
+            None => t.clone(),
+        },
+        Type::App { constructor, args } => Type::App {
+            constructor: Box::new(rewrite_type(constructor, name_map)),
+            args: args.iter().map(|a| rewrite_type(a, name_map)).collect(),
+        },
+        Type::Arrow { params, effects, result } => Type::Arrow {
+            params: params.iter().map(|p| rewrite_type(p, name_map)).collect(),
+            effects: effects.as_ref().map(|row| rewrite_effect_row(row, name_map)),
+            result: Box::new(rewrite_type(result, name_map)),
+        },
+        Type::Rec { var, body } => Type::Rec {
+            var: var.clone(),
+            body: Box::new(rewrite_type(body, name_map)),
+        },
+    }
+}
+
+fn rewrite_effect_row(row: &EffectRow, name_map: &HashMap<String, String>) -> EffectRow {
+    match row {
+        EffectRow::Closed(effects) => EffectRow::Closed(
+            effects.iter().map(|e| name_map.get(e).cloned().unwrap_or_else(|| e.clone())).collect(),
+        ),
+        EffectRow::Open { effects, row_var } => EffectRow::Open {
+            effects: effects.iter().map(|e| name_map.get(e).cloned().unwrap_or_else(|| e.clone())).collect(),
+            row_var: row_var.clone(),
+        },
+    }
+}
+
+fn rewrite_constraint(c: &Constraint, name_map: &HashMap<String, String>) -> Constraint {
+    Constraint {
+        class: c.class.clone(),
+        type_arg: rewrite_type(&c.type_arg, name_map),
+    }
+}
+
+fn rewrite_type_scheme(scheme: &TypeScheme, name_map: &HashMap<String, String>) -> TypeScheme {
+    TypeScheme {
+        quantified_vars: scheme.quantified_vars.clone(),
+        qual_type: QualType {
+            constraints: scheme.qual_type.constraints.iter().map(|c| rewrite_constraint(c, name_map)).collect(),
+            ty: rewrite_type(&scheme.qual_type.ty, name_map),
+        },
+    }
+}
+
+fn rewrite_constructor(ctor: &Constructor, name_map: &HashMap<String, String>) -> Constructor {
+    Constructor {
+        name: ctor.name.clone(),
+        params: ctor.params.iter().map(|p| rewrite_type(p, name_map)).collect(),
+        result_type: rewrite_type(&ctor.result_type, name_map),
+    }
+}
+
+fn rewrite_data_type(dt: &DataType, name_map: &HashMap<String, String>, new_name: &str) -> DataType {
+    DataType {
+        name: new_name.to_string(),
+        type_params: dt.type_params.clone(),
+        constructors: dt.constructors.iter().map(|c| rewrite_constructor(c, name_map)).collect(),
+    }
+}
+
+fn rewrite_effect_decl(effect: &EffectDeclaration, name_map: &HashMap<String, String>, new_name: &str) -> EffectDeclaration {
+    EffectDeclaration {
+        name: new_name.to_string(),
+        type_params: effect.type_params.clone(),
+        operations: effect.operations.iter().map(|op| EffectOp {
+            name: op.name.clone(),
+            type_params: op.type_params.clone(),
+            constraints: op.constraints.iter().map(|c| rewrite_constraint(c, name_map)).collect(),
+            params: op.params.iter().map(|p| rewrite_type(p, name_map)).collect(),
+            result: rewrite_type(&op.result, name_map),
+        }).collect(),
+    }
+}
+
+// ===== Module Environment Merging =====
+
+/// Merge a module's type environment into the target environment according to the import form.
+/// For qualified imports, type names that are NEW in the source (not already in target)
+/// get prefixed with the qualifier, and all type references are rewritten accordingly.
+pub fn merge_module_env(target: &TypeEnv, source: &TypeEnv, form: &ImportForm) -> TypeEnv {
+    let mut result = target.clone();
+
+    let should_import = |name: &str| -> bool {
+        match form {
+            ImportForm::All => true,
+            ImportForm::Selective(names) => names.iter().any(|n| n == name),
+            ImportForm::Qualified(_) => true,
+        }
+    };
+
+    let transform_name = |name: &str| -> String {
+        match form {
+            ImportForm::Qualified(q) => format!("{}/{}", q, name),
+            _ => name.to_string(),
+        }
+    };
+
+    let is_qualified = matches!(form, ImportForm::Qualified(_));
+
+    // Build type name map for qualified imports
+    let mut type_name_map: HashMap<String, String> = HashMap::new();
+    if is_qualified {
+        for name in source.data_types.keys() {
+            if !target.data_types.contains_key(name) {
+                type_name_map.insert(name.clone(), transform_name(name));
+            }
+        }
+        for name in source.effects.keys() {
+            if !target.effects.contains_key(name) {
+                type_name_map.insert(name.clone(), transform_name(name));
+            }
+        }
+        for name in source.aliases.keys() {
+            if !target.aliases.contains_key(name) {
+                type_name_map.insert(name.clone(), transform_name(name));
+            }
+        }
+    }
+
+    // Merge bindings
+    for (name, scheme) in &source.bindings {
+        if should_import(name) {
+            let new_scheme = if is_qualified {
+                rewrite_type_scheme(scheme, &type_name_map)
+            } else {
+                scheme.clone()
+            };
+            result.bindings.insert(transform_name(name), new_scheme);
+        }
+    }
+
+    // Merge data types
+    for (name, dt) in &source.data_types {
+        if should_import(name) {
+            let new_name = transform_name(name);
+            let new_dt = if is_qualified {
+                rewrite_data_type(dt, &type_name_map, &new_name)
+            } else {
+                dt.clone()
+            };
+            result.data_types.insert(new_name, new_dt);
+        }
+    }
+
+    // Merge constructors
+    for (name, (dt, ctor)) in &source.constructors {
+        if should_import(name) {
+            let new_name = transform_name(name);
+            if is_qualified {
+                let rewritten_ctor = rewrite_constructor(ctor, &type_name_map);
+                let dt_new_name = transform_name(&dt.name);
+                let rewritten_dt = rewrite_data_type(dt, &type_name_map, &dt_new_name);
+                result.constructors.insert(new_name, (rewritten_dt, rewritten_ctor));
+            } else {
+                result.constructors.insert(new_name, (dt.clone(), ctor.clone()));
+            }
+        }
+    }
+
+    // Merge effects
+    for (name, effect) in &source.effects {
+        if should_import(name) {
+            let new_name = transform_name(name);
+            let new_effect = if is_qualified {
+                rewrite_effect_decl(effect, &type_name_map, &new_name)
+            } else {
+                effect.clone()
+            };
+            result.effects.insert(new_name, new_effect);
+        }
+    }
+
+    // Merge aliases
+    for (name, alias) in &source.aliases {
+        if should_import(name) {
+            let new_name = transform_name(name);
+            if is_qualified {
+                let rewritten_alias = TypeAlias {
+                    name: new_name.clone(),
+                    type_params: alias.type_params.clone(),
+                    body: rewrite_type(&alias.body, &type_name_map),
+                };
+                result.aliases.insert(new_name, rewritten_alias);
+            } else {
+                result.aliases.insert(new_name, alias.clone());
+            }
+        }
+    }
+
+    result
+}
+
 // ===== Generalization and Instantiation =====
 
 pub fn free_type_vars_env(env: &TypeEnv) -> HashSet<String> {
