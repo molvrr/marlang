@@ -40,9 +40,7 @@ impl LineMap {
 
     /// Resolve a byte offset to (line, column), both 1-indexed.
     pub fn resolve(&self, offset: u32) -> (u32, u32) {
-        let line = self
-            .newline_offsets
-            .partition_point(|&nl| nl < offset) as u32;
+        let line = self.newline_offsets.partition_point(|&nl| nl < offset) as u32;
         let col = if line > 0 {
             offset - self.newline_offsets[line as usize - 1] - 1
         } else {

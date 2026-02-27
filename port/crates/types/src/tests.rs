@@ -7,8 +7,8 @@ use marlang_core::lexer::lex;
 use marlang_core::parser::parse;
 
 use crate::ast::format_type;
-use crate::checker::{type_check, type_check_with_modules, TypeCheckResult, TypeModuleLoader};
-use crate::errors::{format_error, TypeError};
+use crate::checker::{TypeCheckResult, TypeModuleLoader, type_check, type_check_with_modules};
+use crate::errors::{TypeError, format_error};
 
 fn check(source: &str) -> Result<Vec<crate::ast::Type>, String> {
     let interner = Interner::new();
@@ -602,8 +602,10 @@ fn ffi_lib_wrong_args() {
            (InitWindow (-> I32 I32 CString Void)))
          (rl/InitWindow 800)",
     );
-    assert!(err.contains("cannot unify") || err.contains("arity") || err.contains("expected"),
-        "got: {err}");
+    assert!(
+        err.contains("cannot unify") || err.contains("arity") || err.contains("expected"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -670,7 +672,10 @@ fn ffi_lib_undefined_struct_type_errors() {
         "(foreign-lib rl \"libtest.dylib\"
            (ClearBackground (-> Color Void)))",
     );
-    assert!(err.contains("Undefined type") || err.contains("not defined"), "got: {err}");
+    assert!(
+        err.contains("Undefined type") || err.contains("not defined"),
+        "got: {err}"
+    );
     assert!(err.contains("Color"), "got: {err}");
 }
 
@@ -798,10 +803,13 @@ impl TypeModuleLoader for MockModuleLoader {
         _from_file: Option<&Path>,
         interner: &Interner,
     ) -> Result<(Vec<Expr>, PathBuf), TypeError> {
-        let source = self.modules.get(import_path).ok_or_else(|| TypeError::InternalError {
-            message: format!("Mock module not found: {}", import_path),
-            span: None,
-        })?;
+        let source = self
+            .modules
+            .get(import_path)
+            .ok_or_else(|| TypeError::InternalError {
+                message: format!("Mock module not found: {}", import_path),
+                span: None,
+            })?;
 
         let tokens = lex(source, interner).map_err(|e| TypeError::InternalError {
             message: format!("Lex error: {}", e),
@@ -818,7 +826,10 @@ impl TypeModuleLoader for MockModuleLoader {
     }
 }
 
-fn check_with_modules(source: &str, loader: &dyn TypeModuleLoader) -> Result<Vec<crate::ast::Type>, String> {
+fn check_with_modules(
+    source: &str,
+    loader: &dyn TypeModuleLoader,
+) -> Result<Vec<crate::ast::Type>, String> {
     let interner = Interner::new();
     let tokens = lex(source, &interner).expect("lex failed");
     let exprs = parse(&tokens).expect("parse failed");
@@ -833,57 +844,52 @@ fn import_qualified_function() {
     let mut loader = MockModuleLoader::new();
     loader.add_module("mymod", "(define add1 (lambda (x) (+ x 1)))");
 
-    let types = check_with_modules(
-        r#"(import "mymod" as m) (m/add1 5)"#,
-        &loader,
-    ).unwrap();
+    let types = check_with_modules(r#"(import "mymod" as m) (m/add1 5)"#, &loader).unwrap();
     assert_eq!(last_type(&types), "Int");
 }
 
 #[test]
 fn import_qualified_data_type() {
     let mut loader = MockModuleLoader::new();
-    loader.add_module("colors", r#"
+    loader.add_module(
+        "colors",
+        r#"
         (data Color Red Green Blue)
         (define is-red (lambda (c)
             (match c
                 (Red #t)
                 (Green #f)
                 (Blue #f))))
-    "#);
+    "#,
+    );
 
-    let types = check_with_modules(
-        r#"(import "colors" as c) (c/is-red c/Red)"#,
-        &loader,
-    ).unwrap();
+    let types = check_with_modules(r#"(import "colors" as c) (c/is-red c/Red)"#, &loader).unwrap();
     assert_eq!(last_type(&types), "Bool");
 }
 
 #[test]
 fn import_selective() {
     let mut loader = MockModuleLoader::new();
-    loader.add_module("math",
+    loader.add_module(
+        "math",
         "(define square (lambda (x) (* x x)))
-         (define double (lambda (x) (+ x x)))");
+         (define double (lambda (x) (+ x x)))",
+    );
 
-    let types = check_with_modules(
-        r#"(import "math" (square)) (square 5)"#,
-        &loader,
-    ).unwrap();
+    let types = check_with_modules(r#"(import "math" (square)) (square 5)"#, &loader).unwrap();
     assert_eq!(last_type(&types), "Int");
 }
 
 #[test]
 fn import_selective_not_imported_is_error() {
     let mut loader = MockModuleLoader::new();
-    loader.add_module("math",
+    loader.add_module(
+        "math",
         "(define square (lambda (x) (* x x)))
-         (define double (lambda (x) (+ x x)))");
+         (define double (lambda (x) (+ x x)))",
+    );
 
-    let err = check_with_modules(
-        r#"(import "math" (square)) (double 5)"#,
-        &loader,
-    ).unwrap_err();
+    let err = check_with_modules(r#"(import "math" (square)) (double 5)"#, &loader).unwrap_err();
     assert!(err.contains("Undefined variable"), "error was: {}", err);
     assert!(err.contains("double"), "error was: {}", err);
 }
@@ -891,14 +897,13 @@ fn import_selective_not_imported_is_error() {
 #[test]
 fn import_all() {
     let mut loader = MockModuleLoader::new();
-    loader.add_module("utils",
+    loader.add_module(
+        "utils",
         "(define inc (lambda (x) (+ x 1)))
-         (define dec (lambda (x) (- x 1)))");
+         (define dec (lambda (x) (- x 1)))",
+    );
 
-    let types = check_with_modules(
-        r#"(import "utils") (inc 5)"#,
-        &loader,
-    ).unwrap();
+    let types = check_with_modules(r#"(import "utils") (inc 5)"#, &loader).unwrap();
     assert_eq!(last_type(&types), "Int");
 }
 
@@ -906,17 +911,21 @@ fn import_all() {
 fn import_qualified_effect_wrapper() {
     // Effects are accessed through wrapper functions, not directly via qualified perform
     let mut loader = MockModuleLoader::new();
-    loader.add_module("myeffect", r#"
+    loader.add_module(
+        "myeffect",
+        r#"
         (effect Greet
             (hello (-> String String)))
         (define greet (lambda (name) (perform hello name)))
-    "#);
+    "#,
+    );
 
     let types = check_with_modules(
         r#"(import "myeffect" as g)
            (g/greet "world")"#,
         &loader,
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(last_type(&types), "String");
 }
 
@@ -931,7 +940,8 @@ fn import_module_cache_reuse() {
            (import "shared" as b)
            (+ a/val b/val)"#,
         &loader,
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(last_type(&types), "Int");
 }
 
@@ -939,10 +949,7 @@ fn import_module_cache_reuse() {
 fn import_nonexistent_module_errors() {
     let loader = MockModuleLoader::new();
 
-    let err = check_with_modules(
-        r#"(import "nonexistent" as x)"#,
-        &loader,
-    ).unwrap_err();
+    let err = check_with_modules(r#"(import "nonexistent" as x)"#, &loader).unwrap_err();
     assert!(err.contains("not found"), "error was: {}", err);
 }
 
@@ -951,17 +958,21 @@ fn import_qualified_preserves_prelude_types() {
     // Prelude types (like Option/List) that exist in both target and source
     // should NOT be rewritten — they should stay as their original names
     let mut loader = MockModuleLoader::new();
-    loader.add_module("mymod", r#"
+    loader.add_module(
+        "mymod",
+        r#"
         (data (Option a) None (Some a))
         (define wrap-some (lambda (x) (Some x)))
-    "#);
+    "#,
+    );
 
     let types = check_with_modules(
         r#"(data (Option a) None (Some a))
            (import "mymod" as m)
            (m/wrap-some 42)"#,
         &loader,
-    ).unwrap();
+    )
+    .unwrap();
     // The result should be (Option Int), not (m/Option Int)
     // because Option already exists in the target env
     assert_eq!(last_type(&types), "(Option Int)");

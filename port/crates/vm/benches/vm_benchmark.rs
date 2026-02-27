@@ -1,10 +1,10 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use marlang_core::intern::Interner;
 use marlang_core::lexer::lex;
 use marlang_core::parser::parse;
 use marlang_vm::builtins::register_builtins;
 use marlang_vm::compiler::compile_program;
-use marlang_vm::vm::{interpret, VM};
+use marlang_vm::vm::{VM, interpret};
 
 fn bench_fib(c: &mut Criterion) {
     let source = r#"

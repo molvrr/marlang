@@ -311,9 +311,7 @@ pub fn define_effect(env: &TypeEnv, effect: EffectDeclaration) -> TypeEnv {
 
 pub fn define_foreign(env: &TypeEnv, lib_name: &str, functions: Vec<ForeignFnDecl>) -> TypeEnv {
     let mut new_env = env.clone();
-    new_env
-        .foreign_libs
-        .insert(lib_name.to_string(), functions);
+    new_env.foreign_libs.insert(lib_name.to_string(), functions);
     new_env
 }
 
@@ -391,9 +389,15 @@ fn rewrite_type(t: &Type, name_map: &HashMap<String, String>) -> Type {
             constructor: Box::new(rewrite_type(constructor, name_map)),
             args: args.iter().map(|a| rewrite_type(a, name_map)).collect(),
         },
-        Type::Arrow { params, effects, result } => Type::Arrow {
+        Type::Arrow {
+            params,
+            effects,
+            result,
+        } => Type::Arrow {
             params: params.iter().map(|p| rewrite_type(p, name_map)).collect(),
-            effects: effects.as_ref().map(|row| rewrite_effect_row(row, name_map)),
+            effects: effects
+                .as_ref()
+                .map(|row| rewrite_effect_row(row, name_map)),
             result: Box::new(rewrite_type(result, name_map)),
         },
         Type::Rec { var, body } => Type::Rec {
@@ -406,10 +410,16 @@ fn rewrite_type(t: &Type, name_map: &HashMap<String, String>) -> Type {
 fn rewrite_effect_row(row: &EffectRow, name_map: &HashMap<String, String>) -> EffectRow {
     match row {
         EffectRow::Closed(effects) => EffectRow::Closed(
-            effects.iter().map(|e| name_map.get(e).cloned().unwrap_or_else(|| e.clone())).collect(),
+            effects
+                .iter()
+                .map(|e| name_map.get(e).cloned().unwrap_or_else(|| e.clone()))
+                .collect(),
         ),
         EffectRow::Open { effects, row_var } => EffectRow::Open {
-            effects: effects.iter().map(|e| name_map.get(e).cloned().unwrap_or_else(|| e.clone())).collect(),
+            effects: effects
+                .iter()
+                .map(|e| name_map.get(e).cloned().unwrap_or_else(|| e.clone()))
+                .collect(),
             row_var: row_var.clone(),
         },
     }
@@ -426,7 +436,12 @@ fn rewrite_type_scheme(scheme: &TypeScheme, name_map: &HashMap<String, String>) 
     TypeScheme {
         quantified_vars: scheme.quantified_vars.clone(),
         qual_type: QualType {
-            constraints: scheme.qual_type.constraints.iter().map(|c| rewrite_constraint(c, name_map)).collect(),
+            constraints: scheme
+                .qual_type
+                .constraints
+                .iter()
+                .map(|c| rewrite_constraint(c, name_map))
+                .collect(),
             ty: rewrite_type(&scheme.qual_type.ty, name_map),
         },
     }
@@ -435,30 +450,58 @@ fn rewrite_type_scheme(scheme: &TypeScheme, name_map: &HashMap<String, String>) 
 fn rewrite_constructor(ctor: &Constructor, name_map: &HashMap<String, String>) -> Constructor {
     Constructor {
         name: ctor.name.clone(),
-        params: ctor.params.iter().map(|p| rewrite_type(p, name_map)).collect(),
+        params: ctor
+            .params
+            .iter()
+            .map(|p| rewrite_type(p, name_map))
+            .collect(),
         result_type: rewrite_type(&ctor.result_type, name_map),
     }
 }
 
-fn rewrite_data_type(dt: &DataType, name_map: &HashMap<String, String>, new_name: &str) -> DataType {
+fn rewrite_data_type(
+    dt: &DataType,
+    name_map: &HashMap<String, String>,
+    new_name: &str,
+) -> DataType {
     DataType {
         name: new_name.to_string(),
         type_params: dt.type_params.clone(),
-        constructors: dt.constructors.iter().map(|c| rewrite_constructor(c, name_map)).collect(),
+        constructors: dt
+            .constructors
+            .iter()
+            .map(|c| rewrite_constructor(c, name_map))
+            .collect(),
     }
 }
 
-fn rewrite_effect_decl(effect: &EffectDeclaration, name_map: &HashMap<String, String>, new_name: &str) -> EffectDeclaration {
+fn rewrite_effect_decl(
+    effect: &EffectDeclaration,
+    name_map: &HashMap<String, String>,
+    new_name: &str,
+) -> EffectDeclaration {
     EffectDeclaration {
         name: new_name.to_string(),
         type_params: effect.type_params.clone(),
-        operations: effect.operations.iter().map(|op| EffectOp {
-            name: op.name.clone(),
-            type_params: op.type_params.clone(),
-            constraints: op.constraints.iter().map(|c| rewrite_constraint(c, name_map)).collect(),
-            params: op.params.iter().map(|p| rewrite_type(p, name_map)).collect(),
-            result: rewrite_type(&op.result, name_map),
-        }).collect(),
+        operations: effect
+            .operations
+            .iter()
+            .map(|op| EffectOp {
+                name: op.name.clone(),
+                type_params: op.type_params.clone(),
+                constraints: op
+                    .constraints
+                    .iter()
+                    .map(|c| rewrite_constraint(c, name_map))
+                    .collect(),
+                params: op
+                    .params
+                    .iter()
+                    .map(|p| rewrite_type(p, name_map))
+                    .collect(),
+                result: rewrite_type(&op.result, name_map),
+            })
+            .collect(),
     }
 }
 
@@ -540,9 +583,13 @@ pub fn merge_module_env(target: &TypeEnv, source: &TypeEnv, form: &ImportForm) -
                 let rewritten_ctor = rewrite_constructor(ctor, &type_name_map);
                 let dt_new_name = transform_name(&dt.name);
                 let rewritten_dt = rewrite_data_type(dt, &type_name_map, &dt_new_name);
-                result.constructors.insert(new_name, (rewritten_dt, rewritten_ctor));
+                result
+                    .constructors
+                    .insert(new_name, (rewritten_dt, rewritten_ctor));
             } else {
-                result.constructors.insert(new_name, (dt.clone(), ctor.clone()));
+                result
+                    .constructors
+                    .insert(new_name, (dt.clone(), ctor.clone()));
             }
         }
     }

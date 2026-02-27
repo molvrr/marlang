@@ -1,6 +1,6 @@
 use crate::errors::VMError;
 use crate::object::VMObject;
-use crate::value::{format_value, Value};
+use crate::value::{Value, format_value};
 use crate::vm::VM;
 
 /// Register all built-in globals into the VM.
@@ -236,7 +236,10 @@ pub fn register_builtins(vm: &mut VM) {
         if args.len() != 1 {
             return Err(VMError::runtime("symbol? expects 1 argument"));
         }
-        Ok(Value::boolean(matches!(args[0].as_object(), Some(VMObject::Symbol(_)))))
+        Ok(Value::boolean(matches!(
+            args[0].as_object(),
+            Some(VMObject::Symbol(_))
+        )))
     });
 
     builtin(vm, "pair?", |_vm, args| {
@@ -253,10 +256,11 @@ pub fn register_builtins(vm: &mut VM) {
         if args.len() != 1 {
             return Err(VMError::runtime("nil? expects 1 argument"));
         }
-        let is_nil = args[0].is_nil() || matches!(
-            args[0].as_object(),
-            Some(VMObject::AdtValue { tag, fields }) if tag == "Nil" && fields.is_empty()
-        );
+        let is_nil = args[0].is_nil()
+            || matches!(
+                args[0].as_object(),
+                Some(VMObject::AdtValue { tag, fields }) if tag == "Nil" && fields.is_empty()
+            );
         Ok(Value::boolean(is_nil))
     });
 
@@ -413,7 +417,7 @@ fn register_ffi_builtins(
             _ => {
                 return Err(VMError::runtime(
                     "ffi-open: second arg must be a list of signature specs",
-                ))
+                ));
             }
         };
 
@@ -474,7 +478,7 @@ fn register_ffi_builtins(
             _ => {
                 return Err(VMError::runtime(
                     "ffi-call: first arg must be an FFI library",
-                ))
+                ));
             }
         };
         let fn_name = args[1]
@@ -549,7 +553,7 @@ fn register_ffi_builtins(
             _ => {
                 return Err(VMError::runtime(
                     "struct-new: first arg must be a struct def",
-                ))
+                ));
             }
         };
         let field_vals = &args[1..];

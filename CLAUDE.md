@@ -24,7 +24,7 @@ Tests are in `spec/` directory using bun:test.
 
 ## Rust Port
 
-The Rust port lives in `port/` with a Cargo workspace. Phases 1-8 complete (lexer, parser, type system, bytecode compiler, VM execution, modules, FFI, CLI, single-threaded scheduler, multi-threaded scheduler, async IO, macros, prelude).
+The Rust port lives in `port/` with a Cargo workspace. Phases 1-8 complete (lexer, parser, type system, bytecode compiler, VM execution, modules, FFI, CLI, single-threaded scheduler, multi-threaded scheduler, async IO, macros, prelude, TCP networking).
 
 ### Rust CLI
 
@@ -46,8 +46,8 @@ cargo run -p marlang-cli -- repl                   # Interactive REPL
 ```bash
 cargo test --workspace                # Run all Rust tests
 cargo test -p marlang-core            # Core: lexer + parser (75 tests)
-cargo test -p marlang-types           # Type system (81 tests)
-cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI + scheduler + macros (305 tests)
+cargo test -p marlang-types           # Type system (90 tests)
+cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI + scheduler + macros + TCP + Exception (318 tests)
 ```
 
 ### Running .mar Programs
@@ -152,6 +152,18 @@ Defined in `interpreter.ts` builtins array (tree-walker) and `builtins.ts` (VM):
 - Environment: `env-bindings`, `env-get`, `env-parent` (tree-walker only)
 
 Note: In the Rust port, ADT constructors (None, Some, Nil, Cons, MkPair, Ok, Err) and utility functions (not, cons, car, cdr, append) are defined in `stdlib/prelude.mar`, not as Rust builtins. The prelude is auto-loaded before every program.
+
+### Known Issues (Rust Port)
+
+1. **Module globals workaround:** Qualified imports (`import "mod" as m`) install both prefixed (`m/foo`) and unqualified (`foo`) names into parent globals. This is needed because module closures reference siblings by unprefixed names via `PUSH_GLOBAL`. However, first-imported module wins for name collisions. Long-term fix: module-scoped globals.
+
+2. **Recursive `define` + TCP effects hangs:** Using `(define f (lambda () ... (f)))` inside `fiber-spawn` where the body does TCP effects causes hangs. The `define` sets a global, but after TCP suspend/resume the `PUSH_GLOBAL` may not resolve. Workaround: unroll recursion or avoid combining recursive `define` with scheduler-suspending effects.
+
+3. **Type checker rejects `net.mar`:** Running with type checking fails on parameterized types like `(Result String TcpSocket)` in effect signatures. Always use `--no-typecheck` for programs importing `std:net`.
+
+4. **`handle`/`throw` unreliable across scheduler effects:** User `handle` blocks don't work correctly when the body performs scheduler-suspending effects (TCP, etc.). Workaround: use `try-` wrappers and match on Result directly.
+
+5. **`match` branches require single expressions:** Multi-expression match bodies need explicit `(begin ...)` wrapping. The compiler enforces `(pattern body)` with exactly 2 elements per branch.
 
 ### Default IO Effect Handlers
 Both tree-walker and VM provide built-in handlers for IO effects (no `handle` block needed):

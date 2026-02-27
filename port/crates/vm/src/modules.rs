@@ -11,7 +11,7 @@ use crate::compiler::compile_expr_with_context;
 use crate::errors::VMError;
 use crate::expand::MacroExpander;
 use crate::value::Value;
-use crate::vm::{interpret, VM};
+use crate::vm::{VM, interpret};
 
 // --- Module state ---
 
@@ -48,11 +48,7 @@ impl ModuleLoader {
                 let manifest = env!("CARGO_MANIFEST_DIR");
                 let workspace = Path::new(manifest).parent()?.parent()?.parent()?;
                 let stdlib = workspace.join("stdlib");
-                if stdlib.is_dir() {
-                    Some(stdlib)
-                } else {
-                    None
-                }
+                if stdlib.is_dir() { Some(stdlib) } else { None }
             });
 
         ModuleLoader {
@@ -160,7 +156,14 @@ pub fn run_program(
     // Macro expansion
     let expanded = expand_macros(interner, &exprs, file_path, loader)?;
 
-    run_program_from_exprs(vm, &expanded.exprs, expanded.prelude_count, file_path, loader, interner)
+    run_program_from_exprs(
+        vm,
+        &expanded.exprs,
+        expanded.prelude_count,
+        file_path,
+        loader,
+        interner,
+    )
 }
 
 /// Expand macros in a list of expressions.
@@ -191,7 +194,8 @@ pub fn expand_macros(
     expander.run_prelude_in_vm(&prelude_exprs);
 
     // Expand user expressions
-    let user_exprs = expander.expand_all(exprs.to_vec())
+    let user_exprs = expander
+        .expand_all(exprs.to_vec())
         .map_err(|e| VMError::runtime(format!("{}", e)))?;
 
     // Concatenate: prelude first, then user code
@@ -473,6 +477,14 @@ fn merge_exports(
                 vm.globals.insert(qualified_name.clone(), value.clone());
                 if is_constructor_value(value) {
                     known_constructors.insert(interner.intern(&qualified_name));
+                }
+                // Also install unqualified name so that closures from the
+                // module can resolve their own globals via PUSH_GLOBAL.
+                // Module closures reference globals by their original
+                // (unqualified) names since they were compiled in the
+                // module's own scope.
+                if !vm.globals.contains_key(name) {
+                    vm.globals.insert(name.clone(), value.clone());
                 }
             }
         }

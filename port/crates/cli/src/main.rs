@@ -3,20 +3,20 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 
 use marlang_core::ast::Expr;
 use marlang_core::intern::Interner;
 use marlang_core::lexer::lex;
 use marlang_core::parser::parse;
 use marlang_types::ast::format_type;
-use marlang_types::checker::{type_check_with_modules, TypeCheckResult, TypeModuleLoader};
-use marlang_types::errors::{format_error, TypeError};
+use marlang_types::checker::{TypeCheckResult, TypeModuleLoader, type_check_with_modules};
+use marlang_types::errors::{TypeError, format_error};
 use marlang_vm::builtins::register_builtins;
 use marlang_vm::compiler::compile_program;
 use marlang_vm::debug::disassemble;
-use marlang_vm::modules::{expand_macros, run_program, run_program_from_exprs, ModuleLoader};
+use marlang_vm::modules::{ModuleLoader, expand_macros, run_program, run_program_from_exprs};
 use marlang_vm::value::format_value;
 use marlang_vm::vm::VM;
 
@@ -67,25 +67,30 @@ impl CliModuleLoader {
         }
     }
 
-    fn resolve_path(&self, import_path: &str, from_file: Option<&Path>) -> Result<PathBuf, TypeError> {
+    fn resolve_path(
+        &self,
+        import_path: &str,
+        from_file: Option<&Path>,
+    ) -> Result<PathBuf, TypeError> {
         if import_path.starts_with("std:") {
             let module_name = &import_path[4..];
-            let stdlib = self.stdlib_dir.as_ref().ok_or_else(|| TypeError::InternalError {
-                message: format!(
-                    "Cannot resolve stdlib module '{}': stdlib directory not found",
-                    module_name
-                ),
-                span: None,
-            })?;
+            let stdlib = self
+                .stdlib_dir
+                .as_ref()
+                .ok_or_else(|| TypeError::InternalError {
+                    message: format!(
+                        "Cannot resolve stdlib module '{}': stdlib directory not found",
+                        module_name
+                    ),
+                    span: None,
+                })?;
             let mut path = stdlib.join(module_name);
             if path.extension().is_none() {
                 path.set_extension("mar");
             }
             Ok(path)
         } else if import_path.starts_with("./") || import_path.starts_with("../") {
-            let dir = from_file
-                .and_then(|f| f.parent())
-                .unwrap_or(Path::new("."));
+            let dir = from_file.and_then(|f| f.parent()).unwrap_or(Path::new("."));
             let mut path = dir.join(import_path);
             if path.extension().is_none() {
                 path.set_extension("mar");
@@ -96,9 +101,7 @@ impl CliModuleLoader {
                 Ok(path)
             }
         } else {
-            let dir = from_file
-                .and_then(|f| f.parent())
-                .unwrap_or(Path::new("."));
+            let dir = from_file.and_then(|f| f.parent()).unwrap_or(Path::new("."));
             let mut path = dir.join(import_path);
             if path.extension().is_none() {
                 path.set_extension("mar");
@@ -146,7 +149,11 @@ impl TypeModuleLoader for CliModuleLoader {
 
         let expanded = expand_macros(interner, &exprs, Some(resolved.as_path()), &vm_loader)
             .map_err(|e| TypeError::InternalError {
-                message: format!("Macro expansion error in module {}: {}", resolved.display(), e),
+                message: format!(
+                    "Macro expansion error in module {}: {}",
+                    resolved.display(),
+                    e
+                ),
                 span: None,
             })?;
 
@@ -211,7 +218,12 @@ fn cmd_run(file: &PathBuf, no_typecheck: bool) -> ExitCode {
     // Type check the expanded AST
     if !no_typecheck {
         let type_loader = CliModuleLoader::new(&loader);
-        match type_check_with_modules(&expanded.exprs, &interner, Some(file.as_path()), &type_loader) {
+        match type_check_with_modules(
+            &expanded.exprs,
+            &interner,
+            Some(file.as_path()),
+            &type_loader,
+        ) {
             TypeCheckResult::Ok { .. } => {}
             TypeCheckResult::Err { error } => {
                 eprintln!("Type error: {}", format_error(&error));
@@ -282,7 +294,12 @@ fn cmd_typecheck(file: &PathBuf, verbose: bool) -> ExitCode {
     };
 
     let type_loader = CliModuleLoader::new(&loader);
-    match type_check_with_modules(&expanded.exprs, &interner, Some(file.as_path()), &type_loader) {
+    match type_check_with_modules(
+        &expanded.exprs,
+        &interner,
+        Some(file.as_path()),
+        &type_loader,
+    ) {
         TypeCheckResult::Ok { types, .. } => {
             if verbose {
                 for (i, ty) in types.iter().enumerate() {

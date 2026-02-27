@@ -6,7 +6,10 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, PartialEq)]
 pub enum EffectRow {
     Closed(Vec<String>),
-    Open { effects: Vec<String>, row_var: String },
+    Open {
+        effects: Vec<String>,
+        row_var: String,
+    },
 }
 
 impl EffectRow {
@@ -175,7 +178,11 @@ pub fn type_arrow(params: Vec<Type>, result: Type) -> Type {
     }
 }
 
-pub fn type_arrow_with_effects(params: Vec<Type>, effects: Option<EffectRow>, result: Type) -> Type {
+pub fn type_arrow_with_effects(
+    params: Vec<Type>,
+    effects: Option<EffectRow>,
+    result: Type,
+) -> Type {
     Type::Arrow {
         params,
         effects,

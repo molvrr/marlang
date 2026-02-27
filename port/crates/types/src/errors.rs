@@ -1,4 +1,4 @@
-use crate::ast::{format_constraint, format_pattern, format_type, Constraint, Pattern, Type};
+use crate::ast::{Constraint, Pattern, Type, format_constraint, format_pattern, format_type};
 use marlang_core::span::Span;
 
 #[derive(Debug, Clone)]
@@ -94,10 +94,7 @@ pub enum TypeError {
 pub fn format_error(err: &TypeError) -> String {
     match err {
         TypeError::UnificationError {
-            t1,
-            t2,
-            context,
-            ..
+            t1, t2, context, ..
         } => {
             let mut msg = format!(
                 "Type mismatch: cannot unify {} with {}",
@@ -110,10 +107,7 @@ pub fn format_error(err: &TypeError) -> String {
             msg
         }
         TypeError::OccursCheck { var_name, ty, .. } => {
-            format!(
-                "Infinite type: {var_name} occurs in {}",
-                format_type(ty)
-            )
+            format!("Infinite type: {var_name} occurs in {}", format_type(ty))
         }
         TypeError::UndefinedVariable { name, .. } => {
             format!("Undefined variable: {name}")
@@ -160,13 +154,8 @@ pub fn format_error(err: &TypeError) -> String {
         TypeError::NonExhaustivePatterns { missing, .. } => {
             format!("Non-exhaustive patterns. Missing: {}", missing.join(", "))
         }
-        TypeError::OverlappingInstances {
-            class_name, ty, ..
-        } => {
-            format!(
-                "Overlapping instances for {class_name} {}",
-                format_type(ty)
-            )
+        TypeError::OverlappingInstances { class_name, ty, .. } => {
+            format!("Overlapping instances for {class_name} {}", format_type(ty))
         }
         TypeError::MissingTypeAnnotation { name, .. } => {
             format!("Missing type annotation for top-level definition: {name}")

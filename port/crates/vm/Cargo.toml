@@ -10,7 +10,7 @@ libffi = { version = "5", optional = true }
 rustc-hash = "2"
 crossbeam-deque = "0.8"
 crossbeam-channel = "0.5"
-tokio = { version = "1", features = ["rt-multi-thread", "fs", "time", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "time", "io-util", "net", "sync", "macros"] }
 
 [dev-dependencies]
 criterion = { workspace = true }

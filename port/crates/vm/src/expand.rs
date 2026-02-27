@@ -12,7 +12,7 @@ use crate::builtins::register_builtins;
 use crate::compiler::compile_program;
 use crate::object::VMObject;
 use crate::value::Value;
-use crate::vm::{call_value, interpret, VM};
+use crate::vm::{VM, call_value, interpret};
 
 // --- Macro expansion error ---
 
@@ -23,7 +23,9 @@ pub struct MacroError {
 
 impl MacroError {
     fn new(msg: impl Into<String>) -> Self {
-        MacroError { message: msg.into() }
+        MacroError {
+            message: msg.into(),
+        }
     }
 }
 
@@ -234,7 +236,9 @@ impl<'a> MacroExpander<'a> {
         let elements = ast::list_to_array(expr);
         // (defmacro name (params) body...)
         if elements.len() < 4 {
-            return Err(MacroError::new("defmacro expects at least: name, params, body"));
+            return Err(MacroError::new(
+                "defmacro expects at least: name, params, body",
+            ));
         }
 
         let name_sym = match elements[1] {
@@ -249,16 +253,20 @@ impl<'a> MacroExpander<'a> {
         // Compile and run in expansion VM
         let tokens = lex(&lambda_source, self.interner)
             .map_err(|e| MacroError::new(format!("defmacro compile error: {}", e)))?;
-        let exprs = parse(&tokens)
-            .map_err(|e| MacroError::new(format!("defmacro parse error: {}", e)))?;
+        let exprs =
+            parse(&tokens).map_err(|e| MacroError::new(format!("defmacro parse error: {}", e)))?;
         let chunk = compile_program(&exprs, self.interner)
             .map_err(|e| MacroError::new(format!("defmacro compile error: {}", e)))?;
         interpret(&mut self.vm, &chunk)
             .map_err(|e| MacroError::new(format!("defmacro execution error: {}", e)))?;
 
         // Retrieve the transformer closure from globals
-        let transformer = self.vm.globals.get(name_str).cloned()
-            .ok_or_else(|| MacroError::new(format!("defmacro: transformer '{}' not found after definition", name_str)))?;
+        let transformer = self.vm.globals.get(name_str).cloned().ok_or_else(|| {
+            MacroError::new(format!(
+                "defmacro: transformer '{}' not found after definition",
+                name_str
+            ))
+        })?;
 
         self.macros.insert(name_sym, transformer);
         self.own_macros.insert(name_sym);
@@ -303,7 +311,9 @@ impl<'a> MacroExpander<'a> {
     fn expand_macro_call(&mut self, macro_sym: Symbol, expr: &Expr) -> Result<Expr, MacroError> {
         self.expansion_depth += 1;
         if self.expansion_depth > 1000 {
-            return Err(MacroError::new("Macro expansion depth limit exceeded (1000)"));
+            return Err(MacroError::new(
+                "Macro expansion depth limit exceeded (1000)",
+            ));
         }
 
         let elements = ast::list_to_array(expr);
@@ -318,7 +328,10 @@ impl<'a> MacroExpander<'a> {
         let arg_values: Vec<Value> = marked_args.iter().map(|a| self.expr_to_value(a)).collect();
 
         // 3. Call transformer (with arity check)
-        let transformer = self.macros.get(&macro_sym).cloned()
+        let transformer = self
+            .macros
+            .get(&macro_sym)
+            .cloned()
             .ok_or_else(|| MacroError::new("Macro transformer not found"))?;
 
         // Check arity for closures
@@ -328,7 +341,9 @@ impl<'a> MacroExpander<'a> {
                 let name = self.interner.resolve(macro_sym);
                 return Err(MacroError::new(format!(
                     "Macro '{}' expects {} arguments, got {}",
-                    name, expected, arg_values.len()
+                    name,
+                    expected,
+                    arg_values.len()
                 )));
             }
         }
@@ -474,7 +489,9 @@ impl<'a> MacroExpander<'a> {
         // Expand the module (we don't need the expanded expressions, just the macros)
         let expand_result = self.expand_all(exprs);
         let module_all_macros = self.macros.clone();
-        let module_own_macros: HashMap<Symbol, Value> = self.own_macros.iter()
+        let module_own_macros: HashMap<Symbol, Value> = self
+            .own_macros
+            .iter()
             .filter_map(|sym| self.macros.get(sym).map(|v| (*sym, v.clone())))
             .collect();
 
@@ -536,7 +553,10 @@ impl<'a> MacroExpander<'a> {
         if import_path.starts_with("std:") {
             let module_name = &import_path[4..];
             let stdlib = self.stdlib_dir.as_ref().ok_or_else(|| {
-                MacroError::new(format!("Cannot resolve stdlib module '{}': stdlib dir not set", module_name))
+                MacroError::new(format!(
+                    "Cannot resolve stdlib module '{}': stdlib dir not set",
+                    module_name
+                ))
             })?;
             let mut path = stdlib.join(module_name);
             if path.extension().is_none() {
@@ -579,13 +599,11 @@ impl<'a> MacroExpander<'a> {
                 Expr::Atom(LispValue::Symbol(new_sym), *span)
             }
             Expr::Atom(_, _) | Expr::Nil(_) => expr.clone(),
-            Expr::List { head, tail, span } => {
-                Expr::List {
-                    head: Box::new(self.apply_mark(head, mark)),
-                    tail: Box::new(self.apply_mark(tail, mark)),
-                    span: *span,
-                }
-            }
+            Expr::List { head, tail, span } => Expr::List {
+                head: Box::new(self.apply_mark(head, mark)),
+                tail: Box::new(self.apply_mark(tail, mark)),
+                span: *span,
+            },
         }
     }
 
@@ -623,10 +641,16 @@ impl<'a> MacroExpander<'a> {
             return Ok(Expr::Nil(span));
         }
         if value.is_true() {
-            return Ok(Expr::Atom(LispValue::Symbol(self.interner.intern("#t")), span));
+            return Ok(Expr::Atom(
+                LispValue::Symbol(self.interner.intern("#t")),
+                span,
+            ));
         }
         if value.is_false() {
-            return Ok(Expr::Atom(LispValue::Symbol(self.interner.intern("#f")), span));
+            return Ok(Expr::Atom(
+                LispValue::Symbol(self.interner.intern("#f")),
+                span,
+            ));
         }
 
         match value.as_object() {
@@ -690,12 +714,36 @@ pub fn strip_all_marks(name: &str) -> &str {
 
 fn build_immune_set(interner: &Interner) -> HashSet<Symbol> {
     let names = [
-        "define", "lambda", "if", "let", "begin", "cond", "match",
-        "data", "effect", "perform", "handle", "resume",
-        "import", "class", "instance", "type", "foreign", "foreign-lib",
-        "else", "->", "return", ":", "_",
-        "#t", "#f", "nil",
-        "quote", "quasiquote", "unquote", "unquote-splicing",
+        "define",
+        "lambda",
+        "if",
+        "let",
+        "begin",
+        "cond",
+        "match",
+        "data",
+        "effect",
+        "perform",
+        "handle",
+        "resume",
+        "import",
+        "class",
+        "instance",
+        "type",
+        "foreign",
+        "foreign-lib",
+        "else",
+        "->",
+        "return",
+        ":",
+        "_",
+        "#t",
+        "#f",
+        "nil",
+        "quote",
+        "quasiquote",
+        "unquote",
+        "unquote-splicing",
         "defmacro",
     ];
     names.iter().map(|n| interner.intern(n)).collect()

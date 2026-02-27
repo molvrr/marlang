@@ -629,11 +629,7 @@ pub fn create_builtin_env() -> TypeEnv {
         "make-symbol",
         monotype(type_arrow(vec![t_string()], t_symbol())),
     );
-    env = extend_env(
-        &env,
-        "gensym",
-        monotype(type_arrow(vec![], t_symbol())),
-    );
+    env = extend_env(&env, "gensym", monotype(type_arrow(vec![], t_symbol())));
     env = extend_env(
         &env,
         "symbol->string",
@@ -645,9 +641,7 @@ pub fn create_builtin_env() -> TypeEnv {
         monotype(type_arrow(vec![t_string()], t_symbol())),
     );
     // Type predicates — polymorphic, return Bool
-    for name in &[
-        "symbol?", "pair?", "nil?", "number?", "string?", "list?",
-    ] {
+    for name in &["symbol?", "pair?", "nil?", "number?", "string?", "list?"] {
         env = extend_env(
             &env,
             name,

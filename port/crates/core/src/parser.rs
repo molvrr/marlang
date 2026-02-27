@@ -59,8 +59,10 @@ impl<'t> Parser<'t> {
                 message: "Unexpected ')'".to_string(),
                 span: *span,
             }),
-            Token::Quote(sym, span) | Token::Quasiquote(sym, span)
-            | Token::Unquote(sym, span) | Token::UnquoteSplicing(sym, span) => {
+            Token::Quote(sym, span)
+            | Token::Quasiquote(sym, span)
+            | Token::Unquote(sym, span)
+            | Token::UnquoteSplicing(sym, span) => {
                 let sym = *sym;
                 let start_span = *span;
                 self.advance();
@@ -190,7 +192,9 @@ mod tests {
     fn float_atom() {
         let (exprs, _) = parse_code("3.14");
         assert_eq!(exprs.len(), 1);
-        assert!(matches!(&exprs[0], Expr::Atom(LispValue::Number(v, _), _) if (*v - 3.14).abs() < 1e-10));
+        assert!(
+            matches!(&exprs[0], Expr::Atom(LispValue::Number(v, _), _) if (*v - 3.14).abs() < 1e-10)
+        );
     }
 
     #[test]

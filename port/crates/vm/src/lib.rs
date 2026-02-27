@@ -1,5 +1,5 @@
-pub mod bytecode;
 pub mod builtins;
+pub mod bytecode;
 pub mod compiler;
 pub mod debug;
 pub mod errors;

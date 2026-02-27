@@ -249,7 +249,11 @@ impl<'a> Lexer<'a> {
         // Special case: '-' might be a negative number
         if self.peek() == Some(b'-') {
             // Check if next char is a digit
-            if self.source.get(self.pos + 1).is_some_and(|b| b.is_ascii_digit()) {
+            if self
+                .source
+                .get(self.pos + 1)
+                .is_some_and(|b| b.is_ascii_digit())
+            {
                 text.push('-');
                 self.advance();
                 // Now lex the number part
@@ -353,7 +357,9 @@ mod tests {
     fn float() {
         let tokens = lex_tokens("3.14");
         assert_eq!(tokens.len(), 1);
-        assert!(matches!(&tokens[0], Token::Number(v, is_float, _) if (*v - 3.14).abs() < 1e-10 && *is_float));
+        assert!(
+            matches!(&tokens[0], Token::Number(v, is_float, _) if (*v - 3.14).abs() < 1e-10 && *is_float)
+        );
     }
 
     #[test]
@@ -377,7 +383,9 @@ mod tests {
         let interner = Interner::new();
         let tokens = lex("123abc", &interner).unwrap();
         assert_eq!(tokens.len(), 1);
-        assert!(matches!(&tokens[0], Token::Identifier(sym, _) if interner.resolve(*sym) == "123abc"));
+        assert!(
+            matches!(&tokens[0], Token::Identifier(sym, _) if interner.resolve(*sym) == "123abc")
+        );
     }
 
     // === Strings ===
@@ -436,7 +444,12 @@ mod tests {
         let interner = Interner::new();
         let result = lex("\"hello", &interner);
         assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("Unterminated string literal"));
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("Unterminated string literal")
+        );
     }
 
     // === Identifiers ===
@@ -454,7 +467,9 @@ mod tests {
         let interner = Interner::new();
         let tokens = lex("foo123", &interner).unwrap();
         assert_eq!(tokens.len(), 1);
-        assert!(matches!(&tokens[0], Token::Identifier(sym, _) if interner.resolve(*sym) == "foo123"));
+        assert!(
+            matches!(&tokens[0], Token::Identifier(sym, _) if interner.resolve(*sym) == "foo123")
+        );
     }
 
     #[test]
@@ -462,7 +477,9 @@ mod tests {
         let interner = Interner::new();
         let tokens = lex("my-function", &interner).unwrap();
         assert_eq!(tokens.len(), 1);
-        assert!(matches!(&tokens[0], Token::Identifier(sym, _) if interner.resolve(*sym) == "my-function"));
+        assert!(
+            matches!(&tokens[0], Token::Identifier(sym, _) if interner.resolve(*sym) == "my-function")
+        );
     }
 
     #[test]
@@ -471,7 +488,9 @@ mod tests {
         for op in ["+", "-", "*", "/", "<=", ">="] {
             let tokens = lex(op, &interner).unwrap();
             assert_eq!(tokens.len(), 1);
-            assert!(matches!(&tokens[0], Token::Identifier(sym, _) if interner.resolve(*sym) == op));
+            assert!(
+                matches!(&tokens[0], Token::Identifier(sym, _) if interner.resolve(*sym) == op)
+            );
         }
     }
 
@@ -479,14 +498,18 @@ mod tests {
     fn question_mark_identifier() {
         let interner = Interner::new();
         let tokens = lex("empty?", &interner).unwrap();
-        assert!(matches!(&tokens[0], Token::Identifier(sym, _) if interner.resolve(*sym) == "empty?"));
+        assert!(
+            matches!(&tokens[0], Token::Identifier(sym, _) if interner.resolve(*sym) == "empty?")
+        );
     }
 
     #[test]
     fn exclamation_mark_identifier() {
         let interner = Interner::new();
         let tokens = lex("set!", &interner).unwrap();
-        assert!(matches!(&tokens[0], Token::Identifier(sym, _) if interner.resolve(*sym) == "set!"));
+        assert!(
+            matches!(&tokens[0], Token::Identifier(sym, _) if interner.resolve(*sym) == "set!")
+        );
     }
 
     // === Parentheses ===
@@ -511,8 +534,14 @@ mod tests {
     #[test]
     fn nested_parens() {
         let tokens = lex_tokens("((()))");
-        let lparens = tokens.iter().filter(|t| matches!(t, Token::LParen(_))).count();
-        let rparens = tokens.iter().filter(|t| matches!(t, Token::RParen(_))).count();
+        let lparens = tokens
+            .iter()
+            .filter(|t| matches!(t, Token::LParen(_)))
+            .count();
+        let rparens = tokens
+            .iter()
+            .filter(|t| matches!(t, Token::RParen(_)))
+            .count();
         assert_eq!(lparens, 3);
         assert_eq!(rparens, 3);
     }
@@ -535,9 +564,8 @@ mod tests {
 
     #[test]
     fn multiple_comments() {
-        let tokens = lex_tokens(
-            "\n      ; first comment\n      42 ; inline\n      ; last comment\n    ",
-        );
+        let tokens =
+            lex_tokens("\n      ; first comment\n      42 ; inline\n      ; last comment\n    ");
         assert_eq!(tokens.len(), 1);
     }
 

@@ -10,9 +10,9 @@ use std::sync::Arc;
 use crate::bytecode::{Chunk, FunctionPrototype};
 use crate::errors::VMError;
 use crate::object::{Closure, HandlerEntry, VMHandlerFrame, VMObject};
-use crate::value::{format_value_unquoted, Value};
+use crate::value::{Value, format_value_unquoted};
 use crate::vm::{
-    call_closure, call_value, next_handler_id, resume_continuation, EffectSignal, VMSignal, VM,
+    EffectSignal, VM, VMSignal, call_closure, call_value, next_handler_id, resume_continuation,
 };
 
 // ---------------------------------------------------------------------------
@@ -130,12 +130,7 @@ fn call_predicate_safe(vm: &mut VM, predicate: &Closure, value: &Value) -> bool 
     }
 }
 
-fn deliver_message(
-    state: &mut SchedulerState,
-    vm: &mut VM,
-    target_pid: FiberId,
-    msg: Value,
-) {
+fn deliver_message(state: &mut SchedulerState, vm: &mut VM, target_pid: FiberId, msg: Value) {
     let mailbox = match state.mailboxes.get_mut(&target_pid) {
         Some(m) => m,
         None => return,
@@ -173,12 +168,7 @@ fn kill_fiber(state: &mut SchedulerState, vm: &mut VM, pid: FiberId, reason: &st
     handle_fiber_exit(state, vm, pid, ExitReason::Crash(reason.to_string()));
 }
 
-fn handle_fiber_exit(
-    state: &mut SchedulerState,
-    vm: &mut VM,
-    pid: FiberId,
-    reason: ExitReason,
-) {
+fn handle_fiber_exit(state: &mut SchedulerState, vm: &mut VM, pid: FiberId, reason: ExitReason) {
     state.live_pids.remove(&pid);
     let reason_str = match &reason {
         ExitReason::Normal => "normal".to_string(),
@@ -262,6 +252,15 @@ const HANDLED_EFFECTS: &[&str] = &[
     "read-line",
     "read-file",
     "write-file",
+    // Layer 4: TCP (only supported in multi-threaded scheduler)
+    "tcp-connect",
+    "tcp-listen",
+    "tcp-accept",
+    "tcp-send",
+    "tcp-recv",
+    "tcp-close",
+    // Exception effect (default handler crashes the fiber)
+    "throw",
 ];
 
 fn make_dummy_closure() -> Closure {
@@ -317,7 +316,6 @@ fn handle_effect(
 
     match signal.op_name.as_str() {
         // --- Layer 1: Fibers ---
-
         "fiber-spawn" => {
             let thunk = match args.first().and_then(|v| v.as_object()) {
                 Some(VMObject::Closure(c)) => (**c).clone(),
@@ -334,9 +332,10 @@ fn handle_effect(
                 cont,
                 Value::object(VMObject::Pid(pid)),
             );
-            state
-                .ready_queue
-                .push_back(Fiber::New { closure: thunk, pid });
+            state.ready_queue.push_back(Fiber::New {
+                closure: thunk,
+                pid,
+            });
         }
 
         "fiber-yield" => {
@@ -353,12 +352,8 @@ fn handle_effect(
         }
 
         // --- Layer 1: Channels ---
-
         "chan-new" => {
-            let capacity = args
-                .first()
-                .and_then(|v| v.as_number())
-                .unwrap_or(0.0) as usize;
+            let capacity = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as usize;
             let id = state.next_channel_id;
             state.next_channel_id += 1;
             state.channels.insert(
@@ -462,7 +457,6 @@ fn handle_effect(
         }
 
         // --- Layer 2: Actors ---
-
         "actor-send" => {
             let target_pid = as_pid(args.first().unwrap_or(&Value::nil()))
                 .ok_or_else(|| VMError::runtime("actor-send: first argument must be a pid"))?;
@@ -496,7 +490,7 @@ fn handle_effect(
                 _ => {
                     return Err(VMError::runtime(
                         "actor-receive-match: argument must be a closure",
-                    ))
+                    ));
                 }
             };
 
@@ -572,7 +566,6 @@ fn handle_effect(
         }
 
         // --- Layer 3: IO effects (synchronous) ---
-
         "print" => {
             let msg = args.first().cloned().unwrap_or_else(Value::nil);
             let text = format_value_unquoted(&msg);
@@ -605,12 +598,7 @@ fn handle_effect(
                     line.pop();
                 }
             }
-            enqueue_resumed(
-                state,
-                state.current_pid,
-                cont,
-                Value::string(line.as_str()),
-            );
+            enqueue_resumed(state, state.current_pid, cont, Value::string(line.as_str()));
         }
 
         "read-file" => {
@@ -645,6 +633,23 @@ fn handle_effect(
             std::fs::write(path, content)
                 .map_err(|e| VMError::runtime(format!("write-file: {}", e)))?;
             enqueue_resumed(state, state.current_pid, cont, Value::nil());
+        }
+
+        // --- Layer 4: TCP (not supported in single-threaded scheduler) ---
+        "tcp-connect" | "tcp-listen" | "tcp-accept" | "tcp-send" | "tcp-recv" | "tcp-close" => {
+            return Err(VMError::runtime(
+                "TCP effects require the multi-threaded scheduler (run-fibers-parallel)",
+            ));
+        }
+
+        // --- Exception effect (default handler: crash the fiber) ---
+        "throw" => {
+            let msg = args
+                .first()
+                .and_then(|v| v.as_string())
+                .unwrap_or("unknown error".into())
+                .to_string();
+            return Err(VMError::runtime(format!("uncaught exception: {}", msg)));
         }
 
         _ => {
@@ -736,7 +741,16 @@ pub fn run_fibers(vm: &mut VM, body: &Closure) -> Result<Value, VMError> {
             }
             Err(VMSignal::Effect(signal)) => {
                 // PERFORM already cleaned up VM state
-                handle_effect(&mut state, vm, signal)?;
+                if let Err(e) = handle_effect(&mut state, vm, signal) {
+                    // Effect handling failed — crash this fiber only
+                    vm.clear_stack_slots(saved_stack_top);
+                    vm.frame_count = saved_frame_count;
+                    vm.stack_top = saved_stack_top;
+                    if !vm.handler_stack.is_empty() {
+                        remove_handler_frame(vm);
+                    }
+                    handle_fiber_exit(&mut state, vm, pid, ExitReason::Crash(e.message.clone()));
+                }
             }
             Err(VMSignal::Error(e)) => {
                 // Fiber crashed — restore VM state
@@ -746,12 +760,7 @@ pub fn run_fibers(vm: &mut VM, body: &Closure) -> Result<Value, VMError> {
                 if !vm.handler_stack.is_empty() {
                     remove_handler_frame(vm);
                 }
-                handle_fiber_exit(
-                    &mut state,
-                    vm,
-                    pid,
-                    ExitReason::Crash(e.message.clone()),
-                );
+                handle_fiber_exit(&mut state, vm, pid, ExitReason::Crash(e.message.clone()));
             }
         }
     }

@@ -218,7 +218,9 @@ impl<'a> Compiler<'a> {
 
     fn emit_op(&mut self, op: Op, line: u32, operand: u32) -> usize {
         let idx = self.chunk.code.len();
-        self.chunk.code.push(Instruction::with_operand(op, line, operand));
+        self.chunk
+            .code
+            .push(Instruction::with_operand(op, line, operand));
         idx
     }
 
@@ -533,7 +535,11 @@ impl<'a> Compiler<'a> {
                         // defmacro should be consumed by the macro expander; at compile time, emit nil
                         self.emit_constant(ConstantValue::Nil, line);
                         return Ok(());
-                    } else if sym == ks.class || sym == ks.instance || sym == ks.type_ || sym == ks.foreign {
+                    } else if sym == ks.class
+                        || sym == ks.instance
+                        || sym == ks.type_
+                        || sym == ks.foreign
+                    {
                         self.emit_constant(ConstantValue::Nil, line);
                         return Ok(());
                     }
@@ -676,10 +682,7 @@ impl<'a> Compiler<'a> {
         for binding in &bindings_list {
             let pair = ast::list_to_array(binding);
             if pair.len() != 2 {
-                return Err(CompileError::new(
-                    "let binding must be (name value)",
-                    line,
-                ));
+                return Err(CompileError::new("let binding must be (name value)", line));
             }
             let name = self.get_param_name(pair[0])?;
             self.compile_expr(pair[1], false)?;
@@ -724,10 +727,7 @@ impl<'a> Compiler<'a> {
         for clause_expr in clauses {
             let clause = ast::list_to_array(clause_expr);
             if clause.len() != 2 {
-                return Err(CompileError::new(
-                    "cond clause must be (test expr)",
-                    line,
-                ));
+                return Err(CompileError::new("cond clause must be (test expr)", line));
             }
 
             let test_expr = clause[0];
@@ -1021,8 +1021,7 @@ impl<'a> Compiler<'a> {
 
                     self.known_constructors.insert(ctor_sym);
 
-                    let name_idx =
-                        self.add_constant(ConstantValue::String(ctor_name.clone()));
+                    let name_idx = self.add_constant(ConstantValue::String(ctor_name.clone()));
                     if arity == 0 {
                         self.emit_op2(Op::Construct, line, name_idx, 0);
                         self.emit_op(Op::SetGlobal, line, name_idx);
@@ -1071,10 +1070,7 @@ impl<'a> Compiler<'a> {
 
     fn compile_perform(&mut self, elements: &[&Expr], line: u32) -> Result<(), CompileError> {
         if elements.len() < 2 {
-            return Err(CompileError::new(
-                "perform expects an operation name",
-                line,
-            ));
+            return Err(CompileError::new("perform expects an operation name", line));
         }
         let op_sym = Self::get_symbol(elements[1])
             .ok_or_else(|| CompileError::new("perform expects an operation name symbol", line))?;
@@ -1132,10 +1128,9 @@ impl<'a> Compiler<'a> {
                 return Err(CompileError::new("handler pattern cannot be empty", line));
             }
 
-            let op_sym = Self::get_symbol(pattern_elements[0])
-                .ok_or_else(|| {
-                    CompileError::new("handler pattern must start with operation name", line)
-                })?;
+            let op_sym = Self::get_symbol(pattern_elements[0]).ok_or_else(|| {
+                CompileError::new("handler pattern must start with operation name", line)
+            })?;
 
             if op_sym == self.known_symbols.return_ {
                 // Return handler
@@ -1167,8 +1162,7 @@ impl<'a> Compiler<'a> {
                     upvalues: fn_compiler.upvalues,
                     chunk: fn_compiler.chunk,
                 };
-                return_proto_idx =
-                    Some(self.add_constant(ConstantValue::Prototype(proto)));
+                return_proto_idx = Some(self.add_constant(ConstantValue::Prototype(proto)));
             } else {
                 // Effect handler
                 let mut params = Vec::new();
@@ -1208,8 +1202,7 @@ impl<'a> Compiler<'a> {
                     chunk: fn_compiler.chunk,
                 };
 
-                let op_name_idx =
-                    self.add_constant(ConstantValue::String(op_name_str));
+                let op_name_idx = self.add_constant(ConstantValue::String(op_name_str));
                 let proto_idx = self.add_constant(ConstantValue::Prototype(proto));
                 handler_infos.push(HandlerInfo {
                     op_name_idx,
@@ -1297,7 +1290,8 @@ impl<'a> Compiler<'a> {
             }
             Expr::Atom(LispValue::Symbol(sym), _) => {
                 // Push make-symbol global, push name string, call with 1 arg
-                let make_sym_name = self.add_constant(ConstantValue::String("make-symbol".to_string()));
+                let make_sym_name =
+                    self.add_constant(ConstantValue::String("make-symbol".to_string()));
                 self.emit_op(Op::PushGlobal, line, make_sym_name);
                 let name_str = self.interner.resolve(*sym).to_string();
                 self.emit_constant(ConstantValue::String(name_str), line);
@@ -1320,7 +1314,10 @@ impl<'a> Compiler<'a> {
 
     fn compile_quasiquote(&mut self, elements: &[&Expr], line: u32) -> Result<(), CompileError> {
         if elements.len() != 2 {
-            return Err(CompileError::new("quasiquote expects exactly 1 argument", line));
+            return Err(CompileError::new(
+                "quasiquote expects exactly 1 argument",
+                line,
+            ));
         }
         self.compile_qq(elements[1], line)
     }
@@ -1361,10 +1358,14 @@ impl<'a> Compiler<'a> {
                         if let Some(sym) = Self::get_symbol(head_elems[0]) {
                             if sym == self.known_symbols.unquote_splicing {
                                 if head_elems.len() != 2 {
-                                    return Err(CompileError::new("unquote-splicing expects 1 argument", line));
+                                    return Err(CompileError::new(
+                                        "unquote-splicing expects 1 argument",
+                                        line,
+                                    ));
                                 }
                                 // Push append global, compile spliced expr, compile rest, call append
-                                let append_name = self.add_constant(ConstantValue::String("append".to_string()));
+                                let append_name =
+                                    self.add_constant(ConstantValue::String("append".to_string()));
                                 self.emit_op(Op::PushGlobal, line, append_name);
                                 self.compile_expr(head_elems[1], false)?;
                                 self.compile_qq_list(tail, line)?;
@@ -1397,18 +1398,14 @@ impl<'a> Compiler<'a> {
             ));
         }
 
-        let name_sym = Self::get_symbol(elements[1]).ok_or_else(|| {
-            CompileError::new("foreign-lib name must be a symbol", line)
-        })?;
+        let name_sym = Self::get_symbol(elements[1])
+            .ok_or_else(|| CompileError::new("foreign-lib name must be a symbol", line))?;
         let lib_name = self.interner.resolve(name_sym).to_string();
 
         let path_str = match elements[2] {
             Expr::Atom(LispValue::String(s), _) => s.to_string(),
             _ => {
-                return Err(CompileError::new(
-                    "foreign-lib path must be a string",
-                    line,
-                ));
+                return Err(CompileError::new("foreign-lib path must be a string", line));
             }
         };
 
@@ -1600,7 +1597,14 @@ pub fn compile(expr: &Expr, interner: &Interner) -> Result<Chunk, CompileError> 
     let ks = KnownSymbols::new(interner);
     let default_ctors: HashSet<Symbol> = HashSet::new();
 
-    let mut compiler = Compiler::new("<script>", interner, &ks, None, default_ctors, HashMap::new());
+    let mut compiler = Compiler::new(
+        "<script>",
+        interner,
+        &ks,
+        None,
+        default_ctors,
+        HashMap::new(),
+    );
     compiler.compile_expr(expr, false)?;
     compiler.emit(Op::Return, Compiler::get_line(expr));
     compiler.chunk.local_count = compiler.local_count;
@@ -1612,7 +1616,14 @@ pub fn compile_program(exprs: &[Expr], interner: &Interner) -> Result<Chunk, Com
     let ks = KnownSymbols::new(interner);
     let default_ctors: HashSet<Symbol> = HashSet::new();
 
-    let mut compiler = Compiler::new("<script>", interner, &ks, None, default_ctors, HashMap::new());
+    let mut compiler = Compiler::new(
+        "<script>",
+        interner,
+        &ks,
+        None,
+        default_ctors,
+        HashMap::new(),
+    );
 
     if exprs.is_empty() {
         compiler.emit_constant(ConstantValue::Nil, 0);

@@ -25,10 +25,7 @@ pub fn format_instruction(chunk: &Chunk, offset: usize) -> String {
     let line = inst.line;
     let op_name = inst.op.name();
 
-    let mut base = format!(
-        "{:4} | {:4} | {:<16}",
-        offset, line, op_name
-    );
+    let mut base = format!("{:4} | {:4} | {:<16}", offset, line, op_name);
 
     if has_operand(inst) {
         base += &format!(" {:4}", inst.operand);
@@ -48,7 +45,11 @@ pub fn format_instruction(chunk: &Chunk, offset: usize) -> String {
 /// Get an annotation for an instruction that references a constant.
 pub fn get_annotation(chunk: &Chunk, inst: &Instruction) -> Option<String> {
     match inst.op {
-        Op::PushConst | Op::PushGlobal | Op::SetGlobal | Op::MatchTag | Op::Construct
+        Op::PushConst
+        | Op::PushGlobal
+        | Op::SetGlobal
+        | Op::MatchTag
+        | Op::Construct
         | Op::Perform => {
             let constant = chunk.constants.get(inst.operand as usize)?;
             Some(format_constant(constant))
@@ -78,7 +79,11 @@ fn format_constant(constant: &ConstantValue) -> String {
             }
         }
         ConstantValue::Boolean(b) => {
-            if *b { "#t".to_string() } else { "#f".to_string() }
+            if *b {
+                "#t".to_string()
+            } else {
+                "#f".to_string()
+            }
         }
         ConstantValue::Nil => "nil".to_string(),
         ConstantValue::Prototype(proto) => {

@@ -210,12 +210,10 @@ impl ConstantValue {
                     .collect();
                 Value::object(VMObject::List(entries))
             }
-            ConstantValue::FfiBound { lib_name, fn_name } => {
-                Value::object(VMObject::FfiBound {
-                    lib_global_name: Arc::from(lib_name.as_str()),
-                    fn_name: Arc::from(fn_name.as_str()),
-                })
-            }
+            ConstantValue::FfiBound { lib_name, fn_name } => Value::object(VMObject::FfiBound {
+                lib_global_name: Arc::from(lib_name.as_str()),
+                fn_name: Arc::from(fn_name.as_str()),
+            }),
         }
     }
 }

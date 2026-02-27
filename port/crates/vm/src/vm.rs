@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 use crate::bytecode::{Chunk, ConstantValue, FunctionPrototype, Op};
 use crate::errors::{StackTraceEntry, VMError};
 use crate::object::{CallFrame, Closure, HandlerEntry, VMContinuation, VMHandlerFrame, VMObject};
-use crate::value::{format_value_unquoted, Value};
+use crate::value::{Value, format_value_unquoted};
 
 // --- VMSignal: unified error/effect propagation ---
 
@@ -274,12 +274,18 @@ pub(crate) fn resume_continuation(
     let saved_handler_len = vm.handler_stack.len();
     let frame_offset = resume_base as i64 - cont.frame_base as i64;
     let stack_offset = (vm.stack_top as i64 - cont.stack.len() as i64 - 1) - cont.stack_base as i64;
+    let mut restored_handlers = Vec::new();
     for h in &cont.handler_stack {
-        vm.handler_stack
-            .push(rebase_handler(h, frame_offset, stack_offset));
+        let rebased = rebase_handler(h, frame_offset, stack_offset);
+        restored_handlers.push(rebased.clone());
+        vm.handler_stack.push(rebased);
     }
 
-    let result = run(vm, resume_base);
+    let result = if restored_handlers.is_empty() {
+        run(vm, resume_base)
+    } else {
+        run_restored_continuation(vm, resume_base, &restored_handlers, saved_handler_len)
+    };
 
     vm.frame_count = resume_base;
     vm.handler_stack.truncate(saved_handler_len);
@@ -684,15 +690,17 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                     vm.push(v.clone());
                                 } else {
                                     vm.frames[frame_idx].ip = ip;
-                                    return Err(VMSignal::Error(
-                                        vm.vm_error(format!("Undefined variable: {}", stripped), &vm.frames[frame_idx]),
-                                    ));
+                                    return Err(VMSignal::Error(vm.vm_error(
+                                        format!("Undefined variable: {}", stripped),
+                                        &vm.frames[frame_idx],
+                                    )));
                                 }
                             } else {
                                 vm.frames[frame_idx].ip = ip;
-                                return Err(VMSignal::Error(
-                                    vm.vm_error(format!("Undefined variable: {}", s), &vm.frames[frame_idx]),
-                                ));
+                                return Err(VMSignal::Error(vm.vm_error(
+                                    format!("Undefined variable: {}", s),
+                                    &vm.frames[frame_idx],
+                                )));
                             }
                         }
                     },
@@ -800,9 +808,10 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     (Some(na), Some(nb)) => vm.push(Value::number(na * nb)),
                     _ => {
                         vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(
-                            vm.vm_error("Multiplication requires numbers", &vm.frames[frame_idx]),
-                        ));
+                        return Err(VMSignal::Error(vm.vm_error(
+                            "Multiplication requires numbers",
+                            &vm.frames[frame_idx],
+                        )));
                     }
                 }
             }
@@ -848,7 +857,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     (Some(na), Some(nb)) => vm.push(Value::boolean(na < nb)),
                     _ => {
                         vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(vm.vm_error("< requires numbers", &vm.frames[frame_idx])));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("< requires numbers", &vm.frames[frame_idx]),
+                        ));
                     }
                 }
             }
@@ -860,7 +871,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     (Some(na), Some(nb)) => vm.push(Value::boolean(na > nb)),
                     _ => {
                         vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(vm.vm_error("> requires numbers", &vm.frames[frame_idx])));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("> requires numbers", &vm.frames[frame_idx]),
+                        ));
                     }
                 }
             }
@@ -872,7 +885,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     (Some(na), Some(nb)) => vm.push(Value::boolean(na <= nb)),
                     _ => {
                         vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(vm.vm_error("<= requires numbers", &vm.frames[frame_idx])));
+                        return Err(VMSignal::Error(
+                            vm.vm_error("<= requires numbers", &vm.frames[frame_idx]),
+                        ));
                     }
                 }
             }
@@ -884,7 +899,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     (Some(na), Some(nb)) => vm.push(Value::boolean(na >= nb)),
                     _ => {
                         vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(vm.vm_error(">= requires numbers", &vm.frames[frame_idx])));
+                        return Err(VMSignal::Error(
+                            vm.vm_error(">= requires numbers", &vm.frames[frame_idx]),
+                        ));
                     }
                 }
             }
@@ -1019,36 +1036,31 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             vm.pop(); // pop callee
                             vm.frames[frame_idx].ip = ip;
 
-                            let lib_val = vm
-                                .globals
-                                .get(lib_global.as_ref())
-                                .cloned()
-                                .ok_or_else(|| {
-                                    VMSignal::Error(vm.vm_error(
-                                        format!(
-                                            "FFI library '{}' not found in globals",
-                                            lib_global
-                                        ),
-                                        &vm.frames[frame_idx],
-                                    ))
-                                })?;
+                            let lib_val =
+                                vm.globals
+                                    .get(lib_global.as_ref())
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        VMSignal::Error(vm.vm_error(
+                                            format!(
+                                                "FFI library '{}' not found in globals",
+                                                lib_global
+                                            ),
+                                            &vm.frames[frame_idx],
+                                        ))
+                                    })?;
                             let lib = match lib_val.as_object() {
                                 Some(VMObject::FfiLibrary(l)) => l.clone(),
                                 _ => {
                                     return Err(VMSignal::Error(vm.vm_error(
-                                        format!(
-                                            "'{}' is not an FFI library",
-                                            lib_global
-                                        ),
+                                        format!("'{}' is not an FFI library", lib_global),
                                         &vm.frames[frame_idx],
                                     )));
                                 }
                             };
-                            let registry =
-                                crate::ffi::STRUCT_REGISTRY.lock().unwrap();
-                            let result =
-                                crate::ffi::ffi_call(&lib, &fn_name, &args, &registry)
-                                    .map_err(VMSignal::Error)?;
+                            let registry = crate::ffi::STRUCT_REGISTRY.lock().unwrap();
+                            let result = crate::ffi::ffi_call(&lib, &fn_name, &args, &registry)
+                                .map_err(VMSignal::Error)?;
                             cache_frame!();
                             vm.push(result);
                         }
@@ -1056,14 +1068,17 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         _ => {
                             let kind = obj.kind_name();
                             vm.frames[frame_idx].ip = ip;
-                            return Err(VMSignal::Error(
-                                vm.vm_error(format!("Cannot call {}", kind), &vm.frames[frame_idx]),
-                            ));
+                            return Err(VMSignal::Error(vm.vm_error(
+                                format!("Cannot call {}", kind),
+                                &vm.frames[frame_idx],
+                            )));
                         }
                     }
                 } else {
                     vm.frames[frame_idx].ip = ip;
-                    return Err(VMSignal::Error(vm.vm_error("Cannot call number", &vm.frames[frame_idx])));
+                    return Err(VMSignal::Error(
+                        vm.vm_error("Cannot call number", &vm.frames[frame_idx]),
+                    ));
                 }
             }
 
@@ -1173,36 +1188,31 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             vm.pop(); // pop callee
                             vm.frames[frame_idx].ip = ip;
 
-                            let lib_val = vm
-                                .globals
-                                .get(lib_global.as_ref())
-                                .cloned()
-                                .ok_or_else(|| {
-                                    VMSignal::Error(vm.vm_error(
-                                        format!(
-                                            "FFI library '{}' not found in globals",
-                                            lib_global
-                                        ),
-                                        &vm.frames[frame_idx],
-                                    ))
-                                })?;
+                            let lib_val =
+                                vm.globals
+                                    .get(lib_global.as_ref())
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        VMSignal::Error(vm.vm_error(
+                                            format!(
+                                                "FFI library '{}' not found in globals",
+                                                lib_global
+                                            ),
+                                            &vm.frames[frame_idx],
+                                        ))
+                                    })?;
                             let lib = match lib_val.as_object() {
                                 Some(VMObject::FfiLibrary(l)) => l.clone(),
                                 _ => {
                                     return Err(VMSignal::Error(vm.vm_error(
-                                        format!(
-                                            "'{}' is not an FFI library",
-                                            lib_global
-                                        ),
+                                        format!("'{}' is not an FFI library", lib_global),
                                         &vm.frames[frame_idx],
                                     )));
                                 }
                             };
-                            let registry =
-                                crate::ffi::STRUCT_REGISTRY.lock().unwrap();
-                            let result =
-                                crate::ffi::ffi_call(&lib, &fn_name, &args, &registry)
-                                    .map_err(VMSignal::Error)?;
+                            let registry = crate::ffi::STRUCT_REGISTRY.lock().unwrap();
+                            let result = crate::ffi::ffi_call(&lib, &fn_name, &args, &registry)
+                                .map_err(VMSignal::Error)?;
 
                             vm.frame_count -= 1;
                             if vm.frame_count <= base_frame_count {
@@ -1217,14 +1227,17 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         _ => {
                             let kind = obj.kind_name();
                             vm.frames[frame_idx].ip = ip;
-                            return Err(VMSignal::Error(
-                                vm.vm_error(format!("Cannot call {}", kind), &vm.frames[frame_idx]),
-                            ));
+                            return Err(VMSignal::Error(vm.vm_error(
+                                format!("Cannot call {}", kind),
+                                &vm.frames[frame_idx],
+                            )));
                         }
                     }
                 } else {
                     vm.frames[frame_idx].ip = ip;
-                    return Err(VMSignal::Error(vm.vm_error("Cannot call number", &vm.frames[frame_idx])));
+                    return Err(VMSignal::Error(
+                        vm.vm_error("Cannot call number", &vm.frames[frame_idx]),
+                    ));
                 }
             }
 
@@ -1234,9 +1247,10 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     ConstantValue::Prototype(p) => p,
                     _ => {
                         vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(
-                            vm.vm_error("CLOSURE expects a prototype constant", &vm.frames[frame_idx]),
-                        ));
+                        return Err(VMSignal::Error(vm.vm_error(
+                            "CLOSURE expects a prototype constant",
+                            &vm.frames[frame_idx],
+                        )));
                     }
                 };
 
@@ -1288,9 +1302,10 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             if field_idx == 0 {
                                 if elements.is_empty() {
                                     vm.frames[frame_idx].ip = ip;
-                                    return Err(VMSignal::Error(
-                                        vm.vm_error("Cannot get head of empty list", &vm.frames[frame_idx]),
-                                    ));
+                                    return Err(VMSignal::Error(vm.vm_error(
+                                        "Cannot get head of empty list",
+                                        &vm.frames[frame_idx],
+                                    )));
                                 }
                                 vm.push(elements[0].clone());
                             } else if field_idx == 1 {
@@ -1313,7 +1328,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     }
                 } else {
                     vm.frames[frame_idx].ip = ip;
-                    return Err(VMSignal::Error(vm.vm_error("GET_FIELD on number", &vm.frames[frame_idx])));
+                    return Err(VMSignal::Error(
+                        vm.vm_error("GET_FIELD on number", &vm.frames[frame_idx]),
+                    ));
                 }
             }
 
@@ -1367,16 +1384,15 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
             Op::PushHandler => {
                 // Use cached constants for handler descriptor lookup
                 // SAFETY: operand is a valid constant index
-                let descriptor_str =
-                    match unsafe { &*constants.add(inst.operand as usize) } {
-                        ConstantValue::String(s) if s.starts_with("\0handler:") => s.clone(),
-                        _ => {
-                            vm.frames[frame_idx].ip = ip;
-                            return Err(VMSignal::Error(
-                                vm.vm_error("Invalid handler descriptor", &vm.frames[frame_idx]),
-                            ));
-                        }
-                    };
+                let descriptor_str = match unsafe { &*constants.add(inst.operand as usize) } {
+                    ConstantValue::String(s) if s.starts_with("\0handler:") => s.clone(),
+                    _ => {
+                        vm.frames[frame_idx].ip = ip;
+                        return Err(VMSignal::Error(
+                            vm.vm_error("Invalid handler descriptor", &vm.frames[frame_idx]),
+                        ));
+                    }
+                };
 
                 let json = &descriptor_str["\0handler:".len()..];
                 let descriptor = match parse_handler_descriptor(json) {
@@ -1392,23 +1408,22 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                 // Create body closure from prototype
                 // SAFETY: descriptor indices are valid constant indices
-                let body_proto = match unsafe { &*constants.add(descriptor.body_proto_idx as usize) }
-                {
-                    ConstantValue::Prototype(p) => p,
-                    _ => {
-                        vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(
-                            vm.vm_error("Expected body prototype", &vm.frames[frame_idx]),
-                        ));
-                    }
-                };
+                let body_proto =
+                    match unsafe { &*constants.add(descriptor.body_proto_idx as usize) } {
+                        ConstantValue::Prototype(p) => p,
+                        _ => {
+                            vm.frames[frame_idx].ip = ip;
+                            return Err(VMSignal::Error(
+                                vm.vm_error("Expected body prototype", &vm.frames[frame_idx]),
+                            ));
+                        }
+                    };
                 let body_closure = create_closure_from_proto(&vm.frames[frame_idx], body_proto);
 
                 // Create handler clause closures
                 let mut handler_entries = Vec::new();
                 for h in &descriptor.handlers {
-                    let op_name = match unsafe { &*constants.add(h.op_name_idx as usize) }
-                    {
+                    let op_name = match unsafe { &*constants.add(h.op_name_idx as usize) } {
                         ConstantValue::String(s) => s.clone(),
                         _ => {
                             vm.frames[frame_idx].ip = ip;
@@ -1435,14 +1450,16 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                 // Create return handler closure
                 let return_closure = if descriptor.return_proto_idx >= 0 {
-                    match unsafe { &*constants.add(descriptor.return_proto_idx as usize) }
-                    {
-                        ConstantValue::Prototype(p) => Some(create_closure_from_proto(&vm.frames[frame_idx], p)),
+                    match unsafe { &*constants.add(descriptor.return_proto_idx as usize) } {
+                        ConstantValue::Prototype(p) => {
+                            Some(create_closure_from_proto(&vm.frames[frame_idx], p))
+                        }
                         _ => {
                             vm.frames[frame_idx].ip = ip;
-                            return Err(VMSignal::Error(
-                                vm.vm_error("Expected return handler prototype", &vm.frames[frame_idx]),
-                            ));
+                            return Err(VMSignal::Error(vm.vm_error(
+                                "Expected return handler prototype",
+                                &vm.frames[frame_idx],
+                            )));
                         }
                     }
                 } else {
@@ -1559,9 +1576,10 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     vm.push(result);
                 } else {
                     vm.frames[frame_idx].ip = ip;
-                    return Err(VMSignal::Error(
-                        vm.vm_error(format!("Unhandled effect: {}", op_name), &vm.frames[frame_idx]),
-                    ));
+                    return Err(VMSignal::Error(vm.vm_error(
+                        format!("Unhandled effect: {}", op_name),
+                        &vm.frames[frame_idx],
+                    )));
                 }
             }
 
@@ -1582,9 +1600,10 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 // Enforce one-shot semantics via VM-level tracking (works across Arc aliases)
                 if !vm.resumed_continuations.insert(cont.id) {
                     vm.frames[frame_idx].ip = ip;
-                    return Err(VMSignal::Error(
-                        vm.vm_error("Continuation already resumed (one-shot)", &vm.frames[frame_idx]),
-                    ));
+                    return Err(VMSignal::Error(vm.vm_error(
+                        "Continuation already resumed (one-shot)",
+                        &vm.frames[frame_idx],
+                    )));
                 }
 
                 let cont_data = (**cont).clone();
@@ -1713,7 +1732,6 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
         }
     }
 }
-
 
 // --- Value equality ---
 

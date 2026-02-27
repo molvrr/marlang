@@ -84,7 +84,8 @@ fn variadic_arith_ops() -> HashMap<&'static str, VariadicArithInfo> {
     m
 }
 
-const FFI_VARIADIC_FUNCTIONS: &[&str] = &["ffi-call", "struct-new", "struct-get", "struct-set", "list"];
+const FFI_VARIADIC_FUNCTIONS: &[&str] =
+    &["ffi-call", "struct-new", "struct-get", "struct-set", "list"];
 
 // ===== Type Expression Parsing =====
 
@@ -162,10 +163,11 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                         span: None,
                     });
                 }
-                let var_name = get_symbol(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
-                    message: "mu variable must be a symbol".into(),
-                    span: None,
-                })?;
+                let var_name =
+                    get_symbol(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
+                        message: "mu variable must be a symbol".into(),
+                        span: None,
+                    })?;
                 let body = parse_type_expr(elements[2], env, interner)?;
                 return Ok(type_rec(var_name, body));
             }
@@ -186,7 +188,11 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
     }
 }
 
-fn parse_constraint(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Constraint, TypeError> {
+fn parse_constraint(
+    expr: &Expr,
+    env: &TypeEnv,
+    interner: &Interner,
+) -> Result<Constraint, TypeError> {
     let elements = list_to_array(expr);
     if elements.len() != 2 {
         return Err(TypeError::InvalidTypeAnnotation {
@@ -253,9 +259,7 @@ fn parse_pattern(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Patt
             }
             Ok(Pattern::Var(name.to_string()))
         }
-        Expr::Atom(LispValue::Number(v, _), _) => {
-            Ok(Pattern::Literal(LiteralPattern::Number(*v)))
-        }
+        Expr::Atom(LispValue::Number(v, _), _) => Ok(Pattern::Literal(LiteralPattern::Number(*v))),
         Expr::Atom(LispValue::String(s), _) => {
             Ok(Pattern::Literal(LiteralPattern::String(s.to_string())))
         }
@@ -267,10 +271,11 @@ fn parse_pattern(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Patt
                     span: None,
                 });
             }
-            let ctor_name = get_symbol(elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
-                message: "Pattern constructor must be a symbol".into(),
-                span: None,
-            })?;
+            let ctor_name =
+                get_symbol(elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
+                    message: "Pattern constructor must be a symbol".into(),
+                    span: None,
+                })?;
             let mut args = Vec::new();
             for e in &elements[1..] {
                 args.push(parse_pattern(e, env, interner)?);
@@ -315,7 +320,9 @@ pub fn infer_expr(
                     "cond" => return infer_cond(env, &elements, interner),
                     "match" => return infer_match(env, &elements, interner),
                     "data" => return infer_data_def(env, &elements, interner),
-                    "class" | "instance" | "type" | "foreign" | "foreign-lib" | "defmacro" => return Ok(pure_result(t_unit())),
+                    "class" | "instance" | "type" | "foreign" | "foreign-lib" | "defmacro" => {
+                        return Ok(pure_result(t_unit()));
+                    }
                     "quote" | "quasiquote" => {
                         let tv = fresh_type_var();
                         return Ok(pure_result(tv));
@@ -355,7 +362,11 @@ fn infer_atom(
                 .or_else(|| {
                     // Fallback: strip hygiene marks from macro expansion
                     let stripped = strip_marks(name);
-                    if stripped != name { lookup_var(env, stripped) } else { None }
+                    if stripped != name {
+                        lookup_var(env, stripped)
+                    } else {
+                        None
+                    }
                 })
                 .ok_or(TypeError::UndefinedVariable {
                     name: strip_marks(name).to_string(),
@@ -390,14 +401,20 @@ fn infer_define(
     if let Expr::List { .. } = name_expr {
         let name_elements = list_to_array(name_expr);
         if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
-            let name = get_symbol(name_elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
-                message: "Expected symbol before :".into(),
-                span: None,
-            })?;
+            let name =
+                get_symbol(name_elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
+                    message: "Expected symbol before :".into(),
+                    span: None,
+                })?;
 
-            let (annotated_type, annotated_constraints) = parse_type_annotation(name_elements[2], env, interner)?;
+            let (annotated_type, annotated_constraints) =
+                parse_type_annotation(name_elements[2], env, interner)?;
             let value_result = infer_expr(env, value_expr, interner)?;
-            let unify_subst = unify_with_context(&annotated_type, &value_result.ty, &format!("definition of {name}"))?;
+            let unify_subst = unify_with_context(
+                &annotated_type,
+                &value_result.ty,
+                &format!("definition of {name}"),
+            )?;
             let final_subst = compose_subst(&unify_subst, &value_result.subst);
             let mut all_constraints = annotated_constraints;
             all_constraints.extend(value_result.constraints);
@@ -455,16 +472,25 @@ fn infer_lambda(
         if let Expr::List { .. } = param {
             let param_elements = list_to_array(param);
             if param_elements.len() == 3 && is_symbol(param_elements[1], interner, ":") {
-                let name = get_symbol(param_elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
-                    message: "Parameter name must be a symbol".into(),
-                    span: None,
-                })?;
+                let name = get_symbol(param_elements[0], interner).ok_or(
+                    TypeError::InvalidTypeAnnotation {
+                        message: "Parameter name must be a symbol".into(),
+                        span: None,
+                    },
+                )?;
                 let ty = parse_type_expr(param_elements[2], env, interner)?;
                 params.push((name.to_string(), ty.clone()));
-                param_env = extend_env(&param_env, name, TypeScheme {
-                    quantified_vars: vec![],
-                    qual_type: QualType { constraints: vec![], ty },
-                });
+                param_env = extend_env(
+                    &param_env,
+                    name,
+                    TypeScheme {
+                        quantified_vars: vec![],
+                        qual_type: QualType {
+                            constraints: vec![],
+                            ty,
+                        },
+                    },
+                );
                 continue;
             }
         }
@@ -475,10 +501,17 @@ fn infer_lambda(
         })?;
         let param_type = fresh_type_var();
         params.push((name.to_string(), param_type.clone()));
-        param_env = extend_env(&param_env, name, TypeScheme {
-            quantified_vars: vec![],
-            qual_type: QualType { constraints: vec![], ty: param_type },
-        });
+        param_env = extend_env(
+            &param_env,
+            name,
+            TypeScheme {
+                quantified_vars: vec![],
+                qual_type: QualType {
+                    constraints: vec![],
+                    ty: param_type,
+                },
+            },
+        );
     }
 
     // Infer body
@@ -500,13 +533,17 @@ fn infer_lambda(
         }
     }
 
-    let param_types: Vec<Type> = params.iter().map(|(_, t)| apply_subst(&body_subst, t)).collect();
+    let param_types: Vec<Type> = params
+        .iter()
+        .map(|(_, t)| apply_subst(&body_subst, t))
+        .collect();
     let result_type = apply_subst(&body_subst, &body_type);
-    let fn_effects = if !body_effects.effects().is_empty() || matches!(body_effects, EffectRow::Open { .. }) {
-        Some(body_effects)
-    } else {
-        None
-    };
+    let fn_effects =
+        if !body_effects.effects().is_empty() || matches!(body_effects, EffectRow::Open { .. }) {
+            Some(body_effects)
+        } else {
+            None
+        };
     let fn_type = type_arrow_with_effects(param_types, fn_effects, result_type);
 
     Ok(InferResult {
@@ -621,10 +658,12 @@ fn infer_let(
         if let Expr::List { .. } = name_expr {
             let name_elements = list_to_array(name_expr);
             if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
-                let n = get_symbol(name_elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
-                    message: "Expected symbol before :".into(),
-                    span: None,
-                })?;
+                let n = get_symbol(name_elements[0], interner).ok_or(
+                    TypeError::InvalidTypeAnnotation {
+                        message: "Expected symbol before :".into(),
+                        span: None,
+                    },
+                )?;
                 name = n.to_string();
                 annotated_type = Some(parse_type_expr(name_elements[2], env, interner)?);
             } else {
@@ -651,13 +690,18 @@ fn infer_let(
         let mut binding_type = value_result.ty;
 
         if let Some(ann_type) = annotated_type {
-            let unify_result = unify_with_context(&ann_type, &binding_type, &format!("let binding {name}"))?;
+            let unify_result =
+                unify_with_context(&ann_type, &binding_type, &format!("let binding {name}"))?;
             subst = compose_subst(&unify_result, &subst);
             binding_type = apply_subst(&subst, &ann_type);
         }
 
         let env_for_gen = apply_subst_env(&subst, &let_env);
-        let scheme = generalize(&env_for_gen, &all_constraints, &apply_subst(&subst, &binding_type));
+        let scheme = generalize(
+            &env_for_gen,
+            &all_constraints,
+            &apply_subst(&subst, &binding_type),
+        );
         let_env = extend_env(&let_env, &name, scheme);
     }
 
@@ -896,13 +940,17 @@ fn infer_match(
         // Extend env with pattern bindings
         let mut branch_env = apply_subst_env(&subst, env);
         for (name, ty) in &pattern_check.bindings {
-            branch_env = extend_env(&branch_env, name, TypeScheme {
-                quantified_vars: vec![],
-                qual_type: QualType {
-                    constraints: vec![],
-                    ty: apply_subst(&subst, ty),
+            branch_env = extend_env(
+                &branch_env,
+                name,
+                TypeScheme {
+                    quantified_vars: vec![],
+                    qual_type: QualType {
+                        constraints: vec![],
+                        ty: apply_subst(&subst, ty),
+                    },
                 },
-            });
+            );
         }
 
         let body_result = infer_expr(&branch_env, body_expr, interner)?;
@@ -978,7 +1026,11 @@ fn infer_pattern(
             let (data_type, constructor) = lookup_constructor(env, name)
                 .or_else(|| {
                     let stripped = strip_marks(name);
-                    if stripped != name { lookup_constructor(env, stripped) } else { None }
+                    if stripped != name {
+                        lookup_constructor(env, stripped)
+                    } else {
+                        None
+                    }
                 })
                 .ok_or(TypeError::UndefinedConstructor {
                     name: strip_marks(name).to_string(),
@@ -1005,7 +1057,11 @@ fn infer_pattern(
             } else {
                 type_app(
                     type_const(&data_type.name),
-                    data_type.type_params.iter().map(|tv| type_var_map[tv].clone()).collect(),
+                    data_type
+                        .type_params
+                        .iter()
+                        .map(|tv| type_var_map[tv].clone())
+                        .collect(),
                 )
             };
 
@@ -1075,7 +1131,11 @@ fn infer_variadic_arith(
     let mut unified_type = apply_subst(&subst, &arg_types[0]);
     for (i, at) in arg_types.iter().enumerate().skip(1) {
         let arg_type = apply_subst(&subst, at);
-        let unify_result = unify_with_context(&unified_type, &arg_type, &format!("{op_name} argument {}", i + 1))?;
+        let unify_result = unify_with_context(
+            &unified_type,
+            &arg_type,
+            &format!("{op_name} argument {}", i + 1),
+        )?;
         subst = compose_subst(&unify_result, &subst);
         unified_type = apply_subst(&subst, &unified_type);
     }
@@ -1117,19 +1177,17 @@ fn infer_ffi_application(
             });
         }
 
-        let lib_name = get_symbol(arg_exprs[0], interner).ok_or_else(|| {
-            TypeError::InvalidTypeAnnotation {
+        let lib_name =
+            get_symbol(arg_exprs[0], interner).ok_or_else(|| TypeError::InvalidTypeAnnotation {
                 message: "ffi-call first argument must be a library variable".into(),
                 span: None,
-            }
-        })?;
+            })?;
 
-        let foreign_fn_name = get_string_literal(arg_exprs[1]).ok_or_else(|| {
-            TypeError::InvalidTypeAnnotation {
+        let foreign_fn_name =
+            get_string_literal(arg_exprs[1]).ok_or_else(|| TypeError::InvalidTypeAnnotation {
                 message: "ffi-call second argument must be a string literal function name".into(),
                 span: None,
-            }
-        })?;
+            })?;
 
         if !has_foreign_lib(env, lib_name) {
             return Err(TypeError::InvalidTypeAnnotation {
@@ -1387,7 +1445,10 @@ fn infer_application(
 
     // Propagate function effects
     let applied_fn_type = apply_subst(&final_subst, &fn_result.ty);
-    if let Type::Arrow { effects: Some(eff), .. } = &applied_fn_type {
+    if let Type::Arrow {
+        effects: Some(eff), ..
+    } = &applied_fn_type
+    {
         all_effects = combine_effect_rows(&all_effects, eff);
     }
 
@@ -1411,11 +1472,7 @@ fn infer_data_def(
 
 // ===== Effect System =====
 
-fn parse_effect_op(
-    expr: &Expr,
-    env: &TypeEnv,
-    interner: &Interner,
-) -> Result<EffectOp, TypeError> {
+fn parse_effect_op(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<EffectOp, TypeError> {
     let elements = list_to_array(expr);
     if elements.len() != 2 {
         return Err(TypeError::InvalidTypeAnnotation {
@@ -1555,7 +1612,11 @@ fn infer_perform(
         tp_subst.insert(tv.clone(), fresh_type_var());
     }
 
-    let instantiated_params: Vec<Type> = op.params.iter().map(|p| apply_subst(&tp_subst, p)).collect();
+    let instantiated_params: Vec<Type> = op
+        .params
+        .iter()
+        .map(|p| apply_subst(&tp_subst, p))
+        .collect();
     let instantiated_result = apply_subst(&tp_subst, &op.result);
 
     for c in &op.constraints {
@@ -1565,7 +1626,8 @@ fn infer_perform(
     for (i, arg_type) in arg_types.iter().enumerate() {
         let at = apply_subst(&subst, arg_type);
         let pt = &instantiated_params[i];
-        let unify_result = unify_with_context(&at, pt, &format!("argument {} of {op_name}", i + 1))?;
+        let unify_result =
+            unify_with_context(&at, pt, &format!("argument {} of {op_name}", i + 1))?;
         subst = compose_subst(&unify_result, &subst);
     }
 
@@ -1637,10 +1699,17 @@ fn infer_handle(
                     if pattern_elements.len() >= 2 {
                         if let Some(return_var_name) = get_symbol(pattern_elements[1], interner) {
                             let return_type = apply_subst(&subst, &body_result.ty);
-                            handler_env = extend_env(&handler_env, return_var_name, TypeScheme {
-                                quantified_vars: vec![],
-                                qual_type: QualType { constraints: vec![], ty: return_type },
-                            });
+                            handler_env = extend_env(
+                                &handler_env,
+                                return_var_name,
+                                TypeScheme {
+                                    quantified_vars: vec![],
+                                    qual_type: QualType {
+                                        constraints: vec![],
+                                        ty: return_type,
+                                    },
+                                },
+                            );
                         }
                     }
 
@@ -1675,10 +1744,17 @@ fn infer_handle(
                 for (i, arg_p) in arg_patterns.iter().enumerate() {
                     if let Some(arg_name) = get_symbol(arg_p, interner) {
                         if i < op_info.1.params.len() {
-                            handler_env = extend_env(&handler_env, arg_name, TypeScheme {
-                                quantified_vars: vec![],
-                                qual_type: QualType { constraints: vec![], ty: op_info.1.params[i].clone() },
-                            });
+                            handler_env = extend_env(
+                                &handler_env,
+                                arg_name,
+                                TypeScheme {
+                                    quantified_vars: vec![],
+                                    qual_type: QualType {
+                                        constraints: vec![],
+                                        ty: op_info.1.params[i].clone(),
+                                    },
+                                },
+                            );
                         }
                     }
                 }
@@ -1690,10 +1766,17 @@ fn infer_handle(
                             vec![op_info.1.result.clone()],
                             apply_subst(&subst, &body_result.ty),
                         );
-                        handler_env = extend_env(&handler_env, k_name, TypeScheme {
-                            quantified_vars: vec![],
-                            qual_type: QualType { constraints: vec![], ty: k_type },
-                        });
+                        handler_env = extend_env(
+                            &handler_env,
+                            k_name,
+                            TypeScheme {
+                                quantified_vars: vec![],
+                                qual_type: QualType {
+                                    constraints: vec![],
+                                    ty: k_type,
+                                },
+                            },
+                        );
                     }
                 }
 
@@ -1937,13 +2020,17 @@ fn process_define(
 
     // Add placeholder for recursive functions
     let placeholder_type = annotated_type.clone().unwrap_or_else(fresh_type_var);
-    let infer_env = extend_env(env, &name, TypeScheme {
-        quantified_vars: vec![],
-        qual_type: QualType {
-            constraints: annotated_constraints.clone(),
-            ty: placeholder_type,
+    let infer_env = extend_env(
+        env,
+        &name,
+        TypeScheme {
+            quantified_vars: vec![],
+            qual_type: QualType {
+                constraints: annotated_constraints.clone(),
+                ty: placeholder_type,
+            },
         },
-    });
+    );
 
     let applied_env = apply_subst_env(current_subst, &infer_env);
     let value_result = infer_expr(&applied_env, value_expr, interner)?;
@@ -1952,7 +2039,8 @@ fn process_define(
     let mut value_type = value_result.ty;
 
     if let Some(ref ann_type) = annotated_type {
-        let unify_result = unify_with_context(ann_type, &value_type, &format!("definition of {name}"))?;
+        let unify_result =
+            unify_with_context(ann_type, &value_type, &format!("definition of {name}"))?;
         subst = compose_subst(&unify_result, &subst);
         value_type = apply_subst(&subst, ann_type);
     }
@@ -1960,7 +2048,11 @@ fn process_define(
     let mut all_constraints = annotated_constraints;
     all_constraints.extend(value_result.constraints);
     let gen_env = apply_subst_env(&subst, env);
-    let scheme = generalize(&gen_env, &all_constraints, &apply_subst(&subst, &value_type));
+    let scheme = generalize(
+        &gen_env,
+        &all_constraints,
+        &apply_subst(&subst, &value_type),
+    );
 
     let new_env = extend_env(env, &name, scheme);
     Ok((new_env, subst))
@@ -2034,12 +2126,11 @@ fn process_foreign_def(
             });
         }
 
-        let fn_name = get_symbol(op_elements[0], interner).ok_or(
-            TypeError::InvalidTypeAnnotation {
+        let fn_name =
+            get_symbol(op_elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
                 message: "foreign function name must be a symbol".into(),
                 span: None,
-            },
-        )?;
+            })?;
 
         let fn_type = parse_type_expr(op_elements[1], env, interner)?;
         let (params, result) = match &fn_type {
@@ -2080,7 +2171,10 @@ fn ffi_type_to_marlang(ty: &Type, env: &TypeEnv) -> Result<Type, TypeError> {
                     Ok(type_const(name)) // distinct struct type
                 } else {
                     Err(TypeError::UndefinedType {
-                        name: format!("struct type '{}' used in foreign-lib but not defined via ffi-struct", name),
+                        name: format!(
+                            "struct type '{}' used in foreign-lib but not defined via ffi-struct",
+                            name
+                        ),
                         span: None,
                     })
                 }
@@ -2142,13 +2236,12 @@ fn try_extract_ffi_struct_info(expr: &Expr, interner: &Interner) -> Option<FfiSt
                             if let Expr::List { .. } = entry {
                                 let pair = list_to_array(entry);
                                 // (list "field_name" "type_string")
-                                let inner = if pair.len() >= 3
-                                    && is_symbol(pair[0], interner, "list")
-                                {
-                                    &pair[1..]
-                                } else {
-                                    &pair[..]
-                                };
+                                let inner =
+                                    if pair.len() >= 3 && is_symbol(pair[0], interner, "list") {
+                                        &pair[1..]
+                                    } else {
+                                        &pair[..]
+                                    };
                                 if inner.len() == 2 {
                                     if let (
                                         Expr::Atom(LispValue::String(fname), _),
@@ -2218,12 +2311,11 @@ fn process_ffi_lib_def(
             });
         }
 
-        let fn_name = get_symbol(op_elements[0], interner).ok_or(
-            TypeError::InvalidTypeAnnotation {
+        let fn_name =
+            get_symbol(op_elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
                 message: "foreign-lib function name must be a symbol".into(),
                 span: None,
-            },
-        )?;
+            })?;
 
         // Parse the type in FFI type namespace
         let raw_type = parse_type_expr(op_elements[1], env, interner)?;
@@ -2410,7 +2502,7 @@ fn parse_import_form(
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "import expects a string path".into(),
                 span: None,
-            })
+            });
         }
     };
 
@@ -2463,17 +2555,13 @@ fn process_import(
     let (path_str, form) = parse_import_form(elements, interner)?;
 
     // Resolve and load module
-    let (module_exprs, resolved_path) =
-        loader.resolve_and_load(&path_str, file_path, interner)?;
+    let (module_exprs, resolved_path) = loader.resolve_and_load(&path_str, file_path, interner)?;
 
     // Check cache
     match cache.get_state(&resolved_path) {
         Some(ModuleCacheState::Loading) => {
             return Err(TypeError::InternalError {
-                message: format!(
-                    "Circular dependency detected: {}",
-                    resolved_path.display()
-                ),
+                message: format!("Circular dependency detected: {}", resolved_path.display()),
                 span: None,
             });
         }

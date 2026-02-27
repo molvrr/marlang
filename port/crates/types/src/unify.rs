@@ -164,11 +164,7 @@ pub fn unify(t1: &Type, t2: &Type) -> Result<Substitution, TypeError> {
 }
 
 // Unify with context for better error messages
-pub fn unify_with_context(
-    t1: &Type,
-    t2: &Type,
-    context: &str,
-) -> Result<Substitution, TypeError> {
+pub fn unify_with_context(t1: &Type, t2: &Type, context: &str) -> Result<Substitution, TypeError> {
     match unify(t1, t2) {
         Err(TypeError::UnificationError {
             t1: e_t1,
@@ -349,8 +345,11 @@ pub fn unify_effect_rows(
                     });
                 }
             }
-            let remaining: Vec<String> =
-                e2.iter().filter(|e| !effects.contains(e)).cloned().collect();
+            let remaining: Vec<String> = e2
+                .iter()
+                .filter(|e| !effects.contains(e))
+                .cloned()
+                .collect();
             let mut subst = EffectRowSubstitution::new();
             subst.insert(row_var.clone(), effect_row_closed(remaining));
             Ok(subst)
@@ -366,8 +365,11 @@ pub fn unify_effect_rows(
                     });
                 }
             }
-            let remaining: Vec<String> =
-                e1.iter().filter(|e| !effects.contains(e)).cloned().collect();
+            let remaining: Vec<String> = e1
+                .iter()
+                .filter(|e| !effects.contains(e))
+                .cloned()
+                .collect();
             let mut subst = EffectRowSubstitution::new();
             subst.insert(row_var.clone(), effect_row_closed(remaining));
             Ok(subst)
@@ -387,10 +389,7 @@ pub fn unify_effect_rows(
             }
             let only_in2: Vec<String> = e2.iter().filter(|e| !e1.contains(e)).cloned().collect();
             let mut subst = EffectRowSubstitution::new();
-            subst.insert(
-                rv1.clone(),
-                effect_row_open(only_in2, rv2.clone()),
-            );
+            subst.insert(rv1.clone(), effect_row_open(only_in2, rv2.clone()));
             Ok(subst)
         }
     }

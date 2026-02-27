@@ -10,9 +10,9 @@ use crate::compiler::{compile, compile_program};
 use crate::debug::disassemble;
 use crate::errors::VMError;
 use crate::expand::MacroExpander;
-use crate::modules::{expand_macros, run_program, run_program_from_exprs, ModuleLoader};
+use crate::modules::{ModuleLoader, expand_macros, run_program, run_program_from_exprs};
 use crate::object::VMObject;
-use crate::value::{format_value, Value};
+use crate::value::{Value, format_value};
 use crate::vm::VM;
 
 // --- Test Helpers ---
@@ -39,11 +39,17 @@ fn count_op(chunk: &Chunk, op: Op) -> usize {
 }
 
 fn find_constant_number(chunk: &Chunk, n: f64) -> bool {
-    chunk.constants.iter().any(|c| matches!(c, ConstantValue::Number(v) if *v == n))
+    chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Number(v) if *v == n))
 }
 
 fn find_constant_string(chunk: &Chunk, s: &str) -> bool {
-    chunk.constants.iter().any(|c| matches!(c, ConstantValue::String(v) if v == s))
+    chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::String(v) if v == s))
 }
 
 // ===== Literals =====
@@ -71,19 +77,34 @@ fn literal_string() {
 #[test]
 fn literal_boolean_true() {
     let (chunk, _) = compile_source("#t");
-    assert!(chunk.constants.iter().any(|c| matches!(c, ConstantValue::Boolean(true))));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Boolean(true)))
+    );
 }
 
 #[test]
 fn literal_boolean_false() {
     let (chunk, _) = compile_source("#f");
-    assert!(chunk.constants.iter().any(|c| matches!(c, ConstantValue::Boolean(false))));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Boolean(false)))
+    );
 }
 
 #[test]
 fn literal_nil() {
     let (chunk, _) = compile_source("nil");
-    assert!(chunk.constants.iter().any(|c| matches!(c, ConstantValue::Nil)));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Nil))
+    );
 }
 
 #[test]
@@ -189,7 +210,12 @@ fn if_no_else() {
     let (chunk, _) = compile_source("(if #t 1)");
     assert!(find_op(&chunk, Op::JumpIfFalse));
     // Should have nil for the else branch
-    assert!(chunk.constants.iter().any(|c| matches!(c, ConstantValue::Nil)));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Nil))
+    );
 }
 
 #[test]
@@ -266,7 +292,12 @@ fn lambda_basic() {
     let (chunk, _) = compile_source("(lambda (x) x)");
     assert!(find_op(&chunk, Op::Closure));
     // Should have a prototype in constants
-    assert!(chunk.constants.iter().any(|c| matches!(c, ConstantValue::Prototype(_))));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Prototype(_)))
+    );
 }
 
 #[test]
@@ -293,10 +324,14 @@ fn function_call() {
 fn tail_call() {
     // In a lambda body (tail position), calls become tail calls
     let (chunk, _) = compile_source("(lambda (x) (f x))");
-    let proto = chunk.constants.iter().find_map(|c| match c {
-        ConstantValue::Prototype(p) => Some(p),
-        _ => None,
-    }).unwrap();
+    let proto = chunk
+        .constants
+        .iter()
+        .find_map(|c| match c {
+            ConstantValue::Prototype(p) => Some(p),
+            _ => None,
+        })
+        .unwrap();
     assert!(proto.chunk.code.iter().any(|i| i.op == Op::TailCall));
 }
 
@@ -304,10 +339,14 @@ fn tail_call() {
 fn lambda_with_typed_param() {
     let (chunk, _) = compile_source("(lambda ((x : Int)) x)");
     assert!(find_op(&chunk, Op::Closure));
-    let proto = chunk.constants.iter().find_map(|c| match c {
-        ConstantValue::Prototype(p) => Some(p),
-        _ => None,
-    }).unwrap();
+    let proto = chunk
+        .constants
+        .iter()
+        .find_map(|c| match c {
+            ConstantValue::Prototype(p) => Some(p),
+            _ => None,
+        })
+        .unwrap();
     assert_eq!(proto.arity, 1);
 }
 
@@ -315,10 +354,14 @@ fn lambda_with_typed_param() {
 fn upvalue_capture() {
     let (chunk, _) = compile_source("(let ((x 1)) (lambda () x))");
     // The inner lambda should have upvalues
-    let proto = chunk.constants.iter().find_map(|c| match c {
-        ConstantValue::Prototype(p) => Some(p),
-        _ => None,
-    }).unwrap();
+    let proto = chunk
+        .constants
+        .iter()
+        .find_map(|c| match c {
+            ConstantValue::Prototype(p) => Some(p),
+            _ => None,
+        })
+        .unwrap();
     assert!(!proto.upvalues.is_empty());
     // The inner lambda should emit PUSH_UPVALUE
     assert!(proto.chunk.code.iter().any(|i| i.op == Op::PushUpvalue));
@@ -339,9 +382,12 @@ fn data_nullary_constructor() {
 fn data_nary_constructor() {
     let (chunk, _) = compile_source("(data Option (Some a) None)");
     // Some is N-ary (arity 1), encoded as special string
-    assert!(chunk.constants.iter().any(|c| {
-        matches!(c, ConstantValue::String(s) if s == "\0ctor:Some:1")
-    }));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| { matches!(c, ConstantValue::String(s) if s == "\0ctor:Some:1") })
+    );
     // None is nullary
     assert!(find_op(&chunk, Op::Construct));
 }
@@ -371,13 +417,16 @@ fn match_literal() {
 
 #[test]
 fn match_nullary_constructor() {
-    let (chunk, _) = compile_source("(begin (data Option (Some a) None) (match None (None 1) (_ 0)))");
+    let (chunk, _) =
+        compile_source("(begin (data Option (Some a) None) (match None (None 1) (_ 0)))");
     assert!(find_op(&chunk, Op::MatchTag));
 }
 
 #[test]
 fn match_constructor_with_args() {
-    let (chunk, _) = compile_source("(begin (data Option (Some a) None) (match (Some 1) ((Some x) x) (None 0)))");
+    let (chunk, _) = compile_source(
+        "(begin (data Option (Some a) None) (match (Some 1) ((Some x) x) (None 0)))",
+    );
     assert!(find_op(&chunk, Op::MatchTag));
     assert!(find_op(&chunk, Op::GetField));
 }
@@ -386,7 +435,10 @@ fn match_constructor_with_args() {
 fn match_no_match_halt() {
     let (chunk, _) = compile_source("(match 1 (2 \"two\"))");
     assert!(find_op(&chunk, Op::Halt));
-    assert!(find_constant_string(&chunk, "No pattern matched in match expression"));
+    assert!(find_constant_string(
+        &chunk,
+        "No pattern matched in match expression"
+    ));
 }
 
 // ===== Effects =====
@@ -395,7 +447,12 @@ fn match_no_match_halt() {
 fn effect_declaration_emits_nil() {
     let (chunk, _) = compile_source("(effect IO (print (-> String Unit)))");
     // effect declarations just produce nil
-    assert!(chunk.constants.iter().any(|c| matches!(c, ConstantValue::Nil)));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Nil))
+    );
 }
 
 #[test]
@@ -417,9 +474,12 @@ fn handle_produces_push_handler() {
     let (chunk, _) = compile_source(source);
     assert!(find_op(&chunk, Op::PushHandler));
     // Should have handler descriptor
-    assert!(chunk.constants.iter().any(|c| {
-        matches!(c, ConstantValue::String(s) if s.starts_with("\0handler:"))
-    }));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| { matches!(c, ConstantValue::String(s) if s.starts_with("\0handler:")) })
+    );
 }
 
 #[test]
@@ -432,8 +492,16 @@ fn handle_with_effect_handler() {
     let (chunk, _) = compile_source(source);
     assert!(find_op(&chunk, Op::PushHandler));
     // Should have prototypes for body, handler, and return handler
-    let proto_count = chunk.constants.iter().filter(|c| matches!(c, ConstantValue::Prototype(_))).count();
-    assert!(proto_count >= 3, "expected at least 3 prototypes (body, handler, return), got {}", proto_count);
+    let proto_count = chunk
+        .constants
+        .iter()
+        .filter(|c| matches!(c, ConstantValue::Prototype(_)))
+        .count();
+    assert!(
+        proto_count >= 3,
+        "expected at least 3 prototypes (body, handler, return), got {}",
+        proto_count
+    );
 }
 
 #[test]
@@ -448,14 +516,24 @@ fn resume_opcode() {
 #[test]
 fn class_emits_nil() {
     let (chunk, _) = compile_source("(class Eq (a) (eq (-> a a Bool)))");
-    assert!(chunk.constants.iter().any(|c| matches!(c, ConstantValue::Nil)));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Nil))
+    );
 }
 
 #[test]
 fn type_emits_nil() {
     let (chunk, _) = compile_source("(type Pair (a b) (MkPair a b))");
     // type declarations emit nil
-    assert!(chunk.constants.iter().any(|c| matches!(c, ConstantValue::Nil)));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Nil))
+    );
 }
 
 // ===== Disassembler =====
@@ -539,7 +617,14 @@ fn eval(source: &str) -> Result<Value, VMError> {
     let mut vm = VM::new();
     register_builtins(&mut vm);
     let mut loader = ModuleLoader::new();
-    run_program_from_exprs(&mut vm, &expanded.exprs, expanded.prelude_count, None, &mut loader, &interner)
+    run_program_from_exprs(
+        &mut vm,
+        &expanded.exprs,
+        expanded.prelude_count,
+        None,
+        &mut loader,
+        &interner,
+    )
 }
 
 fn eval_to_string(source: &str) -> String {
@@ -556,15 +641,32 @@ fn eval_with_output(source: &str) -> (Result<Value, VMError>, String) {
     register_builtins(&mut vm);
     vm.captured_output = Some(String::new());
     let mut loader = ModuleLoader::new();
-    let result = run_program_from_exprs(&mut vm, &expanded.exprs, expanded.prelude_count, None, &mut loader, &interner);
+    let result = run_program_from_exprs(
+        &mut vm,
+        &expanded.exprs,
+        expanded.prelude_count,
+        None,
+        &mut loader,
+        &interner,
+    );
     let output = vm.captured_output.take().unwrap_or_default();
     (result, output)
 }
 
 fn assert_num(source: &str, expected: f64) {
     let val = eval(source).expect(&format!("eval failed for: {}", source));
-    let n = val.as_number().expect(&format!("expected number, got {:?} for: {}", format_value(&val), source));
-    assert!((n - expected).abs() < 1e-10, "expected {} but got {} for: {}", expected, n, source);
+    let n = val.as_number().expect(&format!(
+        "expected number, got {:?} for: {}",
+        format_value(&val),
+        source
+    ));
+    assert!(
+        (n - expected).abs() < 1e-10,
+        "expected {} but got {} for: {}",
+        expected,
+        n,
+        source
+    );
 }
 
 fn assert_bool(source: &str, expected: bool) {
@@ -578,13 +680,22 @@ fn assert_bool(source: &str, expected: bool) {
 
 fn assert_str(source: &str, expected: &str) {
     let val = eval(source).expect(&format!("eval failed for: {}", source));
-    let s = val.as_string().expect(&format!("expected string, got {:?} for: {}", format_value(&val), source));
+    let s = val.as_string().expect(&format!(
+        "expected string, got {:?} for: {}",
+        format_value(&val),
+        source
+    ));
     assert_eq!(s, expected, "for: {}", source);
 }
 
 fn assert_nil(source: &str) {
     let val = eval(source).expect(&format!("eval failed for: {}", source));
-    assert!(val.is_nil(), "expected nil, got {:?} for: {}", format_value(&val), source);
+    assert!(
+        val.is_nil(),
+        "expected nil, got {:?} for: {}",
+        format_value(&val),
+        source
+    );
 }
 
 fn assert_formatted(source: &str, expected: &str) {
@@ -595,8 +706,17 @@ fn assert_formatted(source: &str, expected: &str) {
 fn assert_error(source: &str, substring: &str) {
     let result = eval(source);
     match result {
-        Err(e) => assert!(e.message.contains(substring), "expected error containing '{}', got: {}", substring, e.message),
-        Ok(v) => panic!("expected error containing '{}', but got: {:?}", substring, format_value(&v)),
+        Err(e) => assert!(
+            e.message.contains(substring),
+            "expected error containing '{}', got: {}",
+            substring,
+            e.message
+        ),
+        Ok(v) => panic!(
+            "expected error containing '{}', but got: {:?}",
+            substring,
+            format_value(&v)
+        ),
     }
 }
 
@@ -932,12 +1052,18 @@ fn exec_define_square() {
 
 #[test]
 fn exec_closures_make_adder() {
-    assert_num("(define make-adder (lambda (n) (lambda (x) (+ n x)))) ((make-adder 5) 10)", 15.0);
+    assert_num(
+        "(define make-adder (lambda (n) (lambda (x) (+ n x)))) ((make-adder 5) 10)",
+        15.0,
+    );
 }
 
 #[test]
 fn exec_begin_in_function_body() {
-    assert_num("(define test (lambda () (begin (define a 1) (define b 2) (+ a b)))) (test)", 3.0);
+    assert_num(
+        "(define test (lambda () (begin (define a 1) (define b 2) (+ a b)))) (test)",
+        3.0,
+    );
 }
 
 // ===== Execution: Tail Call Optimization =====
@@ -1285,7 +1411,10 @@ fn exec_no_match_error() {
 
 #[test]
 fn exec_arity_mismatch() {
-    assert_error("(define f (lambda (x) x)) (f 1 2)", "Expected 1 arguments, got 2");
+    assert_error(
+        "(define f (lambda (x) x)) (f 1 2)",
+        "Expected 1 arguments, got 2",
+    );
 }
 
 // ===== Execution: Type forms (no-ops) =====
@@ -1401,10 +1530,7 @@ fn exec_mkpair() {
 
 #[test]
 fn exec_match_mkpair() {
-    assert_num(
-        "(match (MkPair 3 4) ((MkPair a b) (+ a b)))",
-        7.0,
-    );
+    assert_num("(match (MkPair 3 4) ((MkPair a b) (+ a b)))", 7.0);
 }
 
 // ===== Execution: Ok/Err =====
@@ -1421,18 +1547,12 @@ fn exec_err() {
 
 #[test]
 fn exec_match_result() {
-    assert_num(
-        "(match (Ok 10) ((Ok v) v) ((Err e) 0))",
-        10.0,
-    );
+    assert_num("(match (Ok 10) ((Ok v) v) ((Err e) 0))", 10.0);
 }
 
 #[test]
 fn exec_match_err() {
-    assert_num(
-        "(match (Err \"fail\") ((Ok v) v) ((Err e) 0))",
-        0.0,
-    );
+    assert_num("(match (Err \"fail\") ((Ok v) v) ((Err e) 0))", 0.0);
 }
 
 // ===== One-shot continuation enforcement =====
@@ -1502,6 +1622,7 @@ fn eval_with_virtual_modules(
     run_program(&mut vm, source, Some(&path), &mut loader, &interner)
 }
 
+#[allow(dead_code)]
 fn eval_modules_with_output(source: &str, file_path: &str) -> (Result<Value, VMError>, String) {
     let interner = Interner::new();
     let mut vm = VM::new();
@@ -1518,10 +1639,9 @@ fn eval_modules_with_output(source: &str, file_path: &str) -> (Result<Value, VME
 fn assert_module_num(source: &str, file_path: &str, expected: f64) {
     let val = eval_with_modules(source, file_path)
         .expect(&format!("eval failed for module test: {}", source));
-    let n = val.as_number().expect(&format!(
-        "expected number, got {:?}",
-        format_value(&val)
-    ));
+    let n = val
+        .as_number()
+        .expect(&format!("expected number, got {:?}", format_value(&val)));
     assert!(
         (n - expected).abs() < 1e-10,
         "expected {} but got {}",
@@ -1700,11 +1820,7 @@ fn module_import_effects() {
 
 #[test]
 fn module_import_nonexistent() {
-    assert_module_error(
-        r#"(import "./nonexistent.mar")"#,
-        "test.mar",
-        "not found",
-    );
+    assert_module_error(r#"(import "./nonexistent.mar")"#, "test.mar", "not found");
 }
 
 #[test]
@@ -1738,8 +1854,8 @@ fn module_run_program_basic() {
     let mut vm = VM::new();
     register_builtins(&mut vm);
     let mut loader = ModuleLoader::new();
-    let result = run_program(&mut vm, "(+ 1 2)", None, &mut loader, &interner)
-        .expect("run_program failed");
+    let result =
+        run_program(&mut vm, "(+ 1 2)", None, &mut loader, &interner).expect("run_program failed");
     assert_eq!(result.as_number(), Some(3.0));
 }
 
@@ -3043,10 +3159,13 @@ fn quasiquote_unquote() {
 
 #[test]
 fn quasiquote_splicing() {
-    let val = eval(r#"
+    let val = eval(
+        r#"
 (define xs (Cons 1 (Cons 2 Nil)))
 `(a ,@xs c)
-"#).expect("eval failed");
+"#,
+    )
+    .expect("eval failed");
     let s = format_value(&val);
     assert_eq!(s, "(Cons a (Cons 1 (Cons 2 (Cons c Nil))))");
 }
@@ -3094,7 +3213,10 @@ fn gensym_unique() {
 
 #[test]
 fn symbol_string_conversion() {
-    assert_eq!(eval_to_string("(symbol->string (make-symbol \"hello\"))"), "\"hello\"");
+    assert_eq!(
+        eval_to_string("(symbol->string (make-symbol \"hello\"))"),
+        "\"hello\""
+    );
     let val = eval("(string->symbol \"world\")").expect("eval failed");
     match val.as_object() {
         Some(VMObject::Symbol(s)) => assert_eq!(s.as_str(), "world"),
@@ -3106,63 +3228,83 @@ fn symbol_string_conversion() {
 
 #[test]
 fn defmacro_when() {
-    assert_num(r#"
+    assert_num(
+        r#"
 (defmacro when (cond body)
   `(if ,cond ,body nil))
 (when #t 42)
-"#, 42.0);
+"#,
+        42.0,
+    );
 }
 
 #[test]
 fn defmacro_when_false() {
-    assert_eq!(eval_to_string(r#"
+    assert_eq!(
+        eval_to_string(
+            r#"
 (defmacro when (cond body)
   `(if ,cond ,body nil))
 (when #f 42)
-"#), "nil");
+"#
+        ),
+        "nil"
+    );
 }
 
 #[test]
 fn defmacro_unless() {
-    assert_num(r#"
+    assert_num(
+        r#"
 (defmacro unless (cond body)
   `(if ,cond nil ,body))
 (unless #f 99)
-"#, 99.0);
+"#,
+        99.0,
+    );
 }
 
 #[test]
 fn defmacro_nested_expansion() {
-    assert_num(r#"
+    assert_num(
+        r#"
 (defmacro when (cond body)
   `(if ,cond ,body nil))
 (defmacro unless (cond body)
   `(when (not ,cond) ,body))
 (unless #f 77)
-"#, 77.0);
+"#,
+        77.0,
+    );
 }
 
 #[test]
 fn defmacro_with_splicing() {
-    assert_num(r#"
+    assert_num(
+        r#"
 (defmacro my-begin (first rest)
   `(let ((unused ,first)) ,rest))
 (my-begin (+ 1 2) (+ 3 4))
-"#, 7.0);
+"#,
+        7.0,
+    );
 }
 
 #[test]
 fn defmacro_with_data_types() {
     // Macro generates match expressions using user-defined ADTs.
     // The body doesn't reference the pattern variable — it's self-contained.
-    assert_num(r#"
+    assert_num(
+        r#"
 (data (MyOpt a) MyNone (MySome a))
 (defmacro is-some (opt)
   `(match ,opt
     ((MySome _) 1)
     (MyNone 0)))
 (is-some (MySome 42))
-"#, 1.0);
+"#,
+        1.0,
+    );
 }
 
 // ===== Hygiene Tests =====
@@ -3171,58 +3313,73 @@ fn defmacro_with_data_types() {
 fn macro_hygiene_no_capture() {
     // Macro introduces 'tmp' binding. Caller also has 'tmp'.
     // With hygiene, macro's tmp is distinct from caller's tmp.
-    assert_num(r#"
+    assert_num(
+        r#"
 (defmacro my-or (a b)
   `(let ((tmp ,a))
      (if tmp tmp ,b)))
 (let ((tmp 42))
   (my-or #f tmp))
-"#, 42.0);
+"#,
+        42.0,
+    );
 }
 
 #[test]
 fn macro_hygiene_nested() {
     // Two expansions of the same macro should have distinct marks
-    assert_num(r#"
+    assert_num(
+        r#"
 (defmacro my-or (a b)
   `(let ((tmp ,a))
      (if tmp tmp ,b)))
 (my-or #f (my-or #f 99))
-"#, 99.0);
+"#,
+        99.0,
+    );
 }
 
 #[test]
 fn macro_hygiene_global_ref() {
     // Macro template references a global function — should still resolve
-    assert_num(r#"
+    assert_num(
+        r#"
 (define double (lambda (x) (* x 2)))
 (defmacro apply-double (x)
   `(double ,x))
 (apply-double 21)
-"#, 42.0);
+"#,
+        42.0,
+    );
 }
 
 #[test]
 fn macro_hygiene_constructor() {
     // Macro generates match expressions with constructor patterns
-    assert_num(r#"
+    assert_num(
+        r#"
 (defmacro unwrap-or (opt default)
   `(match ,opt
     ((Some v) v)
     (None ,default)))
 (unwrap-or (Some 42) 0)
-"#, 42.0);
+"#,
+        42.0,
+    );
 }
 
 #[test]
 fn macro_hygiene_constructor_none() {
-    assert_num(r#"
+    assert_num(
+        r#"
 (defmacro unwrap-or (opt default)
   `(match ,opt
     ((Some v) v)
     (None ,default)))
 (unwrap-or None 99)
-"#, 99.0);
+"#,
+        99.0,
+    );
 }
 
 // ===== Cross-Module Macro Tests =====
@@ -3235,14 +3392,15 @@ fn macro_import_basic() {
 (m/when #t 42)
 "#,
         "test.mar",
-        vec![
-            ("macros.mar", r#"
+        vec![(
+            "macros.mar",
+            r#"
 (defmacro when (cond body)
   `(if ,cond ,body nil))
 (defmacro unless (cond body)
   `(if ,cond nil ,body))
-"#),
-        ],
+"#,
+        )],
     )
     .expect("eval failed");
     assert_eq!(val.as_number(), Some(42.0));
@@ -3258,13 +3416,14 @@ fn macro_import_hygiene() {
   (m/my-or #f tmp))
 "#,
         "test.mar",
-        vec![
-            ("macros.mar", r#"
+        vec![(
+            "macros.mar",
+            r#"
 (defmacro my-or (a b)
   `(let ((tmp ,a))
      (if tmp tmp ,b)))
-"#),
-        ],
+"#,
+        )],
     )
     .expect("eval failed");
     assert_eq!(val.as_number(), Some(42.0));
@@ -3280,15 +3439,21 @@ fn macro_import_chain() {
 "#,
         "test.mar",
         vec![
-            ("a.mar", r#"
+            (
+                "a.mar",
+                r#"
 (defmacro when (cond body)
   `(if ,cond ,body nil))
-"#),
-            ("b.mar", r#"
+"#,
+            ),
+            (
+                "b.mar",
+                r#"
 (import "./a.mar" as a)
 (defmacro when-true (body)
   `(a/when #t ,body))
-"#),
+"#,
+            ),
         ],
     )
     .expect("eval failed");
@@ -3301,11 +3466,15 @@ fn macro_import_chain() {
 fn defmacro_expansion_error() {
     // Macro transformer that calls error should produce an expansion-time error
     let interner = Interner::new();
-    let tokens = lex(r#"
+    let tokens = lex(
+        r#"
 (defmacro bad-macro (x)
   (error "macro went wrong"))
 (bad-macro 1)
-"#, &interner).unwrap();
+"#,
+        &interner,
+    )
+    .unwrap();
     let exprs = parse(&tokens).unwrap();
     let mut expander = MacroExpander::new(&interner);
     let result = expander.expand_all(exprs);
@@ -3316,11 +3485,15 @@ fn defmacro_expansion_error() {
 fn defmacro_result_not_ast() {
     // If macro returns a non-convertible value, should error
     let interner = Interner::new();
-    let tokens = lex(r#"
+    let tokens = lex(
+        r#"
 (defmacro bad-macro (x)
   (lambda (y) y))
 (bad-macro 1)
-"#, &interner).unwrap();
+"#,
+        &interner,
+    )
+    .unwrap();
     let exprs = parse(&tokens).unwrap();
     let mut expander = MacroExpander::new(&interner);
     let result = expander.expand_all(exprs);
@@ -3331,13 +3504,403 @@ fn defmacro_result_not_ast() {
 fn defmacro_arity_error() {
     // Calling macro transformer with wrong arity
     let interner = Interner::new();
-    let tokens = lex(r#"
+    let tokens = lex(
+        r#"
 (defmacro needs-two (a b)
   `(+ ,a ,b))
 (needs-two 1)
-"#, &interner).unwrap();
+"#,
+        &interner,
+    )
+    .unwrap();
     let exprs = parse(&tokens).unwrap();
     let mut expander = MacroExpander::new(&interner);
     let result = expander.expand_all(exprs);
     assert!(result.is_err());
+}
+
+// ============================================================================
+// TCP Networking Tests (Layer 4 — multi-threaded scheduler only)
+// ============================================================================
+
+#[test]
+fn tcp_listen_and_close() {
+    // Verify tcp-listen with port 0 (ephemeral) works and close cleans up
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers-parallel (lambda ()
+  (let ((listener (match (perform tcp-listen 0)
+                    ((Ok l) l)
+                    ((Err msg) (perform throw msg)))))
+    (perform tcp-close listener)
+    (perform println "listen-ok")))
+  2)
+"#,
+    );
+    assert!(result.is_ok(), "tcp listen/close failed: {:?}", result);
+    assert_eq!(output.trim(), "listen-ok");
+}
+
+#[test]
+fn tcp_echo_server_fixed_port() {
+    // Use a high random-ish port to avoid conflicts
+    let port = 19384;
+    let code = format!(
+        r#"
+(define unwrap-ok (lambda (r label)
+  (match r
+    ((Ok v) v)
+    ((Err msg) (perform throw (string-append label ": " msg))))))
+
+(run-fibers-parallel (lambda ()
+  (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
+    ;; Server fiber: accept one connection, echo data, close
+    (perform fiber-spawn (lambda ()
+      (let ((client (perform tcp-accept listener)))
+        (let ((data (perform tcp-recv client)))
+          (unwrap-ok (perform tcp-send client data) "send")
+          (perform tcp-close client)))))
+    ;; Client: connect, send, recv, print
+    (perform fiber-yield)
+    (perform fiber-yield)
+    (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
+      (unwrap-ok (perform tcp-send sock "hello") "send")
+      (let ((resp (perform tcp-recv sock)))
+        (perform println resp)
+        (perform tcp-close sock)))
+    (perform tcp-close listener)))
+  2)
+"#
+    );
+    let (result, output) = eval_with_output(&code);
+    assert!(result.is_ok(), "tcp echo failed: {:?}", result);
+    assert_eq!(output.trim(), "hello");
+}
+
+#[test]
+fn tcp_recv_returns_nil_on_close() {
+    let port = 19385;
+    let code = format!(
+        r#"
+(define unwrap-ok (lambda (r label)
+  (match r
+    ((Ok v) v)
+    ((Err msg) (perform throw (string-append label ": " msg))))))
+
+(run-fibers-parallel (lambda ()
+  (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
+    ;; Server: accept and immediately close
+    (perform fiber-spawn (lambda ()
+      (let ((client (perform tcp-accept listener)))
+        (perform tcp-close client))))
+    (perform fiber-yield)
+    (perform fiber-yield)
+    ;; Client: connect, recv should get nil
+    (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
+      (let ((data (perform tcp-recv sock)))
+        (perform println (if (= data nil) "closed" "data")))
+      (perform tcp-close sock))
+    (perform tcp-close listener)))
+  2)
+"#
+    );
+    let (result, output) = eval_with_output(&code);
+    assert!(result.is_ok(), "tcp close test failed: {:?}", result);
+    assert_eq!(output.trim(), "closed");
+}
+
+#[test]
+fn tcp_send_and_receive_data() {
+    let port = 19386;
+    let code = format!(
+        r#"
+(define unwrap-ok (lambda (r label)
+  (match r
+    ((Ok v) v)
+    ((Err msg) (perform throw (string-append label ": " msg))))))
+
+(run-fibers-parallel (lambda ()
+  (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
+    ;; Server: accept, receive, echo with prefix
+    (perform fiber-spawn (lambda ()
+      (let ((client (perform tcp-accept listener)))
+        (let ((d1 (perform tcp-recv client)))
+          (unwrap-ok (perform tcp-send client (string-append "echo:" d1)) "send")
+          (perform tcp-close client)))))
+    (perform fiber-yield)
+    (perform fiber-yield)
+    ;; Client
+    (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
+      (unwrap-ok (perform tcp-send sock "foobar") "send")
+      (let ((resp (perform tcp-recv sock)))
+        (perform println resp)
+        (perform tcp-close sock)))
+    (perform tcp-close listener)))
+  2)
+"#
+    );
+    let (result, output) = eval_with_output(&code);
+    assert!(result.is_ok(), "tcp send/recv failed: {:?}", result);
+    assert_eq!(output.trim(), "echo:foobar");
+}
+
+#[test]
+fn tcp_listener_close_wakes_acceptor() {
+    let port = 19387;
+    let code = format!(
+        r#"
+(define unwrap-ok (lambda (r label)
+  (match r
+    ((Ok v) v)
+    ((Err msg) (perform throw (string-append label ": " msg))))))
+
+(run-fibers-parallel (lambda ()
+  (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
+    ;; Fiber waiting to accept
+    (perform fiber-spawn (lambda ()
+      (let ((result (perform tcp-accept listener)))
+        (perform println (if (= result nil) "woke-nil" "got-conn")))))
+    (perform fiber-yield)
+    (perform fiber-yield)
+    ;; Close the listener while someone is waiting
+    (perform tcp-close listener)
+    ;; Give the acceptor time to wake
+    (perform fiber-yield)
+    (perform fiber-yield)
+    (perform fiber-yield)))
+  2)
+"#
+    );
+    let (result, output) = eval_with_output(&code);
+    assert!(
+        result.is_ok(),
+        "tcp listener close test failed: {:?}",
+        result
+    );
+    assert_eq!(output.trim(), "woke-nil");
+}
+
+#[test]
+fn tcp_multiple_clients() {
+    let port = 19388;
+    let code = format!(
+        r#"
+(define unwrap-ok (lambda (r label)
+  (match r
+    ((Ok v) v)
+    ((Err msg) (perform throw (string-append label ": " msg))))))
+
+(run-fibers-parallel (lambda ()
+  (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
+    ;; Server: handle two connections sequentially
+    (perform fiber-spawn (lambda ()
+      (let ((c1 (perform tcp-accept listener)))
+        (let ((d1 (perform tcp-recv c1)))
+          (unwrap-ok (perform tcp-send c1 (string-append "1:" d1)) "send")
+          (perform tcp-close c1)))
+      (let ((c2 (perform tcp-accept listener)))
+        (let ((d2 (perform tcp-recv c2)))
+          (unwrap-ok (perform tcp-send c2 (string-append "2:" d2)) "send")
+          (perform tcp-close c2)))))
+    (perform fiber-yield)
+    (perform fiber-yield)
+    ;; Client 1
+    (let ((s1 (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
+      (unwrap-ok (perform tcp-send s1 "alpha") "send")
+      (let ((r1 (perform tcp-recv s1)))
+        (perform println r1)
+        (perform tcp-close s1)))
+    ;; Client 2
+    (let ((s2 (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
+      (unwrap-ok (perform tcp-send s2 "beta") "send")
+      (let ((r2 (perform tcp-recv s2)))
+        (perform println r2)
+        (perform tcp-close s2)))
+    (perform tcp-close listener)))
+  2)
+"#
+    );
+    let (result, output) = eval_with_output(&code);
+    assert!(result.is_ok(), "tcp multiple clients failed: {:?}", result);
+    assert!(output.contains("1:alpha"), "output: {}", output);
+    assert!(output.contains("2:beta"), "output: {}", output);
+}
+
+#[test]
+fn tcp_bidirectional() {
+    let port = 19389;
+    let code = format!(
+        r#"
+(define unwrap-ok (lambda (r label)
+  (match r
+    ((Ok v) v)
+    ((Err msg) (perform throw (string-append label ": " msg))))))
+
+(run-fibers-parallel (lambda ()
+  (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
+    ;; Server: recv then send
+    (perform fiber-spawn (lambda ()
+      (let ((client (perform tcp-accept listener)))
+        (let ((msg (perform tcp-recv client)))
+          (unwrap-ok (perform tcp-send client "pong") "send")
+          (perform tcp-close client)))))
+    (perform fiber-yield)
+    (perform fiber-yield)
+    ;; Client: send then recv
+    (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
+      (unwrap-ok (perform tcp-send sock "ping") "send")
+      (let ((resp (perform tcp-recv sock)))
+        (perform println resp)
+        (perform tcp-close sock)))
+    (perform tcp-close listener)))
+  2)
+"#
+    );
+    let (result, output) = eval_with_output(&code);
+    assert!(result.is_ok(), "tcp bidirectional failed: {:?}", result);
+    assert_eq!(output.trim(), "pong");
+}
+
+#[test]
+fn tcp_connect_failure() {
+    // Connect to a port that's not listening — returns (Err msg)
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers-parallel (lambda ()
+  (perform fiber-spawn (lambda ()
+    (let ((r (perform tcp-connect "127.0.0.1" 19399)))
+      (match r
+        ((Err msg) (perform println (string-append "err:" msg)))
+        ((Ok _) (perform println "unexpected-ok"))))))
+  ;; Main fiber waits a bit for the child to attempt connection
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform println "main-ok"))
+  2)
+"#,
+    );
+    assert!(
+        result.is_ok(),
+        "tcp connect failure test failed: {:?}",
+        result
+    );
+    assert!(output.contains("main-ok"), "output: {}", output);
+    assert!(output.contains("err:tcp-connect:"), "output: {}", output);
+}
+
+#[test]
+fn tcp_single_threaded_rejects() {
+    // TCP effects should fail in the single-threaded scheduler
+    let result = eval(
+        r#"
+(run-fibers (lambda ()
+  (perform tcp-listen 19390)))
+"#,
+    );
+    assert!(
+        result.is_err(),
+        "expected error for TCP in single-threaded scheduler"
+    );
+    let err_msg = result.unwrap_err().message;
+    assert!(
+        err_msg.contains("multi-threaded"),
+        "error message: {}",
+        err_msg
+    );
+}
+
+// =========================================================================
+// Exception (throw) effect tests
+// =========================================================================
+
+#[test]
+fn throw_crashes_fiber_default() {
+    // Unhandled throw should crash the fiber (default handler)
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (perform fiber-spawn (lambda ()
+    (perform throw "boom")))
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform println "main-survived")))
+"#,
+    );
+    // Main fiber should survive — the spawned fiber crashes
+    assert!(result.is_ok(), "throw crash test failed: {:?}", result);
+    assert_eq!(output.trim(), "main-survived");
+}
+
+#[test]
+fn throw_caught_by_handle() {
+    // User code can catch throw with a handle block
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (let ((r (handle
+             (begin
+               (perform throw "oops")
+               "unreachable")
+             ((throw msg k) -> (string-append "caught:" msg)))))
+    (perform println r))))
+"#,
+    );
+    assert!(result.is_ok(), "throw handle test failed: {:?}", result);
+    assert_eq!(output.trim(), "caught:oops");
+}
+
+#[test]
+fn throw_with_tcp_connect_and_handle() {
+    // tcp-connect failure returns (Err msg), match on Result directly (recommended API)
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers-parallel (lambda ()
+  ;; Spawn a fiber that tries to connect and checks the Result
+  (perform fiber-spawn (lambda ()
+    (let ((result (perform tcp-connect "127.0.0.1" 19399)))
+      (match result
+        ((Ok v) (perform println "unexpected-ok"))
+        ((Err msg) (perform println (string-append "err:" msg)))))))
+  ;; Main fiber waits
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform println "done"))
+  2)
+"#,
+    );
+    assert!(result.is_ok(), "throw tcp test failed: {:?}", result);
+    assert!(output.contains("err:tcp-connect:"), "output: {}", output);
+    assert!(output.contains("done"), "output: {}", output);
+}
+
+#[test]
+fn throw_with_tcp_listen_and_handle() {
+    // tcp-listen returns Result: second bind on same port should fail with (Err msg)
+    let (result, output) = eval_with_output(
+        r#"
+(define unwrap-ok (lambda (r label)
+  (match r
+    ((Ok v) v)
+    ((Err msg) (perform throw (string-append label ": " msg))))))
+
+(run-fibers-parallel (lambda ()
+  ;; First bind the port
+  (let ((listener (unwrap-ok (perform tcp-listen 19391) "listen")))
+    ;; Try to bind the SAME port again — should fail with (Err msg)
+    ;; tcp-listen is synchronous so Result matching works directly
+    (let ((r2 (perform tcp-listen 19391)))
+      (match r2
+        ((Ok _) (perform println "unexpected-ok"))
+        ((Err msg) (perform println (string-append "err:" msg)))))
+    (perform tcp-close listener)))
+  2)
+"#,
+    );
+    assert!(result.is_ok(), "throw listen test failed: {:?}", result);
+    assert!(output.contains("err:tcp-listen:"), "output: {}", output);
 }

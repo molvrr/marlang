@@ -1642,31 +1642,17 @@ impl Scheduler {
                 });
             }
 
-            // === Layer 4: Networking ===
-            "tcp-connect" => {
-                let addr = extract_string(&signal.args[0]);
-                let port = extract_int(&signal.args[1]);
-                let io_id = self.next_io_id();
-                let sender = self.inbox_sender.clone();
-                // Spawn async IO on Tokio's thread pool (NOT on scheduler thread)
-                tokio::spawn(async move {
-                    let result = TcpStream::connect(format!("{}:{}", addr, port)).await;
-                    let _ = sender.send(SchedulerMessage::IoComplete {
-                        fiber_pid: pid,
-                        result: wrap_tcp_result(result),
-                    });
-                });
-                // Park fiber until IO completes
-                self.parked.insert(pid, ParkedFiber {
-                    continuation: signal.continuation, pid,
-                });
-            }
-
-            "tcp-listen"  => { /* bind listener synchronously */ }
-            "tcp-accept"  => { /* park fiber until connection arrives */ }
-            "tcp-send"    => { /* write to socket */ }
-            "tcp-recv"    => { /* park fiber until data arrives */ }
-            "tcp-close"   => { /* close socket */ }
+            // === Layer 4: TCP Networking ===
+            // All 6 TCP effects implemented in handle_effect():
+            //   tcp-connect — async connect, spawns background read task, parks fiber
+            //   tcp-listen  — synchronous bind via block_on, spawns background accept loop
+            //   tcp-accept  — returns queued connection or parks fiber; nil on closed listener
+            //   tcp-send    — async write via write_all, parks fiber
+            //   tcp-recv    — returns queued data or parks fiber; nil on EOF/close
+            //   tcp-close   — closes socket or listener, wakes parked acceptors
+            //
+            // Cross-scheduler operations route via TcpOp / TcpOpResult messages.
+            // See "TCP Networking (Multi-Threaded)" section for full architecture.
 
             "http-fetch" => {
                 let url = extract_string(&signal.args[0]);
@@ -1839,36 +1825,114 @@ impl Runtime {
 
 Each scheduler increments `idle_count` when it has no ready fibers and no local pending IO, and decrements it when it gets new work (from inbox, work stealing, or IO completion).
 
-### Networking (Multi-Threaded)
+### TCP Networking (Multi-Threaded)
 
-TCP and HTTP IO use Tokio's **multi-threaded runtime** features. Unlike the single-threaded design, async IO tasks are spawned with `tokio::spawn` (not `spawn_local`), which runs them on Tokio's thread pool. IO completion messages are routed back to the owning scheduler via its inbox:
+TCP networking uses Tokio's multi-threaded runtime. All TCP effects are only available in `run_fibers_parallel()` (the multi-threaded scheduler); the single-threaded scheduler rejects them with a clear error message.
+
+#### Architecture
+
+TCP state is **per-scheduler** (no locks on the hot path):
 
 ```rust
-// TCP connect — spawns on Tokio's thread pool, notifies scheduler on completion
-"tcp-connect" => {
-    let addr = extract_string(&signal.args[0]);
-    let port = extract_int(&signal.args[1]);
-    let sender = self.inbox_sender.clone();
-    let fiber_pid = pid;
+// Per-scheduler (thread-local, no locking)
+struct PerScheduler {
+    tcp_sockets: HashMap<u64, TcpSocketState>,
+    tcp_listeners: HashMap<u64, TcpListenerState>,
+    // ...
+}
 
-    tokio::spawn(async move {
-        let result = TcpStream::connect(format!("{}:{}", addr, port)).await;
-        let value = match result {
-            Ok(stream) => {
-                let socket_id = register_socket(stream);
-                Value::from_object(Arc::new(VMObject::Port(socket_id)))
-            }
-            Err(e) => make_error_value(e),
-        };
-        let _ = sender.send(SchedulerMessage::IoComplete { fiber_pid, result: value });
-    });
+struct TcpSocketState {
+    write_handle: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+    recv_queue: VecDeque<Vec<u8>>,
+    waiting_recv: Option<(FiberId, Value)>, // parked fiber waiting for data
+    closed: bool,
+}
 
-    // Park the fiber until IO completes
-    self.parked.insert(pid, ParkedFiber { continuation: signal.continuation, pid });
+struct TcpListenerState {
+    accept_queue: VecDeque<u64>,              // socket IDs of accepted connections
+    waiting_accept: Option<(FiberId, Value)>, // parked fiber waiting for connection
+    shutdown_tx: Option<oneshot::Sender<()>>, // stop the background accept loop
 }
 ```
 
-> **Design rationale:** Each scheduler thread has its own `current_thread` Tokio runtime for driving its local `select!` loop (inbox + IO wakeups). Async IO tasks are spawned on the Tokio thread pool via `tokio::spawn`, and results flow back through the crossbeam inbox. This avoids the `LocalSet` limitation of the single-threaded design while keeping all fiber execution `&mut self` (no locks on the hot path).
+**Ownership tracking** is in `SharedState` (mutex-protected):
+
+```rust
+struct SharedState {
+    tcp_socket_owners: Mutex<HashMap<u64, usize>>,   // socket_id → scheduler_id
+    tcp_listener_owners: Mutex<HashMap<u64, usize>>,  // listener_id → scheduler_id
+    next_tcp_id: AtomicU64,
+    active_listeners: AtomicUsize,  // prevents premature shutdown
+    // ...
+}
+```
+
+#### Cross-Scheduler Routing
+
+When a fiber on scheduler A operates on a socket owned by scheduler B, the operation is routed via `SchedulerMessage::TcpOp`:
+
+```rust
+enum TcpOp {
+    Send { socket_id: u64, data: String, fiber_pid: FiberId, reply_scheduler: usize },
+    Recv { socket_id: u64, fiber_pid: FiberId, reply_scheduler: usize, continuation: Value },
+    Close { socket_id: u64, fiber_pid: FiberId, reply_scheduler: usize },
+}
+```
+
+The owning scheduler processes the `TcpOp` and sends the result back via `TcpOpResult { fiber_pid, result }` to the requesting scheduler's inbox. The requesting fiber is parked in `io_parked` until the result arrives.
+
+#### Effect Handlers
+
+| Effect | Args | Returns | Behavior |
+|--------|------|---------|----------|
+| `tcp-connect` | `host: String`, `port: Int` | `(Ok Port)` or `(Err String)` | Async connect via tokio, spawns background read task, parks fiber until connected |
+| `tcp-listen` | `port: Int` | `(Ok Port)` or `(Err String)` | Synchronous bind via `block_on`, spawns background accept loop with `tokio::select!` for shutdown |
+| `tcp-accept` | `listener: Port` | `Port(socket_id)` or `nil` | Returns queued connection or parks fiber; returns `nil` if listener is closed |
+| `tcp-send` | `socket: Port`, `data: String` | `(Ok nil)` or `(Err String)` | Async write via `write_all`, parks fiber until complete |
+| `tcp-recv` | `socket: Port` | `String` or `nil` | Returns queued data or parks fiber; returns `nil` on EOF/close |
+| `tcp-close` | `socket_or_listener: Port` | `nil` | Closes socket or listener; wakes any parked acceptor with `nil` |
+| `throw` | `msg: String` | (never returns) | Default handler crashes the fiber; user `handle` blocks can catch it |
+
+#### Error Handling
+
+Failable TCP operations (`tcp-connect`, `tcp-listen`, `tcp-send`) return `Result` ADT values (`(Ok value)` or `(Err msg)`) instead of crashing the fiber. This allows two patterns:
+
+1. **Throwing pattern:** The `net.mar` stdlib wrappers (`connect`, `listen`, `send`) unwrap the Result and `(perform throw msg)` on error. The default `throw` handler crashes the fiber. Users get clean crash semantics without needing to match on Results.
+
+2. **Try pattern:** The `net.mar` stdlib `try-` wrappers (`try-connect`, `try-listen`, `try-send`) return the Result directly. Users pattern-match on `(Ok v)` / `(Err msg)` to handle errors gracefully.
+
+The `throw` effect is declared in the prelude as `(effect Exception (throw (-> String Unit)))`. Both schedulers handle it as a default "crash the fiber" operation. User code can install `(handle ... ((throw msg k) -> ...))` blocks to catch exceptions, though this pattern does not work reliably across scheduler effect boundaries (e.g., inside the same handle block as TCP effects that park the fiber).
+
+#### Connection Lifecycle
+
+1. **Connect:** `tcp-connect` spawns an async task that calls `TcpStream::connect`. On success, returns `(Ok Port)`. On failure (connection refused, DNS error), returns `(Err msg)`. On success, the stream is split into `OwnedReadHalf` + `OwnedWriteHalf`. A background read task continuously reads from the socket and sends `TcpData { socket_id, data }` or `TcpClosed { socket_id }` messages to the owning scheduler. The write handle is stored in `TcpSocketState`. A `TcpAccepted` message (with sentinel `listener_id = u64::MAX`) registers the socket state, followed by `IoComplete` to wake the fiber.
+
+2. **Listen:** `tcp-listen` binds synchronously (via `block_on`). On success, returns `(Ok Port)`. On failure (port in use, permission denied), returns `(Err msg)`. A background accept loop uses `tokio::select!` to wait on either a new connection or a shutdown signal. Accepted connections get their own background read task and are queued via `TcpAccepted` messages. Socket IDs for accepted connections are pre-allocated from a standalone `Arc<AtomicU64>` (batch of 1000) to avoid needing `SharedState` inside the `'static` tokio task.
+
+3. **Accept:** `tcp-accept` checks the listener's `accept_queue`. If a connection is waiting, it returns immediately. If the listener is closed (no `shutdown_tx`), it returns `nil`. Otherwise, the fiber is parked until a `TcpAccepted` message arrives.
+
+4. **Close:** `tcp-close` handles both sockets and listeners. For listeners, it sends the shutdown signal, wakes any parked acceptor with `nil`, decrements `active_listeners`, and removes ownership. For sockets, it drops the write handle and removes state.
+
+#### Termination Detection
+
+`check_termination()` prevents shutdown while `active_listeners > 0`, ensuring server programs stay alive while listening for connections.
+
+#### SchedulerMessage Variants for TCP
+
+```rust
+enum SchedulerMessage {
+    TcpData { socket_id: u64, data: Vec<u8> },       // background read task → owner
+    TcpClosed { socket_id: u64 },                      // EOF or error on read
+    TcpAccepted { listener_id: u64, socket_id: u64,   // accept loop → owner
+                  write_handle: Arc<Mutex<OwnedWriteHalf>> },
+    TcpOp(TcpOp),                                      // cross-scheduler operation request
+    TcpOpResult { fiber_pid: FiberId,                  // cross-scheduler operation result
+                  result: Result<Value, String> },
+    // ...
+}
+```
+
+> **Design rationale:** TCP state is per-scheduler to avoid locks on the hot path. Background read tasks and accept loops run on Tokio's thread pool, pushing data into the scheduler's inbox via crossbeam channels. Cross-scheduler operations use the existing `SchedulerMessage` routing infrastructure. Socket/listener handles reuse `VMObject::Port(u64)` — ID spaces don't collide because channels use `next_channel_id` and TCP uses `next_tcp_id`.
 
 ### Value Thread Safety
 
@@ -2073,6 +2137,12 @@ pub fn compile_expr_with_context(
 ### Dirty Globals Tracking
 
 Module export detection uses a `dirty_globals: Option<HashSet<String>>` field on the VM. When enabled, the `SetGlobal` opcode records which globals are written. After running a module, only written globals are exported. This correctly handles modules that redefine constructors with structurally identical values (e.g., `result.mar` redefining `Ok`/`Err`).
+
+### Qualified Import: Unqualified Name Installation
+
+When a module is imported with `(import "mod.mar" as m)`, `merge_exports` installs **both** prefixed names (`m/foo`) and unqualified names (`foo`) into the parent's globals table. This is necessary because closures exported from the module reference their sibling functions by unprefixed names via `PUSH_GLOBAL` (they were compiled in the module's own scope). Without unqualified names, cross-function calls within the module would fail when the closure is invoked from the parent scope.
+
+The unqualified name is only installed if it doesn't already exist (`if !vm.globals.contains_key(name)`), which means the first-imported module "wins" for any name collision. This is a known limitation — see Phase 8 Known Issues for details. The proper long-term fix is module-scoped globals (closures capture their module's globals table).
 
 ### Path Resolution
 
@@ -2714,18 +2784,51 @@ criterion_main!(benches);
 - [x] `captured_output` changed to `Arc<Mutex<Option<String>>>` for cloning into async tasks
 - [x] Add 4 async IO tests (read, write, concurrent, error handling)
 
-**Deliverable:** 264 total tests pass. Single-threaded scheduler (`scheduler.rs`) unchanged — IO stays synchronous there.
+**Deliverable:** 305 total tests pass (264 at time of writing, plus 41 added in later sub-phases for macros, prelude, etc.). Single-threaded scheduler (`scheduler.rs`) unchanged — IO stays synchronous there.
 
-### Phase 8: Networking (Weeks 14-15)
+### Phase 8: TCP Networking (Weeks 14-15)
 
-**Goal:** TCP and HTTP support via Tokio's thread pool.
+**Goal:** Raw TCP socket support via Tokio, integrated with the multi-threaded scheduler.
 
-- [ ] Port TCP: connect, listen, accept, send, recv, close
-- [ ] Port HTTP client (replace Bun fetch with `reqwest`)
-- [ ] Port HTTP server (replace Bun.serve with `hyper`)
-- [ ] Port cleanup logic (shutdown servers, close sockets on `Runtime::shutdown()`)
+- [x] Add tokio features: `net`, `sync`, `macros` to `marlang-vm` Cargo.toml
+- [x] Implement TCP state types: `TcpSocketState`, `TcpListenerState`, `TcpOp` enum
+- [x] Add `SchedulerMessage` variants: `TcpData`, `TcpClosed`, `TcpAccepted`, `TcpOp`, `TcpOpResult`
+- [x] Add `SharedState` fields: `tcp_socket_owners`, `tcp_listener_owners`, `next_tcp_id`, `active_listeners`
+- [x] Add `PerScheduler` fields: `tcp_sockets`, `tcp_listeners`
+- [x] Implement 6 TCP effect handlers: `tcp-connect`, `tcp-listen`, `tcp-accept`, `tcp-send`, `tcp-recv`, `tcp-close`
+- [x] Implement cross-scheduler TCP routing via `TcpOp` / `TcpOpResult`
+- [x] Background read tasks push `TcpData` / `TcpClosed` to owning scheduler
+- [x] Background accept loop with `tokio::select!` for graceful shutdown
+- [x] Pre-allocated socket ID batches (`Arc<AtomicU64>`) for accept loop
+- [x] Termination detection: `active_listeners` prevents premature shutdown
+- [x] Single-threaded scheduler rejects TCP effects with clear error message
+- [x] TCP helper functions: `tcp_close_socket`, `tcp_handle_data`, `tcp_handle_closed`, `tcp_handle_accepted`, `tcp_handle_op`
+- [x] Extract `process_single_message()` to eliminate duplication between `drain_inbox` and idle-wait path
+- [x] 9 TCP tests: listen+close, echo server, recv-nil-on-close, send+receive, listener-close-wakes-acceptor, multiple-clients, bidirectional, connect-failure, single-threaded-rejects
+- [x] Exception effect: `throw` in `HANDLED_EFFECTS` (both schedulers), default handler crashes fiber
+- [x] TCP effects return `Result` ADT values (`(Ok value)` / `(Err msg)`) instead of crashing fibers
+- [x] `make_ok()` / `make_err()` helpers for constructing Result ADTs in runtime
+- [x] `net.mar` updated: throwing wrappers (connect, listen, send) and try wrappers (try-connect, try-listen, try-send)
+- [x] Exception effect `(effect Exception (throw (-> String Unit)))` declared in prelude
+- [x] Fix: single-threaded scheduler child fiber effect errors no longer propagate via `?` (crash fiber instead)
+- [x] Fix: `resume_continuation` uses `run_restored_continuation` for restored user handler dispatch
+- [x] 4 exception/throw tests: throw-crashes-fiber, throw-caught-by-handle, tcp-connect-result-matching, tcp-listen-duplicate-port-error
+- [x] Fix: module globals resolution — `merge_exports` for `Qualified` imports now installs unqualified names alongside prefixed names, so module-internal cross-function calls work when the closure is invoked from the parent scope
+- [x] Fix: `examples/tcp.mar` — multi-expression match branches wrapped with `begin`, Example 3 changed from recursive to unrolled server pattern
 
-**Deliverable:** Net (4) + HTTP (5) = **9 tests** pass.
+**Deliverable:** 318 total tests pass (9 TCP + 4 exception tests). Exception effect available in both schedulers. TCP errors are recoverable via Result matching.
+
+**Known Issues (Phase 8):**
+
+1. **Module globals resolution is a workaround, not a proper fix.** When a module is imported with `(import "std:net" as net)`, `merge_exports` installs both prefixed (`net/listen`) and unqualified (`listen`) names into the parent's globals. The unqualified names are needed because closures exported from the module reference sibling functions by unprefixed names via `PUSH_GLOBAL`. However, the `contains_key` guard means whichever module is imported first "wins" for unqualified names — two modules defining the same unqualified name would collide. The proper fix is for closures to capture a reference to their module's globals table (module-scoped globals), or for the compiler to resolve module-internal references as upvalues rather than globals.
+
+2. **Recursive `define` inside `fiber-spawn` + TCP effects hangs.** Using `(define handle-client (lambda (n) ... (handle-client (+ n 1))))` inside a `fiber-spawn` lambda, where the recursive body performs TCP effects (accept, recv, send, close), causes the program to hang. The `define` sets a global on the scheduler thread's VM, but after a TCP effect suspends/resumes the fiber, `PUSH_GLOBAL "handle-client"` may not resolve correctly. **Workaround:** Unroll the recursion, or avoid combining recursive `define` with scheduler-suspending effects.
+
+3. **Type checker rejects `net.mar` effect signatures.** Running with type checking (without `--no-typecheck`) fails with `"function type: expected 2 arguments, got 3"`. The type checker doesn't support parameterized types like `(Result String TcpSocket)` in effect operation signatures — it interprets the 3-element list as a function application. **Workaround:** Always use `--no-typecheck` for programs importing `std:net`.
+
+4. **User `handle` blocks don't work reliably across scheduler effect boundaries.** When a fiber is parked by a scheduler effect (e.g., `tcp-connect`) and later resumed, user-level `handle` frames are captured in the continuation and restored. If `throw` fires after resume, the restored handler catches it, but the handler's return value goes to the scheduler's dispatch (not back into the fiber's code flow). **Workaround:** Use `try-` wrappers from `net.mar` and match on Result directly instead of wrapping `handle`/`throw` around TCP operations.
+
+5. **`match` branches require single-expression bodies.** Match branches must be `(pattern body)` where body is a single expression. Multi-expression bodies need explicit `(begin ...)` wrapping. This is by design in the compiler (`compile_match` checks `branch_elements.len() != 2`), but is a common source of user errors when writing side-effecting match branches.
 
 ### Phase 9: LSP (Weeks 15-16)
 

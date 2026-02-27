@@ -117,8 +117,9 @@ pub fn resolve_library_name(name: &str) -> String {
 pub fn ffi_open(path: &str, sig_list: &[(String, FfiSignature)]) -> Result<FfiLibrary, VMError> {
     let lib_name = resolve_library_name(path);
     let lib = unsafe {
-        libloading::Library::new(&lib_name)
-            .map_err(|e| VMError::runtime(format!("Failed to load library '{}': {}", lib_name, e)))?
+        libloading::Library::new(&lib_name).map_err(|e| {
+            VMError::runtime(format!("Failed to load library '{}': {}", lib_name, e))
+        })?
     };
     let mut signatures = HashMap::new();
     for (name, sig) in sig_list {
@@ -490,20 +491,18 @@ pub fn type_size(t: &FfiType) -> usize {
 
 fn type_alignment(t: &FfiType) -> usize {
     match t {
-        FfiType::Struct(name) => {
-            STRUCT_REGISTRY
-                .lock()
-                .unwrap()
-                .get(name)
-                .map(|d| {
-                    d.fields
-                        .iter()
-                        .map(|f| type_alignment(&f.ffi_type))
-                        .max()
-                        .unwrap_or(1)
-                })
-                .unwrap_or(8)
-        }
+        FfiType::Struct(name) => STRUCT_REGISTRY
+            .lock()
+            .unwrap()
+            .get(name)
+            .map(|d| {
+                d.fields
+                    .iter()
+                    .map(|f| type_alignment(&f.ffi_type))
+                    .max()
+                    .unwrap_or(1)
+            })
+            .unwrap_or(8),
         _ => type_size(t).max(1),
     }
 }
@@ -543,7 +542,11 @@ pub fn compute_struct_layout(name: &str, fields: &[(String, FfiType)]) -> FfiStr
     }
 }
 
-pub fn write_field(buffer: &mut [u8], field: &FfiStructField, value: &Value) -> Result<(), VMError> {
+pub fn write_field(
+    buffer: &mut [u8],
+    field: &FfiStructField,
+    value: &Value,
+) -> Result<(), VMError> {
     let n = value.as_number().ok_or_else(|| {
         VMError::runtime(format!(
             "struct-set: field '{}' expects a number",

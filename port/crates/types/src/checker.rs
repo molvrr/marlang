@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use marlang_core::ast::Expr;
 use marlang_core::intern::Interner;
 
-use crate::ast::{reset_effect_row_var_counter, reset_type_var_counter, Type};
+use crate::ast::{Type, reset_effect_row_var_counter, reset_type_var_counter};
 use crate::builtins::create_builtin_env;
 use crate::env::TypeEnv;
 use crate::errors::TypeError;
@@ -55,11 +55,15 @@ impl TypeModuleCache {
     }
 
     pub fn mark_loading(&self, path: PathBuf) {
-        self.entries.borrow_mut().insert(path, ModuleCacheEntry::Loading);
+        self.entries
+            .borrow_mut()
+            .insert(path, ModuleCacheEntry::Loading);
     }
 
     pub fn mark_loaded(&self, path: PathBuf, env: TypeEnv) {
-        self.entries.borrow_mut().insert(path, ModuleCacheEntry::Loaded(env));
+        self.entries
+            .borrow_mut()
+            .insert(path, ModuleCacheEntry::Loaded(env));
     }
 }
 

@@ -48,7 +48,10 @@ impl Value {
     pub fn object(obj: VMObject) -> Self {
         let arc = Arc::new(obj);
         let ptr = Arc::into_raw(arc) as u64;
-        debug_assert!(ptr & !(0x0000_FFFF_FFFF_FFFF) == 0, "pointer uses more than 48 bits");
+        debug_assert!(
+            ptr & !(0x0000_FFFF_FFFF_FFFF) == 0,
+            "pointer uses more than 48 bits"
+        );
         Value(SIGN_BIT | QNAN | ptr)
     }
 
@@ -300,7 +303,10 @@ fn format_object(obj: &VMObject) -> String {
         #[cfg(feature = "ffi")]
         VMObject::FfiStruct(s) => format!("#<ffi-struct {}>", s.def.name),
         #[cfg(feature = "ffi")]
-        VMObject::FfiBound { lib_global_name, fn_name } => {
+        VMObject::FfiBound {
+            lib_global_name,
+            fn_name,
+        } => {
             format!("#<ffi-bound {}/{}>", lib_global_name, fn_name)
         }
     }
