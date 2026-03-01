@@ -1,5 +1,5 @@
 (import "std:io" as io)
 
-(io/println "Mateus")
+(io/pritln "Mateus")
 
 (define (f : (-> Unit {IO} Unit)) (lambda () (io/println "oi")))

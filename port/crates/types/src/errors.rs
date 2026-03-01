@@ -1,5 +1,5 @@
-use crate::ast::{Constraint, Pattern, Type, format_constraint, format_pattern, format_type};
-use marlang_core::span::Span;
+use crate::ast::{format_constraint, format_pattern, format_type, Constraint, Pattern, Type};
+use marlang_core::span::{LineMap, Span};
 
 #[derive(Debug, Clone)]
 pub enum TypeError {
@@ -183,5 +183,41 @@ pub fn format_error(err: &TypeError) -> String {
         TypeError::InternalError { message, .. } => {
             format!("Internal type error: {message}")
         }
+    }
+}
+
+/// Extract the span from a TypeError, if present.
+pub fn error_span(err: &TypeError) -> Option<Span> {
+    match err {
+        TypeError::UnificationError { span, .. }
+        | TypeError::OccursCheck { span, .. }
+        | TypeError::UndefinedVariable { span, .. }
+        | TypeError::UndefinedType { span, .. }
+        | TypeError::UndefinedConstructor { span, .. }
+        | TypeError::UndefinedClass { span, .. }
+        | TypeError::NoInstance { span, .. }
+        | TypeError::DuplicateDefinition { span, .. }
+        | TypeError::ArityMismatch { span, .. }
+        | TypeError::NotAFunction { span, .. }
+        | TypeError::PatternTypeMismatch { span, .. }
+        | TypeError::NonExhaustivePatterns { span, .. }
+        | TypeError::OverlappingInstances { span, .. }
+        | TypeError::MissingTypeAnnotation { span, .. }
+        | TypeError::InvalidTypeAnnotation { span, .. }
+        | TypeError::AmbiguousType { span, .. }
+        | TypeError::CyclicTypeAlias { span, .. }
+        | TypeError::KindError { span, .. }
+        | TypeError::InternalError { span, .. } => *span,
+    }
+}
+
+/// Format a type error with source location resolved via a `LineMap`.
+pub fn format_error_with_location(err: &TypeError, line_map: &LineMap, filename: &str) -> String {
+    let msg = format_error(err);
+    if let Some(span) = error_span(err) {
+        let (line, col) = line_map.resolve(span.start);
+        format!("{}:{}:{}: Type error: {}", filename, line, col, msg)
+    } else {
+        format!("Type error: {}", msg)
     }
 }

@@ -1,0 +1,4 @@
+(import "std:net" as net)
+
+(define (foo : (-> String String))
+    (lambda (str) (begin (net/connect "127.0.0.1" 80) str)))

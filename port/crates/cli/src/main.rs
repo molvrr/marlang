@@ -10,9 +10,10 @@ use marlang_core::ast::Expr;
 use marlang_core::intern::Interner;
 use marlang_core::lexer::lex;
 use marlang_core::parser::parse_with_interner;
+use marlang_core::span::LineMap;
 use marlang_types::ast::format_type;
 use marlang_types::checker::{type_check_with_modules, TypeCheckResult, TypeModuleLoader};
-use marlang_types::errors::{format_error, TypeError};
+use marlang_types::errors::{format_error_with_location, TypeError};
 use marlang_vm::builtins::register_builtins;
 use marlang_vm::compiler::compile_program;
 use marlang_vm::debug::disassemble;
@@ -187,6 +188,8 @@ fn cmd_run(file: &PathBuf, no_typecheck: bool) -> ExitCode {
         }
     };
 
+    let line_map = LineMap::new(&source);
+    let filename = file.display().to_string();
     let interner = Interner::new();
     let loader = ModuleLoader::new();
 
@@ -227,7 +230,10 @@ fn cmd_run(file: &PathBuf, no_typecheck: bool) -> ExitCode {
         ) {
             TypeCheckResult::Ok { .. } => {}
             TypeCheckResult::Err { error } => {
-                eprintln!("Type error: {}", format_error(&error));
+                eprintln!(
+                    "{}",
+                    format_error_with_location(&error, &line_map, &filename)
+                );
                 return ExitCode::FAILURE;
             }
         }
@@ -251,7 +257,7 @@ fn cmd_run(file: &PathBuf, no_typecheck: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("Runtime error: {}", e);
+            eprintln!("{}", e.format_with_location(&line_map, &filename));
             ExitCode::FAILURE
         }
     }
@@ -266,6 +272,8 @@ fn cmd_typecheck(file: &PathBuf, verbose: bool) -> ExitCode {
         }
     };
 
+    let line_map = LineMap::new(&source);
+    let filename = file.display().to_string();
     let interner = Interner::new();
     let loader = ModuleLoader::new();
 
@@ -311,7 +319,10 @@ fn cmd_typecheck(file: &PathBuf, verbose: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         TypeCheckResult::Err { error } => {
-            eprintln!("Type error: {}", format_error(&error));
+            eprintln!(
+                "{}",
+                format_error_with_location(&error, &line_map, &filename)
+            );
             ExitCode::FAILURE
         }
     }
@@ -326,6 +337,8 @@ fn cmd_disasm(file: &PathBuf) -> ExitCode {
         }
     };
 
+    let line_map = LineMap::new(&source);
+    let filename = file.display().to_string();
     let interner = Interner::new();
     let loader = ModuleLoader::new();
 
@@ -357,7 +370,7 @@ fn cmd_disasm(file: &PathBuf) -> ExitCode {
     let chunk = match compile_program(&expanded.exprs, &interner) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Compile error: {}", e);
+            eprintln!("{}", e.format_with_location(&line_map, &filename));
             return ExitCode::FAILURE;
         }
     };

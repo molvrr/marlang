@@ -1,5 +1,7 @@
 use std::fmt;
 
+use marlang_core::span::LineMap;
+
 #[derive(Debug, Clone)]
 pub struct CompileError {
     pub message: String,
@@ -11,6 +13,20 @@ impl CompileError {
         CompileError {
             message: message.into(),
             line,
+        }
+    }
+
+    /// Format with source location resolved via a `LineMap`.
+    /// The `line` field is actually a byte offset into the source.
+    pub fn format_with_location(&self, line_map: &LineMap, filename: &str) -> String {
+        if self.line > 0 {
+            let (line, col) = line_map.resolve(self.line);
+            format!(
+                "{}:{}:{}: Compile error: {}",
+                filename, line, col, self.message
+            )
+        } else {
+            format!("Compile error: {}", self.message)
         }
     }
 }
@@ -55,6 +71,32 @@ impl VMError {
             line: 0,
             stack_trace: Vec::new(),
         }
+    }
+
+    /// Format with source location resolved via a `LineMap`.
+    /// The `line` field (and stack trace entries) are byte offsets into the source.
+    pub fn format_with_location(&self, line_map: &LineMap, filename: &str) -> String {
+        let mut result = if self.line > 0 {
+            let (line, col) = line_map.resolve(self.line);
+            format!(
+                "{}:{}:{}: Runtime error: {}",
+                filename, line, col, self.message
+            )
+        } else {
+            format!("Runtime error: {}", self.message)
+        };
+        for entry in &self.stack_trace {
+            if entry.line > 0 {
+                let (line, col) = line_map.resolve(entry.line);
+                result.push_str(&format!(
+                    "\n  at {} ({}:{}:{})",
+                    entry.function_name, filename, line, col
+                ));
+            } else {
+                result.push_str(&format!("\n  at {}", entry.function_name));
+            }
+        }
+        result
     }
 }
 

@@ -3,6 +3,7 @@ use std::path::Path;
 
 use marlang_core::ast::{self, Expr, LispValue};
 use marlang_core::intern::Interner;
+use marlang_core::span::Span;
 
 use crate::ast::*;
 use crate::builtins::resolve_constraints;
@@ -122,7 +123,7 @@ fn parse_effect_row_expr(expr: &Expr, interner: &Interner) -> Result<EffectRow, 
         } else {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "Effect row elements must be symbols".into(),
-                span: None,
+                span: Some(e.span()),
             });
         }
     }
@@ -161,7 +162,7 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
         }
         Expr::Atom(_, _) => Err(TypeError::InvalidTypeAnnotation {
             message: "Invalid type expression".into(),
-            span: None,
+            span: Some(expr.span()),
         }),
         Expr::List { .. } => {
             let elements = list_to_array(expr);
@@ -176,7 +177,7 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                 if elements.len() < 2 {
                     return Err(TypeError::InvalidTypeAnnotation {
                         message: "Arrow type needs at least a result type".into(),
-                        span: None,
+                        span: Some(expr.span()),
                     });
                 }
                 let mut types = Vec::new();
@@ -189,7 +190,7 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                             return Err(TypeError::InvalidTypeAnnotation {
                                 message: "Arrow type can have at most one effect row annotation"
                                     .into(),
-                                span: None,
+                                span: Some(expr.span()),
                             });
                         }
                         effect_row = Some(parse_effect_row_expr(e, interner)?);
@@ -205,7 +206,7 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                                         message:
                                             "Arrow type can have at most one (... T) rest type"
                                                 .into(),
-                                        span: None,
+                                        span: Some(e.span()),
                                     });
                                 }
                                 rest_type = Some(parse_type_expr(sub_elems[1], env, interner)?);
@@ -218,13 +219,13 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                 if types.is_empty() && rest_type.is_some() {
                     return Err(TypeError::InvalidTypeAnnotation {
                         message: "Arrow type needs at least a result type".into(),
-                        span: None,
+                        span: Some(expr.span()),
                     });
                 }
                 if types.len() < 2 && rest_type.is_none() {
                     return Err(TypeError::InvalidTypeAnnotation {
                         message: "Arrow type needs at least a parameter type and a result type, e.g. (-> Unit Unit)".into(),
-                        span: None,
+                        span: Some(expr.span()),
                     });
                 }
                 let result = types.pop().unwrap();
@@ -241,7 +242,7 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                 if elements.len() < 2 {
                     return Err(TypeError::InvalidTypeAnnotation {
                         message: "Constrained type needs a body type".into(),
-                        span: None,
+                        span: Some(expr.span()),
                     });
                 }
                 return parse_type_expr(elements[elements.len() - 1], env, interner);
@@ -252,13 +253,13 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                 if elements.len() != 3 {
                     return Err(TypeError::InvalidTypeAnnotation {
                         message: "mu type needs: (mu var body)".into(),
-                        span: None,
+                        span: Some(expr.span()),
                     });
                 }
                 let var_name =
                     get_symbol(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
                         message: "mu variable must be a symbol".into(),
-                        span: None,
+                        span: Some(elements[1].span()),
                     })?;
                 let body = parse_type_expr(elements[2], env, interner)?;
                 return Ok(type_rec(var_name, body));
@@ -289,12 +290,12 @@ fn parse_constraint(
     if elements.len() != 2 {
         return Err(TypeError::InvalidTypeAnnotation {
             message: "Constraint must be (ClassName typevar)".into(),
-            span: None,
+            span: Some(expr.span()),
         });
     }
     let class_name = get_symbol(elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
         message: "Class name must be a symbol".into(),
-        span: None,
+        span: Some(elements[0].span()),
     })?;
     let type_arg = parse_type_expr(elements[1], env, interner)?;
     Ok(Constraint {
@@ -315,7 +316,7 @@ fn parse_type_annotation(
                 if elements.len() < 3 {
                     return Err(TypeError::InvalidTypeAnnotation {
                         message: "Constrained type needs constraints and a body".into(),
-                        span: None,
+                        span: Some(expr.span()),
                     });
                 }
                 let mut constraints = Vec::new();
@@ -360,13 +361,13 @@ fn parse_pattern(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Patt
             if elements.is_empty() {
                 return Err(TypeError::InvalidTypeAnnotation {
                     message: "Empty pattern".into(),
-                    span: None,
+                    span: Some(expr.span()),
                 });
             }
             let ctor_name =
                 get_symbol(elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
                     message: "Pattern constructor must be a symbol".into(),
-                    span: None,
+                    span: Some(elements[0].span()),
                 })?;
             let mut args = Vec::new();
             for e in &elements[1..] {
@@ -393,7 +394,7 @@ pub fn infer_expr(
 ) -> Result<InferResult, TypeError> {
     match expr {
         Expr::Nil(_) => Ok(pure_result(t_unit())),
-        Expr::Atom(value, _) => infer_atom(env, value, interner),
+        Expr::Atom(value, _) => infer_atom(env, value, expr.span(), interner),
         Expr::List { .. } => {
             let elements = list_to_array(expr);
             if elements.is_empty() {
@@ -436,6 +437,7 @@ pub fn infer_expr(
 fn infer_atom(
     env: &TypeEnv,
     value: &LispValue,
+    span: Span,
     interner: &Interner,
 ) -> Result<InferResult, TypeError> {
     match value {
@@ -462,7 +464,7 @@ fn infer_atom(
                 })
                 .ok_or(TypeError::UndefinedVariable {
                     name: strip_marks(name).to_string(),
-                    span: None,
+                    span: Some(span),
                 })?;
             let (ty, constraints) = instantiate(&scheme);
             Ok(pure_result_with(ty, empty_subst(), constraints))
@@ -482,7 +484,7 @@ fn infer_define(
             expected: 2,
             got: elements.len() - 1,
             context: "define".into(),
-            span: None,
+            span: Some(elements[0].span()),
         });
     }
 
@@ -496,7 +498,7 @@ fn infer_define(
             let name =
                 get_symbol(name_elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
                     message: "Expected symbol before :".into(),
-                    span: None,
+                    span: Some(name_elements[0].span()),
                 })?;
 
             let (annotated_type, annotated_constraints) =
@@ -523,7 +525,7 @@ fn infer_define(
     // Regular define
     let name = get_symbol(name_expr, interner).ok_or(TypeError::InvalidTypeAnnotation {
         message: "define expects a symbol name".into(),
-        span: None,
+        span: Some(elements[1].span()),
     })?;
     let _ = name; // suppress unused warning
 
@@ -548,7 +550,7 @@ fn infer_lambda(
             expected: 2,
             got: elements.len() - 1,
             context: "lambda".into(),
-            span: None,
+            span: Some(elements[0].span()),
         });
     }
 
@@ -569,13 +571,13 @@ fn infer_lambda(
         if pos + 1 >= param_list.len() {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "rest parameter name expected after '.'".into(),
-                span: None,
+                span: Some(elements[1].span()),
             });
         }
         if pos + 2 != param_list.len() {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "only one rest parameter name allowed after '.'".into(),
-                span: None,
+                span: Some(elements[1].span()),
             });
         }
         (&param_list[..pos], Some(param_list[pos + 1]))
@@ -591,7 +593,7 @@ fn infer_lambda(
                 let name = get_symbol(param_elements[0], interner).ok_or(
                     TypeError::InvalidTypeAnnotation {
                         message: "Parameter name must be a symbol".into(),
-                        span: None,
+                        span: Some(param_elements[0].span()),
                     },
                 )?;
                 let ty = parse_type_expr(param_elements[2], env, interner)?;
@@ -613,7 +615,7 @@ fn infer_lambda(
 
         let name = get_symbol(param, interner).ok_or(TypeError::InvalidTypeAnnotation {
             message: "Parameter must be a symbol".into(),
-            span: None,
+            span: Some(param.span()),
         })?;
         let param_type = fresh_type_var();
         params.push((name.to_string(), param_type.clone()));
@@ -639,7 +641,7 @@ fn infer_lambda(
                 let name = get_symbol(param_elements[0], interner).ok_or(
                     TypeError::InvalidTypeAnnotation {
                         message: "Rest parameter name must be a symbol".into(),
-                        span: None,
+                        span: Some(param_elements[0].span()),
                     },
                 )?;
                 let ty = parse_type_expr(param_elements[2], env, interner)?;
@@ -647,13 +649,13 @@ fn infer_lambda(
             } else {
                 return Err(TypeError::InvalidTypeAnnotation {
                     message: "Rest parameter must be a symbol or (name : Type)".into(),
-                    span: None,
+                    span: Some(rest_expr.span()),
                 });
             }
         } else {
             let name = get_symbol(rest_expr, interner).ok_or(TypeError::InvalidTypeAnnotation {
                 message: "Rest parameter must be a symbol".into(),
-                span: None,
+                span: Some(rest_expr.span()),
             })?;
             (name, fresh_type_var())
         };
@@ -730,7 +732,7 @@ fn infer_if(
             expected: 3,
             got: elements.len() - 1,
             context: "if".into(),
-            span: None,
+            span: Some(elements[0].span()),
         });
     }
 
@@ -791,7 +793,7 @@ fn infer_let(
             expected: 2,
             got: elements.len() - 1,
             context: "let".into(),
-            span: None,
+            span: Some(elements[0].span()),
         });
     }
 
@@ -809,7 +811,7 @@ fn infer_let(
         if pair.len() != 2 {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "let binding must be (name value)".into(),
-                span: None,
+                span: Some(binding.span()),
             });
         }
 
@@ -825,7 +827,7 @@ fn infer_let(
                 let n = get_symbol(name_elements[0], interner).ok_or(
                     TypeError::InvalidTypeAnnotation {
                         message: "Expected symbol before :".into(),
-                        span: None,
+                        span: Some(name_elements[0].span()),
                     },
                 )?;
                 name = n.to_string();
@@ -833,13 +835,13 @@ fn infer_let(
             } else {
                 return Err(TypeError::InvalidTypeAnnotation {
                     message: "Invalid let binding name".into(),
-                    span: None,
+                    span: Some(name_expr.span()),
                 });
             }
         } else {
             let n = get_symbol(name_expr, interner).ok_or(TypeError::InvalidTypeAnnotation {
                 message: "let binding name must be a symbol".into(),
-                span: None,
+                span: Some(name_expr.span()),
             })?;
             name = n.to_string();
         }
@@ -949,7 +951,7 @@ fn infer_cond(
         if clause.len() != 2 {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "cond clause must be (test result)".into(),
-                span: None,
+                span: Some(clause_expr.span()),
             });
         }
 
@@ -1011,6 +1013,7 @@ fn check_exhaustiveness(
     env: &TypeEnv,
     scrutinee_type: &Type,
     patterns: &[Pattern],
+    span: Span,
 ) -> Result<(), TypeError> {
     let data_type = match get_data_type_from_type(env, scrutinee_type) {
         Some(dt) => dt,
@@ -1044,7 +1047,7 @@ fn check_exhaustiveness(
     if !missing.is_empty() {
         return Err(TypeError::NonExhaustivePatterns {
             missing,
-            span: None,
+            span: Some(span),
         });
     }
 
@@ -1061,7 +1064,7 @@ fn infer_match(
             expected: 2,
             got: elements.len() - 1,
             context: "match".into(),
-            span: None,
+            span: Some(elements[0].span()),
         });
     }
 
@@ -1081,7 +1084,7 @@ fn infer_match(
         if branch_elements.len() != 2 {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "match branch must be (pattern body)".into(),
-                span: None,
+                span: Some(branch_expr.span()),
             });
         }
 
@@ -1091,7 +1094,12 @@ fn infer_match(
         let pattern = parse_pattern(pattern_expr, env, interner)?;
         parsed_patterns.push(pattern.clone());
 
-        let pattern_check = infer_pattern(env, &pattern, &apply_subst(&subst, &scrutinee_type))?;
+        let pattern_check = infer_pattern(
+            env,
+            &pattern,
+            &apply_subst(&subst, &scrutinee_type),
+            pattern_expr.span(),
+        )?;
 
         let pattern_unify = unify_with_context(
             &apply_subst(&subst, &scrutinee_type),
@@ -1135,7 +1143,12 @@ fn infer_match(
     }
 
     // Check exhaustiveness
-    check_exhaustiveness(env, &apply_subst(&subst, &scrutinee_type), &parsed_patterns)?;
+    check_exhaustiveness(
+        env,
+        &apply_subst(&subst, &scrutinee_type),
+        &parsed_patterns,
+        elements[0].span(),
+    )?;
 
     Ok(InferResult {
         ty: result_type.unwrap_or_else(t_unit),
@@ -1155,6 +1168,7 @@ fn infer_pattern(
     env: &TypeEnv,
     pattern: &Pattern,
     expected_type: &Type,
+    span: Span,
 ) -> Result<PatternResult, TypeError> {
     match pattern {
         Pattern::Wildcard => Ok(PatternResult {
@@ -1198,7 +1212,7 @@ fn infer_pattern(
                 })
                 .ok_or(TypeError::UndefinedConstructor {
                     name: strip_marks(name).to_string(),
-                    span: None,
+                    span: Some(span),
                 })?;
 
             if args.len() != constructor.params.len() {
@@ -1206,7 +1220,7 @@ fn infer_pattern(
                     expected: constructor.params.len(),
                     got: args.len(),
                     context: format!("constructor {name}"),
-                    span: None,
+                    span: Some(span),
                 });
             }
 
@@ -1240,7 +1254,7 @@ fn infer_pattern(
                 param_type = apply_subst(&tv_subst, &param_type);
                 param_type = apply_subst(&subst, &param_type);
 
-                let arg_result = infer_pattern(env, arg_pattern, &param_type)?;
+                let arg_result = infer_pattern(env, arg_pattern, &param_type, span)?;
                 subst = compose_subst(&arg_result.subst, &subst);
                 all_bindings.extend(arg_result.bindings);
             }
@@ -1260,6 +1274,7 @@ fn infer_variadic_arith(
     env: &TypeEnv,
     op_name: &str,
     arg_exprs: &[&Expr],
+    op_span: Span,
     interner: &Interner,
 ) -> Result<InferResult, TypeError> {
     let ops = variadic_arith_ops();
@@ -1270,7 +1285,7 @@ fn infer_variadic_arith(
             expected: info.min_args,
             got: arg_exprs.len(),
             context: op_name.to_string(),
-            span: None,
+            span: Some(op_span),
         });
     }
 
@@ -1328,6 +1343,7 @@ fn infer_ffi_application(
     env: &TypeEnv,
     fn_name: &str,
     arg_exprs: &[&Expr],
+    op_span: Span,
     interner: &Interner,
 ) -> Result<InferResult, TypeError> {
     // ffi-call requires a foreign declaration for type checking
@@ -1337,20 +1353,20 @@ fn infer_ffi_application(
                 expected: 2,
                 got: arg_exprs.len(),
                 context: "ffi-call requires at least a library and function name".into(),
-                span: None,
+                span: Some(op_span),
             });
         }
 
         let lib_name =
             get_symbol(arg_exprs[0], interner).ok_or_else(|| TypeError::InvalidTypeAnnotation {
                 message: "ffi-call first argument must be a library variable".into(),
-                span: None,
+                span: Some(arg_exprs[0].span()),
             })?;
 
         let foreign_fn_name =
             get_string_literal(arg_exprs[1]).ok_or_else(|| TypeError::InvalidTypeAnnotation {
                 message: "ffi-call second argument must be a string literal function name".into(),
-                span: None,
+                span: Some(arg_exprs[1].span()),
             })?;
 
         if !has_foreign_lib(env, lib_name) {
@@ -1358,7 +1374,7 @@ fn infer_ffi_application(
                 message: format!(
                     "ffi-call on '{lib_name}' requires a (foreign {lib_name} ...) declaration"
                 ),
-                span: None,
+                span: Some(op_span),
             });
         }
 
@@ -1367,7 +1383,7 @@ fn infer_ffi_application(
                 message: format!(
                     "foreign function '{foreign_fn_name}' not declared in (foreign {lib_name} ...)"
                 ),
-                span: None,
+                span: Some(arg_exprs[1].span()),
             }
         })?;
 
@@ -1383,7 +1399,7 @@ fn infer_ffi_application(
                 expected: decl_params.len(),
                 got: call_args.len(),
                 context: format!("foreign function {foreign_fn_name}"),
-                span: None,
+                span: Some(op_span),
             });
         }
 
@@ -1458,7 +1474,7 @@ fn infer_ffi_application(
                                 expected: info.fields.len(),
                                 got: value_args.len(),
                                 context: format!("struct-new {}", sym_name),
-                                span: None,
+                                span: Some(arg_exprs[0].span()),
                             });
                         }
                         // Unify each value arg with its field's Marlang type
@@ -1501,7 +1517,7 @@ fn infer_ffi_application(
                                             "struct '{}' has no field '{}'",
                                             type_name, field_name
                                         ),
-                                        span: None,
+                                        span: Some(arg_exprs[1].span()),
                                     });
                                 }
                             }
@@ -1545,7 +1561,7 @@ fn infer_ffi_application(
                                             "struct '{}' has no field '{}'",
                                             type_name, field_name
                                         ),
-                                        span: None,
+                                        span: Some(arg_exprs[1].span()),
                                     });
                                 }
                             }
@@ -1578,10 +1594,10 @@ fn infer_application(
     // Check for variadic arithmetic
     if let Some(fn_name) = get_symbol(fn_expr, interner) {
         if variadic_arith_ops().contains_key(fn_name) {
-            return infer_variadic_arith(env, fn_name, arg_exprs, interner);
+            return infer_variadic_arith(env, fn_name, arg_exprs, fn_expr.span(), interner);
         }
         if FFI_VARIADIC_FUNCTIONS.contains(&fn_name) {
-            return infer_ffi_application(env, fn_name, arg_exprs, interner);
+            return infer_ffi_application(env, fn_name, arg_exprs, fn_expr.span(), interner);
         }
     }
 
@@ -1656,13 +1672,13 @@ fn parse_effect_op(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Ef
     if elements.len() != 2 {
         return Err(TypeError::InvalidTypeAnnotation {
             message: "Effect operation must be (name (-> ParamType ResultType))".into(),
-            span: None,
+            span: Some(expr.span()),
         });
     }
 
     let op_name = get_symbol(elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
         message: "Effect operation name must be a symbol".into(),
-        span: None,
+        span: Some(elements[0].span()),
     })?;
 
     let type_expr = elements[1];
@@ -1676,7 +1692,7 @@ fn parse_effect_op(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Ef
             if type_elements.len() < 3 {
                 return Err(TypeError::InvalidTypeAnnotation {
                     message: "Constrained type needs constraints and a body".into(),
-                    span: None,
+                    span: Some(type_expr.span()),
                 });
             }
             for e in &type_elements[1..type_elements.len() - 1] {
@@ -1692,7 +1708,7 @@ fn parse_effect_op(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Ef
         _ => {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "Effect operation type must be a function type (-> ...)".into(),
-                span: None,
+                span: Some(arrow_expr.span()),
             });
         }
     };
@@ -1747,18 +1763,18 @@ fn infer_perform(
             expected: 1,
             got: elements.len() - 1,
             context: "perform".into(),
-            span: None,
+            span: Some(elements[0].span()),
         });
     }
 
     let op_name = get_symbol(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
         message: "perform operation name must be a symbol".into(),
-        span: None,
+        span: Some(elements[1].span()),
     })?;
 
     let (effect, op) = lookup_effect_op(env, op_name).ok_or(TypeError::UndefinedVariable {
         name: format!("effect operation '{op_name}' (declare with (effect EffectName ({op_name} : ArgType -> ResultType)))"),
-        span: None,
+        span: Some(elements[1].span()),
     })?;
 
     let arg_exprs = &elements[2..];
@@ -1784,7 +1800,7 @@ fn infer_perform(
             expected: op.params.len(),
             got: arg_types.len(),
             context: format!("effect operation {op_name}"),
-            span: None,
+            span: Some(elements[0].span()),
         });
     }
 
@@ -1834,7 +1850,7 @@ fn infer_handle(
             expected: 1,
             got: elements.len() - 1,
             context: "handle".into(),
-            span: None,
+            span: Some(elements[0].span()),
         });
     }
 
@@ -1852,13 +1868,13 @@ fn infer_handle(
         if clause_elements.len() != 3 {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "handle clause must be ((pattern) -> body)".into(),
-                span: None,
+                span: Some(clause.span()),
             });
         }
         if !is_symbol(clause_elements[1], interner, "->") {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "handle clause must be ((pattern) -> body)".into(),
-                span: None,
+                span: Some(clause_elements[1].span()),
             });
         }
 
@@ -1870,7 +1886,7 @@ fn infer_handle(
             if pattern_elements.is_empty() {
                 return Err(TypeError::InvalidTypeAnnotation {
                     message: "Handler pattern must have operation name".into(),
-                    span: None,
+                    span: Some(pattern.span()),
                 });
             }
 
@@ -1915,7 +1931,7 @@ fn infer_handle(
                 handled_effects.push(op_name.to_string());
                 let op_info = lookup_effect_op(env, op_name).ok_or(TypeError::UndefinedVariable {
                     name: format!("effect operation '{op_name}' in handler (declare with (effect EffectName ({op_name} : ArgType -> ResultType)))"),
-                    span: None,
+                    span: Some(pattern_elements[0].span()),
                 })?;
 
                 let mut handler_env = apply_subst_env(&subst, env);
@@ -2014,7 +2030,7 @@ fn infer_resume(
             expected: 2,
             got: elements.len() - 1,
             context: "resume".into(),
-            span: None,
+            span: Some(elements[0].span()),
         });
     }
 
@@ -2063,7 +2079,7 @@ fn process_data_def(
         type_name = get_symbol(type_elements[0], interner)
             .ok_or(TypeError::InvalidTypeAnnotation {
                 message: "data type name must be a symbol".into(),
-                span: None,
+                span: Some(type_elements[0].span()),
             })?
             .to_string();
         for te in &type_elements[1..] {
@@ -2071,7 +2087,7 @@ fn process_data_def(
                 get_symbol(te, interner)
                     .ok_or(TypeError::InvalidTypeAnnotation {
                         message: "type parameter must be a symbol".into(),
-                        span: None,
+                        span: Some(te.span()),
                     })?
                     .to_string(),
             );
@@ -2080,7 +2096,7 @@ fn process_data_def(
         type_name = get_symbol(type_expr, interner)
             .ok_or(TypeError::InvalidTypeAnnotation {
                 message: "data type name must be a symbol".into(),
-                span: None,
+                span: Some(type_expr.span()),
             })?
             .to_string();
     }
@@ -2111,7 +2127,7 @@ fn process_data_def(
                 let ctor_name = get_symbol(ctor_elements[0], interner)
                     .ok_or(TypeError::InvalidTypeAnnotation {
                         message: "constructor name must be a symbol".into(),
-                        span: None,
+                        span: Some(ctor_elements[0].span()),
                     })?
                     .to_string();
 
@@ -2178,7 +2194,7 @@ fn process_define(
             name = get_symbol(name_elements[0], interner)
                 .ok_or(TypeError::InvalidTypeAnnotation {
                     message: "Expected symbol before :".into(),
-                    span: None,
+                    span: Some(name_elements[0].span()),
                 })?
                 .to_string();
 
@@ -2188,14 +2204,14 @@ fn process_define(
         } else {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "Invalid define syntax".into(),
-                span: None,
+                span: Some(elements[1].span()),
             });
         }
     } else {
         name = get_symbol(name_expr, interner)
             .ok_or(TypeError::InvalidTypeAnnotation {
                 message: "define expects a symbol name".into(),
-                span: None,
+                span: Some(elements[1].span()),
             })?
             .to_string();
     }
@@ -2250,7 +2266,7 @@ fn process_effect_def(
             expected: 1,
             got: elements.len() - 1,
             context: "effect".into(),
-            span: None,
+            span: Some(elements[0].span()),
         });
     }
 
@@ -2260,7 +2276,7 @@ fn process_effect_def(
         _ => {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "effect name must be a symbol".into(),
-                span: None,
+                span: Some(elements[1].span()),
             });
         }
     };
@@ -2289,13 +2305,13 @@ fn process_foreign_def(
             expected: 1,
             got: elements.len() - 1,
             context: "foreign".into(),
-            span: None,
+            span: Some(elements[0].span()),
         });
     }
 
     let lib_name = get_symbol(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
         message: "foreign library name must be a symbol".into(),
-        span: None,
+        span: Some(elements[1].span()),
     })?;
 
     let mut functions = Vec::new();
@@ -2304,14 +2320,14 @@ fn process_foreign_def(
         if op_elements.len() != 2 {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "foreign function entry must be (FnName ArrowType)".into(),
-                span: None,
+                span: Some(e.span()),
             });
         }
 
         let fn_name =
             get_symbol(op_elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
                 message: "foreign function name must be a symbol".into(),
-                span: None,
+                span: Some(op_elements[0].span()),
             })?;
 
         let fn_type = parse_type_expr(op_elements[1], env, interner)?;
@@ -2320,7 +2336,7 @@ fn process_foreign_def(
             _ => {
                 return Err(TypeError::InvalidTypeAnnotation {
                     message: "foreign function type must be a function type (-> ...)".into(),
-                    span: None,
+                    span: Some(op_elements[1].span()),
                 });
             }
         };
@@ -2338,7 +2354,7 @@ fn process_foreign_def(
 /// Convert FFI type names in arrow signatures to Marlang types for type checking.
 /// E.g. I32 → Int, F32 → Float, CString → String, Void → Unit, etc.
 /// Returns an error if an unknown struct type is referenced that wasn't defined via ffi-struct.
-fn ffi_type_to_marlang(ty: &Type, env: &TypeEnv) -> Result<Type, TypeError> {
+fn ffi_type_to_marlang(ty: &Type, env: &TypeEnv, span: Span) -> Result<Type, TypeError> {
     match ty {
         Type::Const(name) => match name.as_str() {
             "I8" | "U8" | "I16" | "U16" | "I32" | "U32" | "I64" | "U64" | "Int" => Ok(t_int()),
@@ -2357,7 +2373,7 @@ fn ffi_type_to_marlang(ty: &Type, env: &TypeEnv) -> Result<Type, TypeError> {
                             "struct type '{}' used in foreign-lib but not defined via ffi-struct",
                             name
                         ),
-                        span: None,
+                        span: Some(span),
                     })
                 }
             }
@@ -2370,13 +2386,13 @@ fn ffi_type_to_marlang(ty: &Type, env: &TypeEnv) -> Result<Type, TypeError> {
         } => {
             let mut new_params = Vec::new();
             for p in params {
-                new_params.push(ffi_type_to_marlang(p, env)?);
+                new_params.push(ffi_type_to_marlang(p, env, span)?);
             }
             let new_rest = match rest {
-                Some(r) => Some(Box::new(ffi_type_to_marlang(r, env)?)),
+                Some(r) => Some(Box::new(ffi_type_to_marlang(r, env, span)?)),
                 None => None,
             };
-            let new_result = ffi_type_to_marlang(result, env)?;
+            let new_result = ffi_type_to_marlang(result, env, span)?;
             Ok(Type::Arrow {
                 params: new_params,
                 rest: new_rest,
@@ -2467,13 +2483,13 @@ fn process_ffi_lib_def(
             expected: 2,
             got: elements.len() - 1,
             context: "foreign-lib".into(),
-            span: None,
+            span: Some(elements[0].span()),
         });
     }
 
     let lib_name = get_symbol(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
         message: "foreign-lib library name must be a symbol".into(),
-        span: None,
+        span: Some(elements[1].span()),
     })?;
 
     // elements[2] is the path string (we just check it's a string)
@@ -2482,7 +2498,7 @@ fn process_ffi_lib_def(
         _ => {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "foreign-lib second argument must be a path string".into(),
-                span: None,
+                span: Some(elements[2].span()),
             });
         }
     }
@@ -2495,27 +2511,27 @@ fn process_ffi_lib_def(
         if op_elements.len() != 2 {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "foreign-lib function entry must be (FnName ArrowType)".into(),
-                span: None,
+                span: Some(e.span()),
             });
         }
 
         let fn_name =
             get_symbol(op_elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
                 message: "foreign-lib function name must be a symbol".into(),
-                span: None,
+                span: Some(op_elements[0].span()),
             })?;
 
         // Parse the type in FFI type namespace
         let raw_type = parse_type_expr(op_elements[1], env, interner)?;
         // Convert FFI types to Marlang types (errors on unknown struct types)
-        let marlang_type = ffi_type_to_marlang(&raw_type, &new_env)?;
+        let marlang_type = ffi_type_to_marlang(&raw_type, &new_env, op_elements[1].span())?;
 
         let (params, result) = match &marlang_type {
             Type::Arrow { params, result, .. } => (params.clone(), result.as_ref().clone()),
             _ => {
                 return Err(TypeError::InvalidTypeAnnotation {
                     message: "foreign-lib function type must be a function type (-> ...)".into(),
-                    span: None,
+                    span: Some(op_elements[1].span()),
                 });
             }
         };
@@ -2658,7 +2674,7 @@ fn infer_program_inner(
             if !matches!(c.type_arg, Type::Var(_)) {
                 return Err(TypeError::NoInstance {
                     constraint: c.clone(),
-                    span: None,
+                    span: Some(expr.span()),
                 });
             }
         }
@@ -2680,7 +2696,7 @@ fn parse_import_form(
     if elements.len() < 2 {
         return Err(TypeError::InvalidTypeAnnotation {
             message: "import expects a module path".into(),
-            span: None,
+            span: Some(elements[0].span()),
         });
     }
 
@@ -2689,7 +2705,7 @@ fn parse_import_form(
         _ => {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "import expects a string path".into(),
-                span: None,
+                span: Some(elements[1].span()),
             });
         }
     };
@@ -2718,7 +2734,7 @@ fn parse_import_form(
                 } else {
                     return Err(TypeError::InvalidTypeAnnotation {
                         message: "Selective import expects symbols".into(),
-                        span: None,
+                        span: Some(ne.span()),
                     });
                 }
             }
@@ -2728,7 +2744,7 @@ fn parse_import_form(
 
     Err(TypeError::InvalidTypeAnnotation {
         message: "Invalid import form".into(),
-        span: None,
+        span: Some(elements[0].span()),
     })
 }
 
@@ -2750,7 +2766,7 @@ fn process_import(
         Some(ModuleCacheState::Loading) => {
             return Err(TypeError::InternalError {
                 message: format!("Circular dependency detected: {}", resolved_path.display()),
-                span: None,
+                span: Some(elements[0].span()),
             });
         }
         Some(ModuleCacheState::Loaded(module_env)) => {
