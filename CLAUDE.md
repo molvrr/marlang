@@ -130,6 +130,18 @@ Handled in `interpreter.ts`:
 - `class`, `instance`, `type` - Type system (no-op at runtime)
 - `current-env` - Environment introspection
 
+### Function Type Convention
+Every function takes at least one argument. Zero-argument thunks (`(lambda () body)`) are typed as taking an implicit `Unit` parameter:
+```lisp
+;; Thunk: (lambda () ...) has type (-> Unit ReturnType)
+(define (f : (-> Unit Unit)) (lambda () (perform println "hi")))
+
+;; (-> X) is invalid — arrow types always need at least param + result
+;; (-> {IO} Unit) is also invalid — the effect row is not a parameter
+```
+
+At the type level, `(lambda () body)` infers as `(-> Unit body_type)`. Calling a thunk with zero args `(f)` is accepted when the function expects `Unit`. Effect operations and FFI declarations follow the same rule — zero-arg ops use `(-> Unit ResultType)`.
+
 ### Effect Syntax
 Effect operations use arrow type syntax:
 ```lisp

@@ -472,9 +472,9 @@ fn foreign_basic_declaration() {
         "(define lib 42)
          (foreign lib
            (InitWindow (-> Int Int String Unit))
-           (CloseWindow (-> Unit)))
-         (ffi-call lib \"InitWindow\" 800 600 \"hello\")
-         (ffi-call lib \"CloseWindow\")",
+           (CloseWindow (-> Unit Unit)))
+          (ffi-call lib \"InitWindow\" 800 600 \"hello\")
+          (ffi-call lib \"CloseWindow\")",
     );
     assert_eq!(last_type(&types), "Unit");
 }
@@ -484,10 +484,10 @@ fn foreign_return_type_checking() {
     let types = check_ok(
         "(define lib 42)
          (foreign lib
-           (GetValue (-> Int))
-           (IsReady (-> Bool)))
-         (+ (ffi-call lib \"GetValue\") 1)
-         (if (ffi-call lib \"IsReady\") 1 0)",
+           (GetValue (-> Unit Int))
+           (IsReady (-> Unit Bool)))
+          (+ (ffi-call lib \"GetValue\") 1)
+          (if (ffi-call lib \"IsReady\") 1 0)",
     );
     assert_eq!(format_type(&types[2]), "Int");
     assert_eq!(format_type(&types[3]), "Int");
@@ -541,8 +541,8 @@ fn foreign_return_type_constrains_usage() {
     let err = check_err(
         "(define lib 42)
          (foreign lib
-           (CloseWindow (-> Unit)))
-         (+ (ffi-call lib \"CloseWindow\") 1)",
+           (CloseWindow (-> Unit Unit)))
+          (+ (ffi-call lib \"CloseWindow\") 1)",
     );
     assert!(err.contains("cannot unify"), "got: {err}");
 }
@@ -555,7 +555,7 @@ fn foreign_multiple_libraries() {
          (foreign rl
            (InitWindow (-> Int Int String Unit)))
          (foreign gl
-           (Init (-> Bool)))
+            (Init (-> Unit Bool)))
          (ffi-call rl \"InitWindow\" 800 600 \"test\")
          (ffi-call gl \"Init\")",
     );
@@ -570,7 +570,7 @@ fn foreign_with_ffi_types() {
         "(define lib 42)
          (foreign lib
            (GetStruct (-> String FFIStruct))
-           (GetPointer (-> FFIPointer)))
+            (GetPointer (-> Unit FFIPointer)))
          (ffi-call lib \"GetStruct\" \"test\")
          (ffi-call lib \"GetPointer\")",
     );
@@ -583,8 +583,8 @@ fn ffi_lib_basic() {
     let types = check_ok(
         "(foreign-lib rl \"libraylib.dylib\"
            (InitWindow (-> I32 I32 CString Void))
-           (CloseWindow (-> Void))
-           (IsReady (-> Bool)))
+           (CloseWindow (-> Unit Void))
+            (IsReady (-> Unit Bool)))
          (rl/InitWindow 800 600 \"hello\")
          (rl/CloseWindow)
          (rl/IsReady)",
@@ -622,8 +622,8 @@ fn ffi_lib_ffi_call_still_works() {
 fn ffi_lib_void_return() {
     let types = check_ok(
         "(foreign-lib rl \"libtest.dylib\"
-           (CloseWindow (-> Void)))
-         (rl/CloseWindow)",
+           (CloseWindow (-> Unit Void)))
+          (rl/CloseWindow)",
     );
     assert_eq!(last_type(&types), "Unit");
 }
@@ -632,9 +632,9 @@ fn ffi_lib_void_return() {
 fn ffi_lib_numeric_types() {
     let types = check_ok(
         "(foreign-lib rl \"libtest.dylib\"
-           (GetWidth (-> I32))
-           (GetTime (-> F64))
-           (GetFrameTime (-> F32)))
+           (GetWidth (-> Unit I32))
+            (GetTime (-> Unit F64))
+            (GetFrameTime (-> Unit F32)))
          (+ (rl/GetWidth) 1)
          (+ (rl/GetTime) 1.0)
          (+ (rl/GetFrameTime) 1.0)",
@@ -685,7 +685,7 @@ fn ffi_lib_defined_struct_type_ok() {
         "(define Color (ffi-struct \"Color\" (list (list \"r\" \"u8\") (list \"g\" \"u8\") (list \"b\" \"u8\") (list \"a\" \"u8\"))))
          (foreign-lib rl \"libtest.dylib\"
            (ClearBackground (-> Color Void))
-           (GetColor (-> Color)))",
+            (GetColor (-> Unit Color)))",
     );
 }
 

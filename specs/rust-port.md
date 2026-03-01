@@ -800,6 +800,31 @@ pub fn infer_program(
 
 Pattern matching exhaustiveness follows the same algorithm as TypeScript: for each `match` expression, compute the set of uncovered constructors after all arms and report an error if non-empty. The `Pattern` type maps directly (Section 3.5).
 
+### Effect Row Enforcement
+
+Effect rows are enforced during type checking. Every `Arrow` type carries an `Option<EffectRow>` where:
+
+- `Some(Closed([]))` — pure function (no effects)
+- `Some(Closed(["IO", "Exception"]))` — function that performs exactly those effects
+- `Some(Open { effects: ["IO"], row_var: "ε0" })` — performs IO plus any other effects (row-polymorphic)
+- `None` — treated as pure (same as `Closed([])`) during unification
+
+**Inference:** `infer_lambda` always produces `Some(EffectRow)` — pure bodies get `Closed([])`, effectful bodies get their collected effects. `infer_application` constructs the expected function type with `Some(Open([], fresh_ε))` so the application site's effect expectations unify properly with the callee's actual effects.
+
+**Substitution:** Effect row variables (`ε0`, `ε1`, ...) are stored in the regular `Substitution` as entries mapping to `Type::EffectRowRef(EffectRow)`. `apply_subst` recurses into effect rows in Arrow types, chasing substitution chains and splicing rows together. `instantiate` replaces quantified effect row vars (detected by `ε` prefix) with fresh open rows.
+
+**Unification:** Arrow unification (`unify_internal`) unifies effect rows after unifying params and result. `unify_effect_rows_into_subst` handles all row combinations (closed-closed, open-closed, closed-open, open-open) and produces `Substitution` entries using `Type::EffectRowRef`.
+
+**Parser syntax:** The lexer supports `{` and `}` tokens and `|` as a symbol char. The parser (`parse_with_interner`) converts `{IO Exception | e}` into an `(__effect_row IO Exception __row_var:e)` AST form. `parse_type_expr` in `infer.rs` recognizes this form and produces an `EffectRow`. In arrow types: `(-> String {IO} Unit)`.
+
+**Semantics:**
+- `(-> String String)` with no effect annotation means **pure** (rejects effectful bodies)
+- `(-> String {} String)` — explicit pure (same behavior)
+- `(-> String {IO} Unit)` — must perform exactly IO
+- `(-> String {IO | e} Unit)` — must perform IO, may perform others
+
+Builtins that accept effectful callbacks (`fiber-spawn`, `run-fibers`, `run-fibers-parallel`, `time-it`) are typed with open effect row variables so they accept both pure and effectful functions.
+
 ### Error Types
 
 ```rust

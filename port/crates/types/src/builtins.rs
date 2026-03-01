@@ -494,14 +494,14 @@ pub fn create_builtin_env() -> TypeEnv {
                 name: "fiber-yield".into(),
                 type_params: vec![],
                 constraints: vec![],
-                params: vec![],
+                params: vec![t_unit()],
                 result: t_unit(),
             },
             EffectOp {
                 name: "fiber-self".into(),
                 type_params: vec![],
                 constraints: vec![],
-                params: vec![],
+                params: vec![t_unit()],
                 result: t_pid(),
             },
         ],
@@ -559,7 +559,7 @@ pub fn create_builtin_env() -> TypeEnv {
                 name: "actor-receive".into(),
                 type_params: vec!["a".into()],
                 constraints: vec![],
-                params: vec![],
+                params: vec![t_unit()],
                 result: type_var("a"),
             },
             EffectOp {
@@ -629,7 +629,7 @@ pub fn create_builtin_env() -> TypeEnv {
                 name: "read-line".into(),
                 type_params: vec![],
                 constraints: vec![],
-                params: vec![],
+                params: vec![t_unit()],
                 result: t_string(),
             },
             EffectOp {
@@ -674,7 +674,11 @@ pub fn create_builtin_env() -> TypeEnv {
         "make-symbol",
         monotype(type_arrow(vec![t_string()], t_symbol())),
     );
-    env = extend_env(&env, "gensym", monotype(type_arrow(vec![], t_symbol())));
+    env = extend_env(
+        &env,
+        "gensym",
+        monotype(type_arrow(vec![t_unit()], t_symbol())),
+    );
     env = extend_env(
         &env,
         "symbol->string",

@@ -25,7 +25,7 @@
 (effect IO
   (print (=> (Show a) (-> a Unit)))
   (println (=> (Show a) (-> a Unit)))
-  (read-line (-> String))
+  (read-line (-> Unit String))
   (read-file (-> String (Result String String)))
   (write-file (-> String String (Result String Unit))))
 
@@ -91,9 +91,9 @@
 ; === Async IO Effects (for use inside run-fibers) ===
 
 (effect AsyncIO
-  (io-stdout    (-> Channel))
-  (io-stderr    (-> Channel))
-  (io-stdin     (-> Channel))
+  (io-stdout    (-> Unit Channel))
+  (io-stderr    (-> Unit Channel))
+  (io-stdin     (-> Unit Channel))
   (io-read-file  (-> String String))
   (io-write-file (-> String String Unit))
   (io-open-file  (-> String String Channel)))

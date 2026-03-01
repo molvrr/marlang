@@ -1,8 +1,8 @@
 # Known Issues — Rust Port
 
-**Last updated:** 2026-02-28
+**Last updated:** 2026-03-01
 
-Comprehensive catalog of known bugs, limitations, workarounds, and architectural debt in the Rust port (`port/`). Issues are ordered by severity. The three priority issues (#2, #3, #4) include detailed root cause analysis and fix plans.
+Comprehensive catalog of known bugs, limitations, workarounds, and architectural debt in the Rust port (`port/`). Issues are ordered by severity. Issues #3 and #4 are fixed. Issue #2 includes detailed root cause analysis and fix plan.
 
 ---
 
@@ -11,7 +11,7 @@ Comprehensive catalog of known bugs, limitations, workarounds, and architectural
 1. [Runtime Performance Regression](#1-runtime-performance-regression)
 2. [Module Globals Workaround — Flat Namespace Collisions](#2-module-globals-workaround--flat-namespace-collisions) **[PRIORITY]**
 3. [~~Type Checker Rejects `net.mar`~~](#3-type-checker-rejects-netmar) **[FIXED]**
-4. [`handle`/`throw` Unreliable Across Scheduler Effects](#4-handlethrow-unreliable-across-scheduler-effects) **[PRIORITY]**
+4. [~~`handle`/`throw` Unreliable Across Scheduler Effects~~](#4-handlethrow-unreliable-across-scheduler-effects) **[FIXED]**
 5. [Recursive `define` + TCP Effects Hangs](#5-recursive-define--tcp-effects-hangs)
 6. [Cross-Scheduler TCP Not Supported](#6-cross-scheduler-tcp-not-supported)
 7. [`match` Branches Require Single Expressions](#7-match-branches-require-single-expressions)
@@ -232,116 +232,16 @@ Both `net.mar` and `tcp.mar` now type check successfully and run correctly with 
 
 ---
 
-### 4. `handle`/`throw` Unreliable Across Scheduler Effects
+### 4. ~~`handle`/`throw` Unreliable Across Scheduler Effects~~ [FIXED]
 
-**Severity:** Critical
-**Status:** Open — architectural mismatch between handler semantics and scheduler suspension
-**Locations:**
-- `vm.rs:310-316` — `run_with_handler` (Rust stack recursion for deep handlers)
-- `vm.rs:246-251` — `resume_continuation` (restores VM state but not Rust call stack)
-- `vm.rs:370-375` — `run_restored_continuation` (attempts to dispatch to restored handlers)
-- `vm.rs:1560-1576` — `PERFORM` opcode (captures continuations)
-- `scheduler.rs:264-297` / `runtime.rs:302-332` — `HANDLED_EFFECTS` (27 effects in dummy handler)
-- `scheduler.rs:312` / `runtime.rs:334` — `install_handler_frame` (dummy handler installation)
-- `object.rs:149-174` — `VMHandlerFrame`, `VMContinuation` structs
+**Severity:** ~~Critical~~ Resolved
+**Status:** **FIXED** — CPS handler dispatch (see `specs/cps-handler-dispatch.md`)
 
-The 27 handled effects break down as: fiber (3), channel (4), actor (7), IO (5), TCP (7), exception (1).
+The old architecture used Rust-stack-recursive `run_with_handler` for deep handler semantics. When a scheduler-suspending effect fired inside a handler clause, the Rust stack was unwound but VM state survived, causing the handler context to be lost on resume.
 
-#### Root Cause: Rust Stack vs VM State
+**Resolution:** Handler dispatch is now entirely in VM state via `HandlerDispatch` markers — no Rust stack involvement. `Op::PushHandler` installs the handler frame + dispatch marker and calls the body thunk inline. `Op::Perform` for user handlers captures the continuation, unwinds, re-installs the handler (deep semantics), and calls the clause inline. `Op::Return` detects dispatch markers and applies return handlers. `Op::Resume` was simplified to inline continuation restore.
 
-User `handle` blocks are implemented by `run_with_handler`, which uses **Rust stack recursion** for deep handler semantics. When an effect is caught, it calls `run_with_handler` again recursively — the Rust call stack holds the state: "we are inside a handler clause, and when it completes, we should re-wrap with `run_with_handler` and possibly apply a return handler."
-
-Scheduler-suspending effects (TCP, channels, IO in multi-threaded mode) **unwind the entire Rust call stack** back to `scheduler_loop`. The VM state (frames, stack, handler frames) is captured in `VMContinuation`, but the Rust-level `run_with_handler` context is **not** captured.
-
-When the fiber is later resumed, it resumes from a flat `resume_continuation` call with no `run_with_handler` wrapping.
-
-#### Handler Stack Layout
-
-When a fiber executes inside a user `handle` block, the handler stack looks like:
-
-```
-Index 0: [Scheduler dummy handler] — handles: fiber-spawn, tcp-connect, ..., throw, ...
-Index 1: [User handle block]       — handles: throw (for example)
-```
-
-The scheduler's dummy handler is **below** the user's handler.
-
-#### The Failure Sequence
-
-1. User code does `(perform tcp-connect ...)` inside a `(handle ...)` block
-2. `PERFORM` walks the handler stack top-to-bottom looking for `"tcp-connect"`
-3. User handler (index 1): only handles `throw` — no match
-4. Scheduler dummy (index 0): handles `tcp-connect` — **match**
-5. Continuation is captured with user handler as a nested handler in `cont.handler_stack`
-6. Signal propagates to `scheduler_loop`, fiber is parked
-
-7. TCP completes, fiber is re-enqueued as `Fiber::Suspended`
-8. Scheduler installs a **fresh** dummy handler, calls `resume_continuation`
-9. `resume_continuation` restores the user handler from the continuation
-10. Code continues executing...
-
-**So far this works.** The bug manifests when:
-
-**Failure Mode A — Handler clause performs a scheduler-suspending effect:**
-
-```lisp
-(handle
-  (begin
-    (perform tcp-connect "127.0.0.1" 8080)
-    (perform throw "oops"))
-  ((throw msg k) ->
-    (perform println (string-append "caught: " msg))  ;; scheduler effect!
-    "done"))
-```
-
-When `throw` is caught by `run_restored_continuation`, it dispatches to `run_with_handler`. The handler clause body does `(perform println ...)`, which matches the scheduler dummy handler. The signal propagates through `run_with_handler` → `run_restored_continuation` → `resume_continuation` → back to `scheduler_loop`.
-
-All the Rust stack frames between `scheduler_loop` and the `PERFORM` are unwound. When the fiber resumes after `println` completes, `resume_continuation` runs the continuation from scratch — there is no `run_with_handler` wrapping it. **Deep handler semantics are lost, return handlers are not applied, and the handler clause's return value goes to the scheduler instead of back to the `handle` expression.**
-
-**Failure Mode B — Handler frame ID mismatch across resumes:**
-
-When `run_restored_continuation` catches a user effect and dispatches to `run_with_handler`, the new `run_with_handler` invocation creates a handler frame with a **new** `handler_id`. If the handler clause body suspends, the continuation's `target_handler_id` refers to this new ID. On next resume, `run_restored_continuation` checks against the *originally restored* handler IDs — the new ID goes unmatched and propagates as unhandled.
-
-#### Fix Approaches
-
-**Approach A: Reify handler dispatch in VM state** (recommended)
-
-Instead of using Rust-level recursion in `run_with_handler`, encode the handler dispatch state as VM-level data that gets captured in continuations:
-
-1. Add fields to `VMHandlerFrame`: handler entries for deep re-installation, return handler closure, "inside handler clause" flag
-2. When `PERFORM` captures a continuation including this context, the handler dispatch logic is preserved
-3. When `resume_continuation` restores the continuation, this context is restored too
-4. `run_restored_continuation` uses the richer context to replay deep handler semantics
-
-Estimated effort: 3-5 days. Fixes the general case.
-
-**Approach B: CPS-transform handler dispatch** (most principled, hardest)
-
-Replace Rust recursion with synthetic VM call frames for handler dispatch. Handler clause invocation becomes a real closure call with a "re-wrap" continuation. All state lives in VM frames, fully captured in continuations.
-
-Estimated effort: 5-7 days.
-
-**Approach C: Remove `throw` from scheduler dummy handler** (pragmatic partial fix)
-
-Split `HANDLED_EFFECTS` into "scheduler-only" (fiber-spawn, tcp-*, chan-*, etc.) and "user-catchable" (throw). For unhandled `throw`, use `try_default_handler` to crash the fiber. User `handle` blocks for `throw` would then always be found first, avoiding the Rust-stack-unwinding problem entirely.
-
-Doesn't fix the general case (user effects + scheduler effects interleaving), but fixes the most common scenario (`throw` inside `handle`).
-
-Estimated effort: ~1 day.
-
-**Recommended path:** Approach C first for a quick win, then Approach A for the general fix.
-
-**Workaround:** Use `try-` wrappers from `net.mar` and match on `Result` directly instead of wrapping `handle`/`throw` around TCP operations:
-
-```lisp
-;; Instead of:
-(handle (perform tcp-connect host port) ((throw msg k) -> ...))
-
-;; Use:
-(match (perform try-connect host port)
-  ((Ok socket) ...)
-  ((Err msg) ...))
-```
+Additionally, `throw` was removed from the scheduler's `HANDLED_EFFECTS` — unhandled `throw` now gives "Uncaught exception: ..." instead of going through the scheduler. The deleted functions `run_with_handler` and `run_restored_continuation` are no longer needed.
 
 ---
 
@@ -475,21 +375,10 @@ Should use a proper enum variant instead of a magic number.
 
 ---
 
-### 12. `PopHandler` Opcode Is a No-Op
+### 12. ~~`PopHandler` Opcode Is a No-Op~~ [FIXED]
 
-**Severity:** Low (tech debt)
-**Status:** Open
-**Location:** `vm.rs:1556-1558`
-
-The `PopHandler` opcode handler body is empty:
-
-```rust
-Op::PopHandler => {
-    // Currently unused — handler cleanup managed by run_with_handler
-}
-```
-
-The opcode exists in bytecode (emitted by the compiler) but does nothing at runtime. Handler cleanup is managed entirely by the Rust-level `run_with_handler` function. This is related to Issue #4 — if handler dispatch were reified in the VM, `PopHandler` would become meaningful.
+**Severity:** ~~Low~~ Resolved
+**Status:** **FIXED** — `PopHandler` now pops handler frames and dispatch markers as part of CPS handler dispatch (Issue #4 fix).
 
 ---
 

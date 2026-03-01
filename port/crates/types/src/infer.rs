@@ -221,12 +221,11 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                         span: None,
                     });
                 }
-                if types.len() == 1 && rest_type.is_none() {
-                    return Ok(type_arrow_with_effects(
-                        vec![],
-                        effect_row,
-                        types.pop().unwrap(),
-                    ));
+                if types.len() < 2 && rest_type.is_none() {
+                    return Err(TypeError::InvalidTypeAnnotation {
+                        message: "Arrow type needs at least a parameter type and a result type, e.g. (-> Unit Unit)".into(),
+                        span: None,
+                    });
                 }
                 let result = types.pop().unwrap();
                 if let Some(rest_ty) = rest_type {
@@ -694,13 +693,17 @@ fn infer_lambda(
         }
     }
 
-    let param_types: Vec<Type> = params
+    let mut param_types: Vec<Type> = params
         .iter()
         .map(|(_, t)| apply_subst(&body_subst, t))
         .collect();
     let rest_type = rest_param.map(|(_, t)| apply_subst(&body_subst, &t));
     let result_type = apply_subst(&body_subst, &body_type);
     let fn_effects = Some(body_effects);
+    // Zero-param lambdas get an implicit Unit param: (lambda () body) => (-> Unit body_type)
+    if param_types.is_empty() && rest_type.is_none() {
+        param_types.push(t_unit());
+    }
     let fn_type = if let Some(rest_ty) = rest_type {
         type_arrow_variadic_with_effects(param_types, rest_ty, fn_effects, result_type)
     } else {
@@ -1372,7 +1375,10 @@ fn infer_ffi_application(
         let decl_result = decl.result.clone();
         let call_args = &arg_exprs[2..]; // skip lib and fn-name
 
-        if call_args.len() != decl_params.len() {
+        // Allow zero-arg calls to thunk-typed FFI fns: params=[Unit] with no call args
+        let is_implicit_unit_thunk =
+            call_args.is_empty() && decl_params.len() == 1 && decl_params[0] == t_unit();
+        if call_args.len() != decl_params.len() && !is_implicit_unit_thunk {
             return Err(TypeError::ArityMismatch {
                 expected: decl_params.len(),
                 got: call_args.len(),
@@ -1596,8 +1602,18 @@ fn infer_application(
 
     let result_type = fresh_type_var();
     let fresh_eff_var = fresh_effect_row_var();
+    // Zero-arg calls get an implicit Unit param to match thunk types (-> Unit X),
+    // Zero-arg calls get an implicit Unit param to match thunk types (-> Unit X),
+    // but not for variadic functions (which can legitimately take zero args).
+    let fn_type_resolved = apply_subst(&subst, &fn_result.ty);
+    let is_variadic = matches!(&fn_type_resolved, Type::Arrow { rest: Some(_), .. });
+    let expected_params: Vec<Type> = if arg_types.is_empty() && !is_variadic {
+        vec![t_unit()]
+    } else {
+        arg_types.iter().map(|t| apply_subst(&subst, t)).collect()
+    };
     let expected_fn_type = type_arrow_with_effects(
-        arg_types.iter().map(|t| apply_subst(&subst, t)).collect(),
+        expected_params,
         Some(effect_row_open(vec![], fresh_eff_var)),
         result_type.clone(),
     );
@@ -1760,7 +1776,10 @@ fn infer_perform(
         arg_types.push(arg_result.ty);
     }
 
-    if arg_types.len() != op.params.len() {
+    // Allow zero-arg perform on thunk-typed ops: (perform op) when op has params=[Unit]
+    let is_implicit_unit_thunk =
+        arg_types.is_empty() && op.params.len() == 1 && op.params[0] == t_unit();
+    if arg_types.len() != op.params.len() && !is_implicit_unit_thunk {
         return Err(TypeError::ArityMismatch {
             expected: op.params.len(),
             got: arg_types.len(),
