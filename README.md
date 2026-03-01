@@ -1,28 +1,33 @@
 # Marlang
 
-A Lisp-like language written in TypeScript, running on Bun. Features include a bytecode VM, a Haskell-style static type system, algebraic data types, pattern matching, algebraic effects with delimited continuations, closures, tail call optimization, and a Foreign Function Interface (FFI) for calling native C libraries.
+A Lisp-like language written in Rust. Features include a bytecode VM with NaN-boxed values, a Haskell-style static type system, algebraic data types, pattern matching, algebraic effects with delimited continuations, closures, tail call optimization, green threads with channels, an actor model with supervision, and a Foreign Function Interface (FFI) via libffi.
 
 ## Features
 
-- **Bytecode VM**: Stack-based bytecode compiler and virtual machine (2-70x faster than tree-walker)
-- **Type System**: Static type checking with local inference, parametric polymorphism, and typeclasses
+- **Bytecode VM**: Stack-based bytecode compiler and virtual machine with NaN-boxed values
+- **Type System**: Static type checking with local inference, parametric polymorphism, row-polymorphic effects, and typeclasses
 - **Algebraic Data Types**: Define sum types with constructors
-- **Pattern Matching**: Destructure values with `match` expressions
+- **Pattern Matching**: Destructure values with `match` expressions, exhaustiveness checking
 - **Algebraic Effects**: Delimited continuations with `effect`, `perform`, and `handle`
+- **Concurrency**: Green threads (fibers), CSP-style channels, actor model with mailboxes and supervision
 - **Module System**: Import code with `std:` prefix for stdlib or relative paths
 - **Standard Library**: Auto-loaded prelude with Option, List, Pair, Result types; stdlib utilities out of the box
 - **Tail Call Optimization**: Efficient recursion without stack overflow
-- **LSP Server**: Language Server Protocol support for IDE integration
+- **Macros**: Hygienic macro system with `defmacro`, `gensym`, and quasiquoting
 - First-class functions with lexical closures
-- First-class environments for introspection
-- FFI for calling native libraries (via Bun's FFI)
+- FFI for calling native libraries (via libffi)
 - FFI struct support for C struct interop
+- Async IO (TCP networking)
 - Interactive REPL
 
-## Installation
+## Building
 
 ```bash
-bun install
+# Build the CLI (creates 'mar' binary)
+cargo build --release -p marlang-cli
+
+# Or run directly via cargo
+cargo run -p marlang-cli -- --help
 ```
 
 ## Running
@@ -30,56 +35,38 @@ bun install
 Run a Marlang file:
 
 ```bash
-bun index.ts run <filename.mar>
-```
-
-Run with the bytecode VM (faster execution):
-
-```bash
-bun index.ts run <filename.mar> --vm
+cargo run -p marlang-cli -- run <filename.mar>
 ```
 
 Run without type checking:
 
 ```bash
-bun index.ts run <filename.mar> --no-typecheck
+cargo run -p marlang-cli -- run <filename.mar> --no-typecheck
 ```
 
 Disassemble a file to view bytecode:
 
 ```bash
-bun index.ts disasm <filename.mar>
+cargo run -p marlang-cli -- disasm <filename.mar>
 ```
 
 Type check without running:
 
 ```bash
-bun index.ts typecheck <filename.mar>
-bun index.ts typecheck <filename.mar> --verbose  # Show inferred types
+cargo run -p marlang-cli -- typecheck <filename.mar>
+cargo run -p marlang-cli -- typecheck <filename.mar> --verbose  # Show inferred types
 ```
 
 Start the interactive REPL:
 
 ```bash
-bun index.ts repl
-```
-
-Start the LSP server:
-
-```bash
-bun index.ts lsp
+cargo run -p marlang-cli -- repl
 ```
 
 Run the test suite:
 
 ```bash
-bun test
-```
-
-Run benchmarks (tree-walker vs VM):
-
-```bash
-bun bench/run.ts
+cargo test --workspace
 ```
 
 ## Language Reference
@@ -124,12 +111,6 @@ bun bench/run.ts
 (lambda (x) (* x x))
 ```
 
-**Environments** - captured with `current-env`:
-
-```lisp
-(current-env)   ; => #<environment [+, -, *, /, ...] +parent>
-```
-
 ## Type System
 
 Marlang features a Haskell-style static type system with local type inference.
@@ -163,6 +144,21 @@ Function types use the `->` syntax:
 (-> Int Int)           ; Int -> Int
 (-> Int Int Int)       ; Int -> Int -> Int
 (-> a a)               ; Polymorphic: a -> a
+```
+
+### Effect Row Annotations
+
+Arrow types support row-polymorphic effect annotations using `{...}` syntax:
+
+```lisp
+;; Pure function (no effects)
+(define (f : (-> String {} String)) (lambda (s) s))
+
+;; Function with IO effect
+(define (g : (-> String {IO} Unit)) (lambda (s) (perform println s)))
+
+;; Open effect row (row-polymorphic): IO + any other effects
+(define (h : (-> String {IO | e} Unit)) (lambda (s) (perform println s)))
 ```
 
 ### Type Inference
@@ -380,7 +376,7 @@ Marlang implements proper tail call optimization, allowing efficient recursive a
     acc
     (fact-tail (- n 1) (* n acc)))))
 
-(fact-tail 50000 1)  ; Works! (returns Infinity due to number overflow)
+(fact-tail 50000 1)  ; Works!
 
 ; Mutual recursion also optimized
 (define is-even (lambda (n)
@@ -391,9 +387,68 @@ Marlang implements proper tail call optimization, allowing efficient recursive a
 (is-even 50000)  ; => #t (no stack overflow)
 ```
 
+## Algebraic Effects
+
+Marlang supports algebraic effects with delimited continuations:
+
+```lisp
+; Declare an effect
+(effect State
+  (get (-> Unit Int))
+  (put (-> Int Unit)))
+
+; Use effects
+(define counter (lambda ()
+  (let ((n (perform get)))
+    (perform put (+ n 1))
+    (perform get))))
+
+; Handle effects
+(handle (counter)
+  ((get _ k) -> (resume k 0))
+  ((put n k) -> (resume k nil)))
+```
+
+### Exception Effect
+
+```lisp
+(effect Exception
+  (throw (-> String a)))
+
+; Catch exceptions
+(handle (perform throw "something went wrong")
+  ((throw msg k) -> (perform println (string-append "caught: " msg))))
+```
+
+## Concurrency
+
+Marlang provides green threads (fibers), CSP-style channels, and an Erlang-inspired actor model:
+
+```lisp
+; Spawn fibers
+(run-fibers (lambda ()
+  (perform fiber-spawn (lambda ()
+    (perform println "child")))
+  (perform println "parent")))
+
+; Channels
+(run-fibers (lambda ()
+  (let ((ch (perform chan-new 0)))
+    (perform fiber-spawn (lambda ()
+      (perform chan-send ch 42)))
+    (perform println (show (perform chan-recv ch))))))
+
+; Actors with mailboxes
+(run-fibers (lambda ()
+  (let ((me (perform fiber-self)))
+    (perform fiber-spawn (lambda ()
+      (perform actor-send me "hello")))
+    (perform println (perform actor-receive)))))
+```
+
 ## FFI (Foreign Function Interface)
 
-Marlang can call functions from native C libraries using Bun's FFI.
+Marlang can call functions from native C libraries using libffi.
 
 ### Functions
 
@@ -419,14 +474,6 @@ Marlang can call functions from native C libraries using Bun's FFI.
 | `cstring`| C string (null-terminated)|
 | `bool`   | Boolean                  |
 | `void`   | Void (for return types)  |
-
-### Library Paths
-
-`ffi-open` accepts library names in several formats:
-
-- **Short name**: `"m"` → automatically becomes `libm.dylib` (macOS) or `libm.so` (Linux)
-- **Absolute path**: `"/usr/local/lib/libcustom.dylib"` → used as-is
-- **Relative path with extension**: `"./mylib.so"` → used as-is
 
 ### Example: Using libm
 
@@ -541,22 +588,8 @@ Use the `std:` prefix to import from the standard library:
 (safe-div 10 2)   ; => (Ok 5)
 (safe-div 10 0)   ; => (Err "division by zero")
 
-; Convert Result to Option
-(res/ok (safe-div 10 2))  ; => (Some 5)
-(res/ok (safe-div 10 0))  ; => None
-
 ; IO operations (built-in handlers work automatically)
-(import "std:io" as io)
-
-(io/println "Hello, world!")
-(io/print "Enter name: ")
-(let ((name (io/read-line)))
-  (io/println name))
-
-; Custom handlers can override defaults if needed
-(handle
-  (io/println "This will be intercepted")
-  ((println msg k) -> (begin (io/print "LOG: ") (io/println msg) (resume k nil))))
+(perform println "Hello, world!")
 ```
 
 ### Prelude (Auto-Loaded)
@@ -564,9 +597,9 @@ Use the `std:` prefix to import from the standard library:
 Every Marlang program automatically has access to the prelude (`stdlib/prelude.mar`), which defines:
 - **Data types**: `Option` (None, Some), `List` (Nil, Cons), `Pair` (MkPair), `Result` (Ok, Err)
 - **Macros**: `when`
-- **Functions**: `not`, `cons`, `car`, `cdr`, `append`
+- **Functions**: `not`, `cons`, `car`, `cdr`, `append`, `string->number`
 
-No import is needed for these — they are available everywhere.
+No import is needed for these -- they are available everywhere.
 
 ### Available stdlib modules
 
@@ -575,178 +608,50 @@ No import is needed for these — they are available everywhere.
 | `std:option` | Utilities for the `Option` type: `map`, `flat-map`, `unwrap-or`, `unwrap-or-else`, `is-some`, `is-none`, `filter`, `and-then`, `or-else` |
 | `std:result` | Utilities for the `Result` type: `map`, `map-err`, `flat-map`, `unwrap-or`, `unwrap-or-else`, `is-ok`, `is-err`, `ok`, `err`, `and-then`, `or-else` |
 | `std:list` | List utilities: `foldl`, `foldr`, `length`, `reverse`, `concat`, `map`, `filter`, `any`, `all`, `find`, `take`, `drop`, `zip`, `zip-with` |
-| `std:io` | IO effect with **built-in handlers**: `print`, `println`, `read-line`, `read-file`, `write-file`. Handlers work automatically without explicit `handle` blocks. Custom handlers can override defaults. |
-
-## Environment Introspection
-
-Marlang provides first-class access to lexical environments for metaprogramming and debugging.
-
-### Functions
-
-- **`current-env`** - returns the current lexical environment as a value
-- **`env-bindings`** - returns a list of `(name value)` pairs for immediate scope
-- **`env-get`** - looks up a binding by name string (returns `nil` if not found)
-- **`env-parent`** - returns the parent environment or `nil`
-
-### Examples
-
-```lisp
-; Capture current environment
-(define x 10)
-(define my-env (current-env))
-(env-get my-env "x")           ; => 10
-
-; Inspect bindings in a let scope
-(let ((a 1) (b 2))
-  (env-bindings (current-env))) ; => (("a" 1) ("b" 2))
-
-; Navigate the scope chain
-(let ((outer 100))
-  (let ((inner 200))
-    (env-get (env-parent (current-env)) "outer"))) ; => 100
-```
-
-## LSP Server
-
-Marlang includes a Language Server Protocol (LSP) server for IDE integration.
-
-### Features
-
-- **Diagnostics**: Type errors are reported with source locations
-- **Hover**: Shows type information for symbols on hover
-- **Go to Definition**: Navigate to symbol definitions
-- **Completion**: Suggests keywords, built-in functions, and user-defined symbols
-
-### Usage
-
-Start the LSP server:
-
-```bash
-bun index.ts lsp
-```
-
-The server communicates over stdin/stdout using the standard LSP JSON-RPC protocol.
-
-### Editor Integration
-
-To use the LSP with your editor, configure it to run `bun index.ts lsp` as the language server for `.mar` files. For example:
-
-**VS Code**: Create an extension or use a generic LSP client extension, configuring it to run the Marlang LSP for `.mar` files.
-
-**Neovim** (with nvim-lspconfig):
-
-```lua
-local lspconfig = require('lspconfig')
-local configs = require('lspconfig.configs')
-
-configs.marlang = {
-  default_config = {
-    cmd = { 'bun', 'index.ts', 'lsp' },
-    filetypes = { 'marlang' },
-    root_dir = lspconfig.util.find_git_ancestor,
-  },
-}
-
-lspconfig.marlang.setup({})
-```
+| `std:io` | IO effect with **built-in handlers**: `print`, `println`, `read-line`, `read-file`, `write-file`. Handlers work automatically without explicit `handle` blocks. |
+| `std:string` | String utilities: `length`, `concat`, `reverse`, `to-upper`, `to-lower`, `trim`, `split`, `join`, `replace`, `substring`, `char-at` |
+| `std:math` | Math utilities: `pi`, `e`, `min-of`, `max-of`, `clamp`, `square`, `cube`, `div`, `even`, `odd`, `gcd`, `lcm`, `factorial` |
+| `std:concurrent` | Concurrency wrappers: `spawn`, `yield`, `self`, `chan-new`, `chan-send`, `chan-recv`, `chan-close`, `run` |
+| `std:actor` | Actor model: `send`, `receive`, `receive-match`, `monitor`, `link`, `unlink`, `trap-exit` |
 
 ## Architecture
 
-Marlang has two execution backends:
-
-1. **Lexer** (`lexer.ts`) - tokenizes source code into tokens
-2. **Parser** (`parser.ts`) - builds an AST of S-expressions
-3. **Type Checker** (`type-checker.ts`) - validates types statically
-4. **Tree-walker** (`interpreter.ts`) - evaluates the AST directly (default)
-5. **Bytecode VM** (`src/vm/`) - compiles to bytecode and runs on a stack-based VM (`--vm` flag)
-
-### Rust Port (`port/`)
-
-A native Rust port lives under `port/`, providing a standalone binary with ~2.5x better performance. Phases 1-8 complete (lexer, parser, type system, bytecode compiler, VM, modules, FFI, CLI, schedulers, async IO, macros, prelude):
-
-- **`marlang-core`** — Lexer, parser, string interning, spans
-- **`marlang-types`** — HM type inference, typeclasses, exhaustiveness checking, FFI struct type validation
-- **`marlang-vm`** — Bytecode compiler, NaN-boxed values, VM execution, modules, FFI (libffi), schedulers, async IO
-- **`marlang-cli`** — Clap-based CLI with `run`, `repl`, `typecheck`, `disasm` subcommands
-
-```bash
-cargo test --workspace    # Run all Rust tests (from port/ directory)
-cargo run -p marlang-cli -- run file.mar   # Run a file
-cargo run -p marlang-cli -- repl           # Interactive REPL
-```
-
-### Bytecode VM (`src/vm/`)
-
-- **`bytecode.ts`** - Bytecode IR: opcodes, instructions, chunks, VM value types
-- **`compiler.ts`** - Compiles AST to bytecode with flat closures and upvalue capture
-- **`vm.ts`** - Stack-based virtual machine with algebraic effect support
-- **`builtins.ts`** - Built-in globals for the VM (arithmetic, comparison, string ops)
-- **`debug.ts`** - Bytecode disassembler
-
-### Type System Architecture
-
-- **`type-ast.ts`** - Type representation (Type, TypeScheme, Constraint, Pattern)
-- **`type-env.ts`** - Type environment and substitution operations
-- **`type-unify.ts`** - Unification algorithm
-- **`type-infer.ts`** - Constraint generation and inference
-- **`type-builtins.ts`** - Built-in types and typeclass definitions
-- **`type-errors.ts`** - Error types and formatting
-
-### Project Structure
-
 ```
 marlang/
-├── index.ts              # CLI entry point
-├── src/
-│   ├── core/             # Core pipeline
-│   │   ├── lexer.ts      # Tokenizer with position tracking
-│   │   ├── parser.ts     # S-expression parser
-│   │   ├── types.ts      # AST and runtime value types
-│   │   ├── interpreter.ts # Tree-walking interpreter with TCO
-│   │   └── io-handlers.ts # Native IO effect handlers
-│   ├── vm/               # Bytecode VM
-│   │   ├── bytecode.ts   # Opcodes, instructions, VM value types
-│   │   ├── compiler.ts   # AST → bytecode compiler
-│   │   ├── vm.ts         # Stack-based VM with effect system
-│   │   ├── builtins.ts   # VM built-in globals
-│   │   ├── debug.ts      # Bytecode disassembler
-│   │   └── index.ts      # Public API exports
-│   ├── types/            # Type system modules
-│   └── modules/          # Module system
-├── stdlib/               # Standard library
-│   ├── prelude.mar       # Auto-loaded prelude (data types, macros, core functions)
-│   ├── option.mar        # Option type utilities
-│   ├── list.mar          # List type utilities
-│   ├── result.mar        # Result type and utilities
-│   └── io.mar            # IO effect and operations
-├── lsp/                  # Language Server Protocol
-│   ├── server.ts         # LSP server entry point
-│   ├── protocol.ts       # JSON-RPC message handling
-│   ├── document.ts       # Open document management
-│   ├── analyzer.ts       # Analysis pipeline
-│   └── handlers/         # LSP request handlers
-├── port/                 # Rust port (Cargo workspace)
+├── port/                 # Rust implementation (Cargo workspace)
 │   └── crates/
-│       ├── core/         # marlang-core: lexer, parser
-│       ├── types/        # marlang-types: type inference, FFI struct validation
-│       ├── vm/           # marlang-vm: compiler, VM, modules, FFI, schedulers
-│       └── cli/          # marlang-cli: standalone binary
-├── bench/                # Benchmarks (tree-walker vs VM)
-│   ├── run.ts            # Benchmark runner
-│   ├── fib.mar           # Recursive fibonacci
-│   ├── fib-tail.mar      # Tail-recursive fibonacci
-│   ├── sum-loop.mar      # Sum 1 to N
-│   ├── pattern.mar       # ADT pattern matching
-│   └── effects.mar       # Effect perform/resume cycles
-├── spec/                 # Test suite
-│   ├── vm.test.ts        # Bytecode VM tests
-│   ├── interpreter.test.ts
-│   ├── effects.test.ts
-│   ├── type-system.test.ts
+│       ├── core/         # marlang-core: lexer, parser, string interning, spans
+│       ├── types/        # marlang-types: HM type inference, typeclasses, exhaustiveness
+│       ├── vm/           # marlang-vm: compiler, NaN-boxed VM, modules, FFI, schedulers, macros, TCP
+│       └── cli/          # marlang-cli: clap-based CLI (run, repl, typecheck, disasm)
+├── stdlib/               # Standard library (.mar files)
+│   ├── prelude.mar       # Auto-loaded: data types, macros, core functions
+│   ├── option.mar        # Option type utilities
+│   ├── result.mar        # Result type and utilities
+│   ├── list.mar          # List utilities
+│   ├── io.mar            # IO effect and operations
+│   ├── string.mar        # String utilities
+│   ├── math.mar          # Math utilities
+│   ├── concurrent.mar    # Concurrency wrappers
+│   └── actor.mar         # Actor model
+├── examples/             # Example programs
+├── bench/                # Benchmark .mar programs
+├── web/                  # Web playground (needs WASM port — see web/TODO.md)
+├── ts-archive/           # Archived TypeScript implementation (historical reference)
+│   ├── src/              # Original TS source (core, vm, types, modules)
+│   ├── spec/             # Original TS test suite
+│   ├── lsp/              # Original TS LSP server
 │   └── ...
-└── examples/
-    ├── types.mar         # Type system demo
-    ├── effects.mar       # Algebraic effects demo
-    ├── factorial.mar     # Factorial example
-    └── raylib.mar        # Raylib graphics bindings
+└── specs/                # Language specification notes
 ```
+
+### Crate Structure
+
+- **`marlang-core`** -- Lexer, parser, string interning (`intern.rs`), spans. Tokenizes source into tokens, parses into S-expression AST.
+- **`marlang-types`** -- Hindley-Milner type inference with typeclasses, row-polymorphic effect types, exhaustiveness checking for `match`, FFI struct type validation.
+- **`marlang-vm`** -- Bytecode compiler, NaN-boxed value representation, stack-based VM with algebraic effect system (handler frames, continuations), module loader, FFI via libffi, single-threaded and multi-threaded fiber schedulers, async IO, hygienic macro expansion, TCP networking.
+- **`marlang-cli`** -- Clap-based CLI with `run`, `repl`, `typecheck`, `disasm` subcommands.
+
+## Archived TypeScript Implementation
+
+The original TypeScript implementation (which ran on Bun) is preserved in `ts-archive/` for historical reference. It includes the tree-walking interpreter, bytecode VM, type system, LSP server, and test suite. The Rust port is the active implementation.

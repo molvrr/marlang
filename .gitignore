@@ -1,10 +1,13 @@
-# dependencies (bun install)
+# dependencies
 node_modules
 
 # output
 out
 dist
 *.tgz
+
+# Rust
+port/target/
 
 # code coverage
 coverage

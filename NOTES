@@ -1,5 +1,5 @@
+- [ ] Deprecate typescript version
 - [ ] Do we actually need typeclasses?
 - [ ] Cleanup code
-- [ ] Deprecate typescript version
 - [ ] JIT
 - [ ] Rewrite CLAUDE.md with only needed info
