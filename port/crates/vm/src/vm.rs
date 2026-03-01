@@ -8,7 +8,7 @@ use crate::errors::{StackTraceEntry, VMError};
 use crate::object::{
     CallFrame, Closure, HandlerDispatch, HandlerEntry, VMContinuation, VMHandlerFrame, VMObject,
 };
-use crate::value::{format_value_unquoted, Value};
+use crate::value::{Value, format_value_unquoted};
 
 // --- VMSignal: unified error/effect propagation ---
 

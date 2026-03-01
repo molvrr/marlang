@@ -10,9 +10,9 @@ use std::sync::Arc;
 use crate::bytecode::{Chunk, FunctionPrototype};
 use crate::errors::VMError;
 use crate::object::{Closure, HandlerEntry, VMHandlerFrame, VMObject};
-use crate::value::{format_value_unquoted, Value};
+use crate::value::{Value, format_value_unquoted};
 use crate::vm::{
-    call_closure, call_value, next_handler_id, resume_continuation, EffectSignal, VMSignal, VM,
+    EffectSignal, VM, VMSignal, call_closure, call_value, next_handler_id, resume_continuation,
 };
 
 // ---------------------------------------------------------------------------

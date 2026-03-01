@@ -1,6 +1,6 @@
 use crate::errors::VMError;
 use crate::object::VMObject;
-use crate::value::{format_value, Value};
+use crate::value::{Value, format_value};
 use crate::vm::VM;
 
 /// Register all built-in globals into the VM.
@@ -329,6 +329,245 @@ pub fn register_builtins(vm: &mut VM) {
         }))
     });
 
+    // Math builtins — Float functions
+    builtin(vm, "pow", |_vm, args| {
+        if args.len() != 2 {
+            return Err(VMError::runtime("pow expects two numbers"));
+        }
+        let base = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("pow expects numbers"))?;
+        let exp = args[1]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("pow expects numbers"))?;
+        Ok(Value::number(base.powf(exp)))
+    });
+
+    builtin(vm, "sqrt", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("sqrt expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("sqrt expects a number"))?;
+        Ok(Value::number(n.sqrt()))
+    });
+
+    builtin(vm, "exp", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("exp expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("exp expects a number"))?;
+        Ok(Value::number(n.exp()))
+    });
+
+    builtin(vm, "log", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("log expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("log expects a number"))?;
+        Ok(Value::number(n.ln()))
+    });
+
+    builtin(vm, "log10", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("log10 expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("log10 expects a number"))?;
+        Ok(Value::number(n.log10()))
+    });
+
+    builtin(vm, "log2", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("log2 expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("log2 expects a number"))?;
+        Ok(Value::number(n.log2()))
+    });
+
+    builtin(vm, "sin", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("sin expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("sin expects a number"))?;
+        Ok(Value::number(n.sin()))
+    });
+
+    builtin(vm, "cos", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("cos expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("cos expects a number"))?;
+        Ok(Value::number(n.cos()))
+    });
+
+    builtin(vm, "tan", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("tan expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("tan expects a number"))?;
+        Ok(Value::number(n.tan()))
+    });
+
+    builtin(vm, "asin", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("asin expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("asin expects a number"))?;
+        Ok(Value::number(n.asin()))
+    });
+
+    builtin(vm, "acos", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("acos expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("acos expects a number"))?;
+        Ok(Value::number(n.acos()))
+    });
+
+    builtin(vm, "atan", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("atan expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("atan expects a number"))?;
+        Ok(Value::number(n.atan()))
+    });
+
+    builtin(vm, "sinh", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("sinh expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("sinh expects a number"))?;
+        Ok(Value::number(n.sinh()))
+    });
+
+    builtin(vm, "cosh", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("cosh expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("cosh expects a number"))?;
+        Ok(Value::number(n.cosh()))
+    });
+
+    builtin(vm, "tanh", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("tanh expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("tanh expects a number"))?;
+        Ok(Value::number(n.tanh()))
+    });
+
+    builtin(vm, "atan2", |_vm, args| {
+        if args.len() != 2 {
+            return Err(VMError::runtime("atan2 expects two numbers"));
+        }
+        let y = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("atan2 expects numbers"))?;
+        let x = args[1]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("atan2 expects numbers"))?;
+        Ok(Value::number(y.atan2(x)))
+    });
+
+    // Conversion builtins — Float -> Int
+    builtin(vm, "floor", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("floor expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("floor expects a number"))?;
+        Ok(Value::number(n.floor()))
+    });
+
+    builtin(vm, "ceil", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("ceil expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("ceil expects a number"))?;
+        Ok(Value::number(n.ceil()))
+    });
+
+    builtin(vm, "round", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("round expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("round expects a number"))?;
+        Ok(Value::number(n.round()))
+    });
+
+    builtin(vm, "truncate", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("truncate expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("truncate expects a number"))?;
+        Ok(Value::number(n.trunc()))
+    });
+
+    // Float check builtins
+    builtin(vm, "is-nan", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("is-nan expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("is-nan expects a number"))?;
+        Ok(Value::boolean(n.is_nan()))
+    });
+
+    builtin(vm, "is-infinite", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("is-infinite expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("is-infinite expects a number"))?;
+        Ok(Value::boolean(n.is_infinite()))
+    });
+
+    builtin(vm, "is-finite", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("is-finite expects one number"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("is-finite expects a number"))?;
+        Ok(Value::boolean(n.is_finite()))
+    });
+
     // Float comparison builtins
     builtin(vm, "=.", |_vm, args| {
         if args.len() != 2 {
@@ -510,6 +749,444 @@ pub fn register_builtins(vm: &mut VM) {
             result.push_str(s);
         }
         Ok(Value::string(result.as_str()))
+    });
+
+    builtin(vm, "string-is-empty", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("string-is-empty expects 1 argument"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-is-empty expects a string"))?;
+        Ok(Value::boolean(s.is_empty()))
+    });
+
+    builtin(vm, "string-reverse", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("string-reverse expects 1 argument"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-reverse expects a string"))?;
+        let reversed: String = s.chars().rev().collect();
+        Ok(Value::string(reversed.as_str()))
+    });
+
+    builtin(vm, "string-repeat", |_vm, args| {
+        if args.len() != 2 {
+            return Err(VMError::runtime("string-repeat expects 2 arguments"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-repeat: first arg must be a string"))?;
+        let n = args[1]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("string-repeat: second arg must be a number"))?;
+        let n = n as usize;
+        Ok(Value::string(s.repeat(n).as_str()))
+    });
+
+    builtin(vm, "string-to-upper", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("string-to-upper expects 1 argument"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-to-upper expects a string"))?;
+        Ok(Value::string(s.to_uppercase().as_str()))
+    });
+
+    builtin(vm, "string-to-lower", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("string-to-lower expects 1 argument"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-to-lower expects a string"))?;
+        Ok(Value::string(s.to_lowercase().as_str()))
+    });
+
+    builtin(vm, "string-trim", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("string-trim expects 1 argument"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-trim expects a string"))?;
+        Ok(Value::string(s.trim()))
+    });
+
+    builtin(vm, "string-trim-start", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("string-trim-start expects 1 argument"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-trim-start expects a string"))?;
+        Ok(Value::string(s.trim_start()))
+    });
+
+    builtin(vm, "string-trim-end", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("string-trim-end expects 1 argument"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-trim-end expects a string"))?;
+        Ok(Value::string(s.trim_end()))
+    });
+
+    builtin(vm, "string-starts-with", |_vm, args| {
+        if args.len() != 2 {
+            return Err(VMError::runtime("string-starts-with expects 2 arguments"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-starts-with: first arg must be a string"))?;
+        let prefix = args[1]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-starts-with: second arg must be a string"))?;
+        Ok(Value::boolean(s.starts_with(prefix)))
+    });
+
+    builtin(vm, "string-ends-with", |_vm, args| {
+        if args.len() != 2 {
+            return Err(VMError::runtime("string-ends-with expects 2 arguments"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-ends-with: first arg must be a string"))?;
+        let suffix = args[1]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-ends-with: second arg must be a string"))?;
+        Ok(Value::boolean(s.ends_with(suffix)))
+    });
+
+    builtin(vm, "string-contains", |_vm, args| {
+        if args.len() != 2 {
+            return Err(VMError::runtime("string-contains expects 2 arguments"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-contains: first arg must be a string"))?;
+        let sub = args[1]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-contains: second arg must be a string"))?;
+        Ok(Value::boolean(s.contains(sub)))
+    });
+
+    builtin(vm, "string-index-of", |_vm, args| {
+        if args.len() != 2 {
+            return Err(VMError::runtime("string-index-of expects 2 arguments"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-index-of: first arg must be a string"))?;
+        let sub = args[1]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-index-of: second arg must be a string"))?;
+        match s.find(sub) {
+            Some(byte_idx) => {
+                // Convert byte index to char index
+                let char_idx = s[..byte_idx].chars().count();
+                Ok(Value::object(VMObject::AdtValue {
+                    tag: "Some".to_string(),
+                    fields: vec![Value::number(char_idx as f64)],
+                }))
+            }
+            None => Ok(Value::object(VMObject::AdtValue {
+                tag: "None".to_string(),
+                fields: vec![],
+            })),
+        }
+    });
+
+    builtin(vm, "string-substring", |_vm, args| {
+        if args.len() != 3 {
+            return Err(VMError::runtime("string-substring expects 3 arguments"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-substring: first arg must be a string"))?;
+        let start = args[1]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("string-substring: second arg must be a number"))?
+            as usize;
+        let end = args[2]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("string-substring: third arg must be a number"))?
+            as usize;
+        // Work with char indices, not byte indices
+        let chars: Vec<char> = s.chars().collect();
+        let start = start.min(chars.len());
+        let end = end.min(chars.len());
+        let result: String = chars[start..end].iter().collect();
+        Ok(Value::string(result.as_str()))
+    });
+
+    builtin(vm, "string-char-at", |_vm, args| {
+        if args.len() != 2 {
+            return Err(VMError::runtime("string-char-at expects 2 arguments"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-char-at: first arg must be a string"))?;
+        let idx = args[1]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("string-char-at: second arg must be a number"))?
+            as usize;
+        match s.chars().nth(idx) {
+            Some(c) => Ok(Value::object(VMObject::AdtValue {
+                tag: "Some".to_string(),
+                fields: vec![Value::char(c)],
+            })),
+            None => Ok(Value::object(VMObject::AdtValue {
+                tag: "None".to_string(),
+                fields: vec![],
+            })),
+        }
+    });
+
+    builtin(vm, "string-split", |_vm, args| {
+        if args.len() != 2 {
+            return Err(VMError::runtime("string-split expects 2 arguments"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-split: first arg must be a string"))?;
+        let sep = args[1]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-split: second arg must be a string"))?;
+        // Build a Cons-list from the split parts
+        let parts: Vec<&str> = s.split(sep).collect();
+        let mut result = Value::object(VMObject::AdtValue {
+            tag: "Nil".to_string(),
+            fields: vec![],
+        });
+        for part in parts.into_iter().rev() {
+            result = Value::object(VMObject::AdtValue {
+                tag: "Cons".to_string(),
+                fields: vec![Value::string(part), result],
+            });
+        }
+        Ok(result)
+    });
+
+    builtin(vm, "string-join", |_vm, args| {
+        if args.len() != 2 {
+            return Err(VMError::runtime("string-join expects 2 arguments"));
+        }
+        let sep = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-join: first arg must be a string"))?
+            .to_string();
+        // Walk the Cons-list
+        let mut parts: Vec<String> = Vec::new();
+        let mut current = &args[1];
+        loop {
+            match current.as_object() {
+                Some(VMObject::AdtValue { tag, fields }) if tag == "Cons" && fields.len() == 2 => {
+                    let s = fields[0].as_string().ok_or_else(|| {
+                        VMError::runtime("string-join: list elements must be strings")
+                    })?;
+                    parts.push(s.to_string());
+                    current = &fields[1];
+                }
+                Some(VMObject::AdtValue { tag, fields }) if tag == "Nil" && fields.is_empty() => {
+                    break;
+                }
+                _ => {
+                    return Err(VMError::runtime(
+                        "string-join: second arg must be a list of strings",
+                    ));
+                }
+            }
+        }
+        Ok(Value::string(parts.join(&sep).as_str()))
+    });
+
+    builtin(vm, "string-replace", |_vm, args| {
+        if args.len() != 3 {
+            return Err(VMError::runtime("string-replace expects 3 arguments"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-replace: first arg must be a string"))?;
+        let from = args[1]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-replace: second arg must be a string"))?;
+        let to = args[2]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-replace: third arg must be a string"))?;
+        Ok(Value::string(s.replacen(from, to, 1).as_str()))
+    });
+
+    builtin(vm, "string-replace-all", |_vm, args| {
+        if args.len() != 3 {
+            return Err(VMError::runtime("string-replace-all expects 3 arguments"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-replace-all: first arg must be a string"))?;
+        let from = args[1]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-replace-all: second arg must be a string"))?;
+        let to = args[2]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-replace-all: third arg must be a string"))?;
+        Ok(Value::string(s.replace(from, to).as_str()))
+    });
+
+    builtin(vm, "string-pad-start", |_vm, args| {
+        if args.len() != 3 {
+            return Err(VMError::runtime("string-pad-start expects 3 arguments"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-pad-start: first arg must be a string"))?;
+        let target_len = args[1]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("string-pad-start: second arg must be a number"))?
+            as usize;
+        let pad = args[2]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-pad-start: third arg must be a string"))?;
+        let current_len = s.chars().count();
+        if current_len >= target_len {
+            Ok(Value::string(s))
+        } else {
+            let pad_chars: Vec<char> = pad.chars().collect();
+            if pad_chars.is_empty() {
+                return Ok(Value::string(s));
+            }
+            let needed = target_len - current_len;
+            let mut prefix = String::new();
+            for i in 0..needed {
+                prefix.push(pad_chars[i % pad_chars.len()]);
+            }
+            prefix.push_str(s);
+            Ok(Value::string(prefix.as_str()))
+        }
+    });
+
+    builtin(vm, "string-pad-end", |_vm, args| {
+        if args.len() != 3 {
+            return Err(VMError::runtime("string-pad-end expects 3 arguments"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-pad-end: first arg must be a string"))?;
+        let target_len = args[1]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("string-pad-end: second arg must be a number"))?
+            as usize;
+        let pad = args[2]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-pad-end: third arg must be a string"))?;
+        let current_len = s.chars().count();
+        if current_len >= target_len {
+            Ok(Value::string(s))
+        } else {
+            let pad_chars: Vec<char> = pad.chars().collect();
+            if pad_chars.is_empty() {
+                return Ok(Value::string(s));
+            }
+            let needed = target_len - current_len;
+            let mut result = s.to_string();
+            for i in 0..needed {
+                result.push(pad_chars[i % pad_chars.len()]);
+            }
+            Ok(Value::string(result.as_str()))
+        }
+    });
+
+    // Char builtins
+    builtin(vm, "char-code", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("char-code expects 1 argument"));
+        }
+        let c = args[0]
+            .as_char()
+            .ok_or_else(|| VMError::runtime("char-code expects a char"))?;
+        Ok(Value::number(c as u32 as f64))
+    });
+
+    builtin(vm, "char-from-code", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("char-from-code expects 1 argument"));
+        }
+        let n = args[0]
+            .as_number()
+            .ok_or_else(|| VMError::runtime("char-from-code expects a number"))?;
+        let codepoint = n as u32;
+        match char::from_u32(codepoint) {
+            Some(c) => Ok(Value::char(c)),
+            None => Err(VMError::runtime(format!(
+                "char-from-code: invalid codepoint {}",
+                codepoint
+            ))),
+        }
+    });
+
+    builtin(vm, "char->string", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("char->string expects 1 argument"));
+        }
+        let c = args[0]
+            .as_char()
+            .ok_or_else(|| VMError::runtime("char->string expects a char"))?;
+        Ok(Value::string(c.to_string().as_str()))
+    });
+
+    builtin(vm, "chars->string", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("chars->string expects 1 argument"));
+        }
+        // Walk the Cons-list of chars
+        let mut result = String::new();
+        let mut current = &args[0];
+        loop {
+            match current.as_object() {
+                Some(VMObject::AdtValue { tag, fields }) if tag == "Cons" && fields.len() == 2 => {
+                    let c = fields[0].as_char().ok_or_else(|| {
+                        VMError::runtime("chars->string: list elements must be chars")
+                    })?;
+                    result.push(c);
+                    current = &fields[1];
+                }
+                Some(VMObject::AdtValue { tag, fields }) if tag == "Nil" && fields.is_empty() => {
+                    break;
+                }
+                _ => {
+                    return Err(VMError::runtime(
+                        "chars->string: argument must be a list of chars",
+                    ));
+                }
+            }
+        }
+        Ok(Value::string(result.as_str()))
+    });
+
+    builtin(vm, "string->chars", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("string->chars expects 1 argument"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string->chars expects a string"))?;
+        // Build a Cons-list of chars
+        let chars: Vec<char> = s.chars().collect();
+        let mut result = Value::object(VMObject::AdtValue {
+            tag: "Nil".to_string(),
+            fields: vec![],
+        });
+        for c in chars.into_iter().rev() {
+            result = Value::object(VMObject::AdtValue {
+                tag: "Cons".to_string(),
+                fields: vec![Value::char(c), result],
+            });
+        }
+        Ok(result)
     });
 
     builtin(vm, "number->string", |_vm, args| {

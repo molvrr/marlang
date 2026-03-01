@@ -7,8 +7,8 @@ use marlang_core::lexer::lex;
 use marlang_core::parser::parse_with_interner;
 
 use crate::ast::format_type;
-use crate::checker::{type_check, type_check_with_modules, TypeCheckResult, TypeModuleLoader};
-use crate::errors::{format_error, TypeError};
+use crate::checker::{TypeCheckResult, TypeModuleLoader, type_check, type_check_with_modules};
+use crate::errors::{TypeError, format_error};
 
 fn check(source: &str) -> Result<Vec<crate::ast::Type>, String> {
     let interner = Interner::new();

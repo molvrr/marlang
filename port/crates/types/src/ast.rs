@@ -225,6 +225,9 @@ pub fn t_bool() -> Type {
 pub fn t_string() -> Type {
     type_const("String")
 }
+pub fn t_char() -> Type {
+    type_const("Char")
+}
 pub fn t_unit() -> Type {
     type_const("Unit")
 }

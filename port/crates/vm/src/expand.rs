@@ -12,7 +12,7 @@ use crate::builtins::register_builtins;
 use crate::compiler::compile_program;
 use crate::object::VMObject;
 use crate::value::Value;
-use crate::vm::{call_value, interpret, VM};
+use crate::vm::{VM, call_value, interpret};
 
 // --- Macro expansion error ---
 

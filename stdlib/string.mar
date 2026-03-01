@@ -15,7 +15,7 @@
 ; Concatenate two strings
 (define (concat : (-> String String String))
   (lambda (a b)
-    (string-concat a b)))
+    (string-append a b)))
 
 ; is-empty : (-> String Bool)
 ; Check if a string is empty
@@ -111,9 +111,9 @@
   (lambda (start end s)
     (string-substring s start end)))
 
-; char-at : (-> Int String (Option String))
+; char-at : (-> Int String (Option Char))
 ; Get character at index, or None if out of bounds
-(define (char-at : (-> Int String (Option String)))
+(define (char-at : (-> Int String (Option Char)))
   (lambda (idx s)
     (string-char-at s idx)))
 
@@ -211,21 +211,39 @@
         (let ((padding (- width len))
               (left (/ padding 2))
               (right (- padding (/ padding 2))))
-          (string-concat (string-repeat " " left)
-                        (string-concat s (string-repeat " " right))))))))
+          (string-append (string-repeat " " left)
+                        s (string-repeat " " right)))))))
 
 ; ============================================================
 ; Character Codes
 ; ============================================================
 
-; to-char-code : (-> String Int)
-; Get the character code of a single-character string
-(define (to-char-code : (-> String Int))
+; to-char-code : (-> Char Int)
+; Get the Unicode codepoint of a character
+(define (to-char-code : (-> Char Int))
   (lambda (c)
     (char-code c)))
 
-; from-char-code : (-> Int String)
-; Create a single-character string from a character code
-(define (from-char-code : (-> Int String))
+; from-char-code : (-> Int Char)
+; Create a character from a Unicode codepoint
+(define (from-char-code : (-> Int Char))
   (lambda (n)
     (char-from-code n)))
+
+; to-chars : (-> String (List Char))
+; Convert a string to a list of characters
+(define (to-chars : (-> String (List Char)))
+  (lambda (s)
+    (string->chars s)))
+
+; from-chars : (-> (List Char) String)
+; Convert a list of characters to a string
+(define (from-chars : (-> (List Char) String))
+  (lambda (cs)
+    (chars->string cs)))
+
+; char-to-string : (-> Char String)
+; Convert a single character to a string
+(define (char-to-string : (-> Char String))
+  (lambda (c)
+    (char->string c)))

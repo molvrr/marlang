@@ -133,6 +133,7 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                 "Float" => Ok(t_float()),
                 "Bool" => Ok(t_bool()),
                 "String" => Ok(t_string()),
+                "Char" => Ok(t_char()),
                 "Unit" => Ok(t_unit()),
                 _ => {
                     // Check for user-defined data type

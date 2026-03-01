@@ -11,7 +11,7 @@ use crate::compiler::compile_expr_with_context;
 use crate::errors::VMError;
 use crate::expand::MacroExpander;
 use crate::value::Value;
-use crate::vm::{interpret, VM};
+use crate::vm::{VM, interpret};
 
 // --- Module state ---
 
@@ -48,11 +48,7 @@ impl ModuleLoader {
                 let manifest = env!("CARGO_MANIFEST_DIR");
                 let workspace = Path::new(manifest).parent()?.parent()?.parent()?;
                 let stdlib = workspace.join("stdlib");
-                if stdlib.is_dir() {
-                    Some(stdlib)
-                } else {
-                    None
-                }
+                if stdlib.is_dir() { Some(stdlib) } else { None }
             });
 
         ModuleLoader {

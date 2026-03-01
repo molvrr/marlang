@@ -155,7 +155,7 @@ impl<'t> Parser<'t> {
                 // Check for `|` separator for row variable: {IO | e}
                 if sym_name == "|" {
                     self.advance(); // skip |
-                                    // Next should be the row variable
+                    // Next should be the row variable
                     if let Some(Token::Identifier(rv_sym, rv_span)) = self.peek() {
                         let rv_sym = *rv_sym;
                         let rv_span = *rv_span;

@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 
 use marlang_core::ast::Expr;
 use marlang_core::intern::Interner;
@@ -12,12 +12,12 @@ use marlang_core::lexer::lex;
 use marlang_core::parser::parse_with_interner;
 use marlang_core::span::LineMap;
 use marlang_types::ast::format_type;
-use marlang_types::checker::{type_check_with_modules, TypeCheckResult, TypeModuleLoader};
-use marlang_types::errors::{format_error_with_location, TypeError};
+use marlang_types::checker::{TypeCheckResult, TypeModuleLoader, type_check_with_modules};
+use marlang_types::errors::{TypeError, format_error_with_location};
 use marlang_vm::builtins::register_builtins;
 use marlang_vm::compiler::compile_program;
 use marlang_vm::debug::disassemble;
-use marlang_vm::modules::{expand_macros, run_program, run_program_from_exprs, ModuleLoader};
+use marlang_vm::modules::{ModuleLoader, expand_macros, run_program, run_program_from_exprs};
 use marlang_vm::value::format_value;
 use marlang_vm::vm::VM;
 

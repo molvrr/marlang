@@ -460,10 +460,12 @@ mod tests {
         let interner = Interner::new();
         let result = lex("\"hello", &interner);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .message
-            .contains("Unterminated string literal"));
+        assert!(
+            result
+                .unwrap_err()
+                .message
+                .contains("Unterminated string literal")
+        );
     }
 
     // === Identifiers ===

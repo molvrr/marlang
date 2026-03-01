@@ -72,6 +72,8 @@ const BUILTIN_DECLARATIONS: &str = r#"
 (declare abs. (-> Float Float))
 (declare rem. (-> Float Float Float))
 (declare mod. (-> Float Float Float))
+(declare sign (-> Int Int))
+(declare sign. (-> Float Float))
 
 ; Conversion
 (declare int->float (-> Int Float))
@@ -103,7 +105,6 @@ const BUILTIN_DECLARATIONS: &str = r#"
 
 ; String builtins
 (declare string-length (-> String Int))
-(declare string-concat (-> (... String) String))
 (declare string-append (-> (... String) String))
 (declare string-is-empty (-> String Bool))
 (declare string-reverse (-> String String))
@@ -118,15 +119,18 @@ const BUILTIN_DECLARATIONS: &str = r#"
 (declare string-contains (-> String String Bool))
 (declare string-index-of (-> String String (Option Int)))
 (declare string-substring (-> String Int Int String))
-(declare string-char-at (-> String Int (Option String)))
+(declare string-char-at (-> String Int (Option Char)))
 (declare string-split (-> String String (List String)))
 (declare string-join (-> String (List String) String))
 (declare string-replace (-> String String String String))
 (declare string-replace-all (-> String String String String))
 (declare string-pad-start (-> String Int String String))
 (declare string-pad-end (-> String Int String String))
-(declare char-code (-> String Int))
-(declare char-from-code (-> Int String))
+(declare char-code (-> Char Int))
+(declare char-from-code (-> Int Char))
+(declare char->string (-> Char String))
+(declare chars->string (-> (List Char) String))
+(declare string->chars (-> String (List Char)))
 
 ; Number/string conversion
 (declare number->string (-> Float String))

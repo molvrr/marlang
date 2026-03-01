@@ -9,6 +9,8 @@ const SIGN_BIT: u64 = 0x8000_0000_0000_0000;
 const TAG_NIL: u64 = 1;
 const TAG_TRUE: u64 = 2;
 const TAG_FALSE: u64 = 3;
+// Char tag: bits [47:32] = 0x0001, bits [31:0] = Unicode codepoint
+const TAG_CHAR: u64 = 0x0001_0000_0000;
 
 /// A NaN-boxed value. Stores either:
 /// - An f64 number (any bit pattern that is NOT a quiet NaN with our prefix)
@@ -63,6 +65,12 @@ impl Value {
         Value::object(VMObject::Symbol(name.into()))
     }
 
+    /// Create a Char value (inline NaN-boxed, no heap allocation).
+    #[inline]
+    pub fn char(c: char) -> Self {
+        Value(QNAN | TAG_CHAR | (c as u64))
+    }
+
     // --- Type checks ---
 
     #[inline]
@@ -91,6 +99,12 @@ impl Value {
     }
 
     #[inline]
+    pub fn is_char(&self) -> bool {
+        // QNAN set, SIGN_BIT clear (not an object), CHAR tag bit set
+        (self.0 & (SIGN_BIT | QNAN | TAG_CHAR)) == (QNAN | TAG_CHAR)
+    }
+
+    #[inline]
     pub fn is_object(&self) -> bool {
         (self.0 & (SIGN_BIT | QNAN)) == (SIGN_BIT | QNAN)
     }
@@ -112,6 +126,16 @@ impl Value {
             Some(true)
         } else if self.is_false() {
             Some(false)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn as_char(&self) -> Option<char> {
+        if self.is_char() {
+            let codepoint = (self.0 & 0x0000_0000_FFFF_FFFF) as u32;
+            char::from_u32(codepoint)
         } else {
             None
         }
@@ -151,6 +175,8 @@ impl Value {
             "nil"
         } else if self.is_bool() {
             "boolean"
+        } else if self.is_char() {
+            "char"
         } else if let Some(obj) = self.as_object() {
             obj.kind_name()
         } else {
@@ -227,6 +253,8 @@ impl std::fmt::Debug for Value {
             write!(f, "Value(true)")
         } else if self.is_false() {
             write!(f, "Value(false)")
+        } else if let Some(c) = self.as_char() {
+            write!(f, "Value('{}')", c)
         } else if let Some(obj) = self.as_object() {
             write!(f, "Value({:?})", obj)
         } else {
@@ -259,6 +287,9 @@ pub fn format_value(value: &Value) -> String {
     }
     if value.is_false() {
         return "#f".to_string();
+    }
+    if let Some(c) = value.as_char() {
+        return format!("'{}'", c);
     }
     if let Some(obj) = value.as_object() {
         return format_object(obj);
@@ -317,6 +348,9 @@ fn format_object(obj: &VMObject) -> String {
 pub fn format_value_unquoted(value: &Value) -> String {
     if let Some(s) = value.as_string() {
         return s.to_string();
+    }
+    if let Some(c) = value.as_char() {
+        return c.to_string();
     }
     format_value(value)
 }
