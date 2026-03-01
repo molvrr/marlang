@@ -249,6 +249,10 @@ impl Default for Chunk {
 pub struct FunctionPrototype {
     pub name: String,
     pub arity: u8,
+    /// If true, this function accepts `arity` required params plus a rest parameter.
+    /// At call time, excess arguments are packed into a List and placed in
+    /// local slot `arity` (the rest param slot).
+    pub is_variadic: bool,
     pub upvalues: Vec<UpvalueDescriptor>,
     pub chunk: Chunk,
 }

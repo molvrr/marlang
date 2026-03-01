@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 use crate::bytecode::{Chunk, ConstantValue, FunctionPrototype, Op};
 use crate::errors::{StackTraceEntry, VMError};
 use crate::object::{CallFrame, Closure, HandlerEntry, VMContinuation, VMHandlerFrame, VMObject};
-use crate::value::{Value, format_value_unquoted};
+use crate::value::{format_value_unquoted, Value};
 
 // --- VMSignal: unified error/effect propagation ---
 
@@ -412,6 +412,7 @@ pub fn interpret(vm: &mut VM, chunk: &Chunk) -> Result<Value, VMError> {
     let script_proto = FunctionPrototype {
         name: "<script>".to_string(),
         arity: 0,
+        is_variadic: false,
         upvalues: Vec::new(),
         chunk: chunk.clone(),
     };
@@ -565,6 +566,20 @@ fn find_matching_bracket(s: &str, open: usize) -> Result<usize, String> {
 
 // --- Default IO handlers ---
 
+fn default_make_ok(value: Value) -> Value {
+    Value::object(VMObject::AdtValue {
+        tag: "Ok".to_string(),
+        fields: vec![value],
+    })
+}
+
+fn default_make_err(msg: &str) -> Value {
+    Value::object(VMObject::AdtValue {
+        tag: "Err".to_string(),
+        fields: vec![Value::string(msg)],
+    })
+}
+
 fn try_default_handler(vm: &mut VM, op_name: &str, args: &[Value]) -> Option<Value> {
     match op_name {
         "print" => {
@@ -603,15 +618,17 @@ fn try_default_handler(vm: &mut VM, op_name: &str, args: &[Value]) -> Option<Val
             let path = args.first()?;
             let path_str = path.as_string()?;
             match std::fs::read_to_string(path_str) {
-                Ok(content) => Some(Value::string(content.as_str())),
-                Err(_) => None,
+                Ok(content) => Some(default_make_ok(Value::string(content.as_str()))),
+                Err(e) => Some(default_make_err(&format!("read-file: {}", e))),
             }
         }
         "write-file" => {
             let path = args.first()?.as_string()?;
             let content = args.get(1)?.as_string()?;
-            std::fs::write(path, content).ok()?;
-            Some(Value::nil())
+            match std::fs::write(path, content) {
+                Ok(_) => Some(default_make_ok(Value::nil())),
+                Err(e) => Some(default_make_err(&format!("write-file: {}", e))),
+            }
         }
         _ => None,
     }
@@ -945,13 +962,23 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 if let Some(obj) = callee.as_object() {
                     match obj {
                         VMObject::Closure(closure) => {
-                            if arity != closure.proto.arity as usize {
+                            let required_arity = closure.proto.arity as usize;
+
+                            if closure.proto.is_variadic {
+                                if arity < required_arity {
+                                    vm.frames[frame_idx].ip = ip;
+                                    return Err(VMSignal::Error(vm.vm_error(
+                                        format!(
+                                            "Expected at least {} arguments, got {}",
+                                            required_arity, arity
+                                        ),
+                                        &vm.frames[frame_idx],
+                                    )));
+                                }
+                            } else if arity != required_arity {
                                 vm.frames[frame_idx].ip = ip;
                                 return Err(VMSignal::Error(vm.vm_error(
-                                    format!(
-                                        "Expected {} arguments, got {}",
-                                        closure.proto.arity, arity
-                                    ),
+                                    format!("Expected {} arguments, got {}", required_arity, arity),
                                     &vm.frames[frame_idx],
                                 )));
                             }
@@ -961,10 +988,28 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                             // Reuse locals Vec from dead frame slot when possible
                             let mut locals = vm.take_locals(local_count);
-                            for i in (0..arity).rev() {
-                                locals[i] = vm.pop();
+
+                            if cloned_closure.proto.is_variadic {
+                                // Pop all args from stack
+                                let mut all_args = vec![Value::nil(); arity];
+                                for i in (0..arity).rev() {
+                                    all_args[i] = vm.pop();
+                                }
+                                vm.pop(); // pop callee
+
+                                // Required params go in locals[0..required_arity]
+                                for i in 0..required_arity {
+                                    locals[i] = all_args[i].clone();
+                                }
+                                // Excess args packed into a List in locals[required_arity]
+                                let rest_args: Vec<Value> = all_args[required_arity..].to_vec();
+                                locals[required_arity] = Value::object(VMObject::List(rest_args));
+                            } else {
+                                for i in (0..arity).rev() {
+                                    locals[i] = vm.pop();
+                                }
+                                vm.pop(); // pop callee
                             }
-                            vm.pop(); // pop callee
 
                             let new_frame = CallFrame {
                                 closure: cloned_closure,
@@ -1089,13 +1134,23 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 if let Some(obj) = callee.as_object() {
                     match obj {
                         VMObject::Closure(closure) => {
-                            if arity != closure.proto.arity as usize {
+                            let required_arity = closure.proto.arity as usize;
+
+                            if closure.proto.is_variadic {
+                                if arity < required_arity {
+                                    vm.frames[frame_idx].ip = ip;
+                                    return Err(VMSignal::Error(vm.vm_error(
+                                        format!(
+                                            "Expected at least {} arguments, got {}",
+                                            required_arity, arity
+                                        ),
+                                        &vm.frames[frame_idx],
+                                    )));
+                                }
+                            } else if arity != required_arity {
                                 vm.frames[frame_idx].ip = ip;
                                 return Err(VMSignal::Error(vm.vm_error(
-                                    format!(
-                                        "Expected {} arguments, got {}",
-                                        closure.proto.arity, arity
-                                    ),
+                                    format!("Expected {} arguments, got {}", required_arity, arity),
                                     &vm.frames[frame_idx],
                                 )));
                             }
@@ -1105,10 +1160,24 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             let local_count = closure.proto.chunk.local_count as usize;
                             locals.clear();
                             locals.resize(local_count, Value::nil());
-                            for i in (0..arity).rev() {
-                                locals[i] = vm.pop();
+
+                            if closure.proto.is_variadic {
+                                let mut all_args = vec![Value::nil(); arity];
+                                for i in (0..arity).rev() {
+                                    all_args[i] = vm.pop();
+                                }
+                                vm.pop(); // pop callee
+                                for i in 0..required_arity {
+                                    locals[i] = all_args[i].clone();
+                                }
+                                let rest_args: Vec<Value> = all_args[required_arity..].to_vec();
+                                locals[required_arity] = Value::object(VMObject::List(rest_args));
+                            } else {
+                                for i in (0..arity).rev() {
+                                    locals[i] = vm.pop();
+                                }
+                                vm.pop(); // pop callee
                             }
-                            vm.pop(); // pop callee
 
                             // Reuse current frame
                             vm.frames[frame_idx].closure = (**closure).clone();

@@ -1,5 +1,10 @@
 ; HTTP module - HTTP client and server using the effect system
 ;
+; STATUS: UNIMPLEMENTED — The effect types and wrapper functions below define
+; the planned API, but no runtime handlers exist in the scheduler. Attempting
+; to use these effects at runtime will result in "Unhandled effect" errors.
+; This module serves as a design sketch for future HTTP support.
+;
 ; All HTTP operations are effects handled by the scheduler (run-fibers).
 ;
 ; Example client:

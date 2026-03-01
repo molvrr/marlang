@@ -10,9 +10,9 @@ use crate::compiler::{compile, compile_program};
 use crate::debug::disassemble;
 use crate::errors::VMError;
 use crate::expand::MacroExpander;
-use crate::modules::{ModuleLoader, expand_macros, run_program, run_program_from_exprs};
+use crate::modules::{expand_macros, run_program, run_program_from_exprs, ModuleLoader};
 use crate::object::VMObject;
-use crate::value::{Value, format_value};
+use crate::value::{format_value, Value};
 use crate::vm::VM;
 
 // --- Test Helpers ---
@@ -77,34 +77,28 @@ fn literal_string() {
 #[test]
 fn literal_boolean_true() {
     let (chunk, _) = compile_source("#t");
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Boolean(true)))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Boolean(true))));
 }
 
 #[test]
 fn literal_boolean_false() {
     let (chunk, _) = compile_source("#f");
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Boolean(false)))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Boolean(false))));
 }
 
 #[test]
 fn literal_nil() {
     let (chunk, _) = compile_source("nil");
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Nil))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Nil)));
 }
 
 #[test]
@@ -210,12 +204,10 @@ fn if_no_else() {
     let (chunk, _) = compile_source("(if #t 1)");
     assert!(find_op(&chunk, Op::JumpIfFalse));
     // Should have nil for the else branch
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Nil))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Nil)));
 }
 
 #[test]
@@ -292,12 +284,10 @@ fn lambda_basic() {
     let (chunk, _) = compile_source("(lambda (x) x)");
     assert!(find_op(&chunk, Op::Closure));
     // Should have a prototype in constants
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Prototype(_)))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Prototype(_))));
 }
 
 #[test]
@@ -382,12 +372,10 @@ fn data_nullary_constructor() {
 fn data_nary_constructor() {
     let (chunk, _) = compile_source("(data Option (Some a) None)");
     // Some is N-ary (arity 1), encoded as special string
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| { matches!(c, ConstantValue::String(s) if s == "\0ctor:Some:1") })
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| { matches!(c, ConstantValue::String(s) if s == "\0ctor:Some:1") }));
     // None is nullary
     assert!(find_op(&chunk, Op::Construct));
 }
@@ -447,12 +435,10 @@ fn match_no_match_halt() {
 fn effect_declaration_emits_nil() {
     let (chunk, _) = compile_source("(effect IO (print (-> String Unit)))");
     // effect declarations just produce nil
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Nil))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Nil)));
 }
 
 #[test]
@@ -474,12 +460,10 @@ fn handle_produces_push_handler() {
     let (chunk, _) = compile_source(source);
     assert!(find_op(&chunk, Op::PushHandler));
     // Should have handler descriptor
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| { matches!(c, ConstantValue::String(s) if s.starts_with("\0handler:")) })
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| { matches!(c, ConstantValue::String(s) if s.starts_with("\0handler:")) }));
 }
 
 #[test]
@@ -516,24 +500,20 @@ fn resume_opcode() {
 #[test]
 fn class_emits_nil() {
     let (chunk, _) = compile_source("(class Eq (a) (eq (-> a a Bool)))");
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Nil))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Nil)));
 }
 
 #[test]
 fn type_emits_nil() {
     let (chunk, _) = compile_source("(type Pair (a b) (MkPair a b))");
     // type declarations emit nil
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Nil))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Nil)));
 }
 
 // ===== Disassembler =====
@@ -1239,7 +1219,18 @@ fn exec_string_to_number() {
 
 #[test]
 fn exec_string_to_number_invalid() {
-    assert_nil("(string->number \"abc\")");
+    // string->number now throws on invalid input via (perform throw ...)
+    assert_error("(string->number \"abc\")", "Unhandled effect: throw");
+}
+
+#[test]
+fn exec_string_to_number_caught() {
+    // string->number throws can be caught with handle
+    assert_str(
+        r#"(handle (begin (string->number "abc") "ok")
+             ((throw msg k) -> msg))"#,
+        "string->number: invalid number: abc",
+    );
 }
 
 // ===== Execution: Effects — Handle/Perform =====
@@ -2387,10 +2378,13 @@ fn fiber_crash_does_not_kill_main() {
 fn channel_buffered_send_recv() {
     let (result, output) = eval_with_output(
         r#"
+(define unwrap-some (lambda (opt)
+  (match opt ((Some v) v) (None (error "unwrap-some: got None")))))
+
 (run-fibers (lambda ()
   (let ((ch (perform chan-new 10)))
     (perform chan-send ch 42)
-    (let ((v (perform chan-recv ch)))
+    (let ((v (unwrap-some (perform chan-recv ch))))
       (perform println v)))))
 "#,
     );
@@ -2402,11 +2396,14 @@ fn channel_buffered_send_recv() {
 fn channel_unbuffered_synchronizes() {
     let (result, output) = eval_with_output(
         r#"
+(define unwrap-some (lambda (opt)
+  (match opt ((Some v) v) (None (error "unwrap-some: got None")))))
+
 (run-fibers (lambda ()
   (let ((ch (perform chan-new 0)))
     (perform fiber-spawn (lambda ()
       (perform chan-send ch 99)))
-    (let ((v (perform chan-recv ch)))
+    (let ((v (unwrap-some (perform chan-recv ch))))
       (perform println v)))))
 "#,
     );
@@ -2426,9 +2423,9 @@ fn channel_producer_consumer() {
       (perform chan-send ch 3)
       (perform chan-close ch)))
     (define consume (lambda ()
-      (let ((v (perform chan-recv ch)))
-        (if (= v nil)
-          nil
+      (match (perform chan-recv ch)
+        (None nil)
+        ((Some v)
           (begin
             (perform println v)
             (consume))))))
@@ -2447,28 +2444,48 @@ fn channel_close_wakes_receivers() {
   (let ((ch (perform chan-new 0)))
     (perform fiber-spawn (lambda ()
       (let ((v (perform chan-recv ch)))
-        (perform println (if (= v nil) "got-nil" "got-val")))))
+        (perform println (match v (None "got-none") ((Some _) "got-val"))))))
     (perform fiber-yield)
     (perform chan-close ch)
     (perform fiber-yield))))
 "#,
     );
     assert!(result.is_ok());
-    assert_eq!(output.trim(), "got-nil");
+    assert_eq!(output.trim(), "got-none");
+}
+
+#[test]
+fn channel_send_closed_returns_err() {
+    let (result, output) = eval_with_output(
+        r#"
+(run-fibers (lambda ()
+  (let ((ch (perform chan-new 0)))
+    (perform chan-close ch)
+    (let ((r (perform chan-send ch 42)))
+      (perform println (match r
+        ((Ok _) "ok")
+        ((Err msg) (string-append "err:" msg))))))))
+"#,
+    );
+    assert!(result.is_ok(), "chan-send closed test failed: {:?}", result);
+    assert_eq!(output.trim(), "err:channel is closed");
 }
 
 #[test]
 fn channel_fan_out() {
     let (result, output) = eval_with_output(
         r#"
+(define unwrap-some (lambda (opt)
+  (match opt ((Some v) v) (None (error "unwrap-some: got None")))))
+
 (run-fibers (lambda ()
   (let ((ch (perform chan-new 10)))
     (perform fiber-spawn (lambda () (perform chan-send ch (+ 1 1))))
     (perform fiber-spawn (lambda () (perform chan-send ch (+ 2 2))))
     (perform fiber-spawn (lambda () (perform chan-send ch (+ 3 3))))
-    (let ((a (perform chan-recv ch))
-          (b (perform chan-recv ch))
-          (c (perform chan-recv ch)))
+    (let ((a (unwrap-some (perform chan-recv ch)))
+          (b (unwrap-some (perform chan-recv ch)))
+          (c (unwrap-some (perform chan-recv ch))))
       (perform println (+ a (+ b c)))))))
 "#,
     );
@@ -2639,8 +2656,11 @@ fn io_file_read_inside_fibers() {
     std::fs::write(tmp_path, "test content").unwrap();
     let source = format!(
         r#"
+(define unwrap-ok (lambda (r)
+  (match r ((Ok v) v) ((Err msg) (error msg)))))
+
 (run-fibers (lambda ()
-  (let ((content (perform read-file "{}")))
+  (let ((content (unwrap-ok (perform read-file "{}"))))
     (perform println content))))
 "#,
         tmp_path
@@ -2659,14 +2679,19 @@ fn io_concurrent_file_reads() {
     std::fs::write(tmp2, "file2").unwrap();
     let source = format!(
         r#"
+(define unwrap-some (lambda (opt)
+  (match opt ((Some v) v) (None (error "unwrap-some: got None")))))
+(define unwrap-ok (lambda (r)
+  (match r ((Ok v) v) ((Err msg) (error msg)))))
+
 (run-fibers (lambda ()
   (let ((ch (perform chan-new 10)))
     (perform fiber-spawn (lambda ()
-      (perform chan-send ch (perform read-file "{}"))))
+      (perform chan-send ch (unwrap-ok (perform read-file "{}")))))
     (perform fiber-spawn (lambda ()
-      (perform chan-send ch (perform read-file "{}"))))
-    (let ((a (perform chan-recv ch))
-          (b (perform chan-recv ch)))
+      (perform chan-send ch (unwrap-ok (perform read-file "{}")))))
+    (let ((a (unwrap-some (perform chan-recv ch)))
+          (b (unwrap-some (perform chan-recv ch))))
       (perform println a)
       (perform println b)))))
 "#,
@@ -2849,14 +2874,17 @@ fn parallel_fib_two_fibers() {
   (if (< n 2) n
     (+ (fib (- n 1)) (fib (- n 2))))))
 
+(define unwrap-some (lambda (opt)
+  (match opt ((Some v) v) (None (error "unwrap-some: got None")))))
+
 (run-fibers-parallel (lambda ()
   (let ((ch (perform chan-new 10)))
     (perform fiber-spawn (lambda ()
       (perform chan-send ch (fib 20))))
     (perform fiber-spawn (lambda ()
       (perform chan-send ch (fib 20))))
-    (let ((a (perform chan-recv ch))
-          (b (perform chan-recv ch)))
+    (let ((a (unwrap-some (perform chan-recv ch)))
+          (b (unwrap-some (perform chan-recv ch))))
       (perform println (string-append "results: " (show a) " " (show b)))))) 2)
 "#,
     );
@@ -2869,13 +2897,16 @@ fn parallel_cross_thread_channel() {
     // Producer/consumer across threads
     let (result, output) = eval_with_output(
         r#"
+(define unwrap-some (lambda (opt)
+  (match opt ((Some v) v) (None (error "unwrap-some: got None")))))
+
 (run-fibers-parallel (lambda ()
   (let ((ch (perform chan-new 0)))
     (perform fiber-spawn (lambda ()
       (perform chan-send ch "hello")
       (perform chan-send ch "world")))
-    (let ((a (perform chan-recv ch))
-          (b (perform chan-recv ch)))
+    (let ((a (unwrap-some (perform chan-recv ch)))
+          (b (unwrap-some (perform chan-recv ch))))
       (perform println (string-append a " " b))))) 2)
 "#,
     );
@@ -2906,6 +2937,9 @@ fn parallel_many_fibers() {
     // Spawn several fibers via recursive helper, collect results through channel
     let (result, output) = eval_with_output(
         r#"
+(define unwrap-some (lambda (opt)
+  (match opt ((Some v) v) (None (error "unwrap-some: got None")))))
+
 (define spawn-workers (lambda (ch n)
   (if (<= n 0) nil
     (begin
@@ -2914,7 +2948,7 @@ fn parallel_many_fibers() {
 
 (define collect (lambda (ch n acc)
   (if (<= n 0) acc
-    (let ((v (perform chan-recv ch)))
+    (let ((v (unwrap-some (perform chan-recv ch))))
       (collect ch (- n 1) (+ acc v))))))
 
 (run-fibers-parallel (lambda ()
@@ -3007,8 +3041,11 @@ fn async_read_file() {
     std::fs::write(tmp_path, "async content").unwrap();
     let source = format!(
         r#"
+(define unwrap-ok (lambda (r)
+  (match r ((Ok v) v) ((Err msg) (error msg)))))
+
 (run-fibers-parallel (lambda ()
-  (let ((content (perform read-file "{}")))
+  (let ((content (unwrap-ok (perform read-file "{}"))))
     (perform println content))) 2)
 "#,
         tmp_path
@@ -3044,15 +3081,20 @@ fn async_io_concurrent() {
     std::fs::write(tmp_path, "from-file").unwrap();
     let source = format!(
         r#"
+(define unwrap-some (lambda (opt)
+  (match opt ((Some v) v) (None (error "unwrap-some: got None")))))
+(define unwrap-ok (lambda (r)
+  (match r ((Ok v) v) ((Err msg) (error msg)))))
+
 (run-fibers-parallel (lambda ()
   (let ((ch (perform chan-new 10)))
     (perform fiber-spawn (lambda ()
-      (let ((content (perform read-file "{}")))
+      (let ((content (unwrap-ok (perform read-file "{}"))))
         (perform chan-send ch content))))
     (perform fiber-spawn (lambda ()
       (perform chan-send ch (show (+ 1 2)))))
-    (let ((a (perform chan-recv ch))
-          (b (perform chan-recv ch)))
+    (let ((a (unwrap-some (perform chan-recv ch)))
+          (b (unwrap-some (perform chan-recv ch))))
       (perform println a)
       (perform println b)))) 2)
 "#,
@@ -3552,12 +3594,17 @@ fn tcp_echo_server_fixed_port() {
     ((Ok v) v)
     ((Err msg) (perform throw (string-append label ": " msg))))))
 
+(define unwrap-some (lambda (opt)
+  (match opt
+    ((Some v) v)
+    (None (perform throw "unwrap-some: got None")))))
+
 (run-fibers-parallel (lambda ()
   (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
     ;; Server fiber: accept one connection, echo data, close
     (perform fiber-spawn (lambda ()
-      (let ((client (perform tcp-accept listener)))
-        (let ((data (perform tcp-recv client)))
+      (let ((client (unwrap-some (perform tcp-accept listener))))
+        (let ((data (unwrap-some (perform tcp-recv client))))
           (unwrap-ok (perform tcp-send client data) "send")
           (perform tcp-close client)))))
     ;; Client: connect, send, recv, print
@@ -3565,7 +3612,7 @@ fn tcp_echo_server_fixed_port() {
     (perform fiber-yield)
     (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
       (unwrap-ok (perform tcp-send sock "hello") "send")
-      (let ((resp (perform tcp-recv sock)))
+      (let ((resp (unwrap-some (perform tcp-recv sock))))
         (perform println resp)
         (perform tcp-close sock)))
     (perform tcp-close listener)))
@@ -3578,7 +3625,7 @@ fn tcp_echo_server_fixed_port() {
 }
 
 #[test]
-fn tcp_recv_returns_nil_on_close() {
+fn tcp_recv_returns_none_on_close() {
     let port = 19385;
     let code = format!(
         r#"
@@ -3587,18 +3634,23 @@ fn tcp_recv_returns_nil_on_close() {
     ((Ok v) v)
     ((Err msg) (perform throw (string-append label ": " msg))))))
 
+(define unwrap-some (lambda (opt)
+  (match opt
+    ((Some v) v)
+    (None (perform throw "unwrap-some: got None")))))
+
 (run-fibers-parallel (lambda ()
   (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
     ;; Server: accept and immediately close
     (perform fiber-spawn (lambda ()
-      (let ((client (perform tcp-accept listener)))
+      (let ((client (unwrap-some (perform tcp-accept listener))))
         (perform tcp-close client))))
     (perform fiber-yield)
     (perform fiber-yield)
-    ;; Client: connect, recv should get nil
+    ;; Client: connect, recv should get None
     (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
       (let ((data (perform tcp-recv sock)))
-        (perform println (if (= data nil) "closed" "data")))
+        (perform println (match data (None "closed") ((Some _) "data"))))
       (perform tcp-close sock))
     (perform tcp-close listener)))
   2)
@@ -3619,12 +3671,17 @@ fn tcp_send_and_receive_data() {
     ((Ok v) v)
     ((Err msg) (perform throw (string-append label ": " msg))))))
 
+(define unwrap-some (lambda (opt)
+  (match opt
+    ((Some v) v)
+    (None (perform throw "unwrap-some: got None")))))
+
 (run-fibers-parallel (lambda ()
   (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
     ;; Server: accept, receive, echo with prefix
     (perform fiber-spawn (lambda ()
-      (let ((client (perform tcp-accept listener)))
-        (let ((d1 (perform tcp-recv client)))
+      (let ((client (unwrap-some (perform tcp-accept listener))))
+        (let ((d1 (unwrap-some (perform tcp-recv client))))
           (unwrap-ok (perform tcp-send client (string-append "echo:" d1)) "send")
           (perform tcp-close client)))))
     (perform fiber-yield)
@@ -3632,7 +3689,7 @@ fn tcp_send_and_receive_data() {
     ;; Client
     (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
       (unwrap-ok (perform tcp-send sock "foobar") "send")
-      (let ((resp (perform tcp-recv sock)))
+      (let ((resp (unwrap-some (perform tcp-recv sock))))
         (perform println resp)
         (perform tcp-close sock)))
     (perform tcp-close listener)))
@@ -3659,7 +3716,7 @@ fn tcp_listener_close_wakes_acceptor() {
     ;; Fiber waiting to accept
     (perform fiber-spawn (lambda ()
       (let ((result (perform tcp-accept listener)))
-        (perform println (if (= result nil) "woke-nil" "got-conn")))))
+        (perform println (match result (None "woke-none") ((Some _) "got-conn"))))))
     (perform fiber-yield)
     (perform fiber-yield)
     ;; Close the listener while someone is waiting
@@ -3677,7 +3734,7 @@ fn tcp_listener_close_wakes_acceptor() {
         "tcp listener close test failed: {:?}",
         result
     );
-    assert_eq!(output.trim(), "woke-nil");
+    assert_eq!(output.trim(), "woke-none");
 }
 
 #[test]
@@ -3690,16 +3747,21 @@ fn tcp_multiple_clients() {
     ((Ok v) v)
     ((Err msg) (perform throw (string-append label ": " msg))))))
 
+(define unwrap-some (lambda (opt)
+  (match opt
+    ((Some v) v)
+    (None (perform throw "unwrap-some: got None")))))
+
 (run-fibers-parallel (lambda ()
   (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
     ;; Server: handle two connections sequentially
     (perform fiber-spawn (lambda ()
-      (let ((c1 (perform tcp-accept listener)))
-        (let ((d1 (perform tcp-recv c1)))
+      (let ((c1 (unwrap-some (perform tcp-accept listener))))
+        (let ((d1 (unwrap-some (perform tcp-recv c1))))
           (unwrap-ok (perform tcp-send c1 (string-append "1:" d1)) "send")
           (perform tcp-close c1)))
-      (let ((c2 (perform tcp-accept listener)))
-        (let ((d2 (perform tcp-recv c2)))
+      (let ((c2 (unwrap-some (perform tcp-accept listener))))
+        (let ((d2 (unwrap-some (perform tcp-recv c2))))
           (unwrap-ok (perform tcp-send c2 (string-append "2:" d2)) "send")
           (perform tcp-close c2)))))
     (perform fiber-yield)
@@ -3707,13 +3769,13 @@ fn tcp_multiple_clients() {
     ;; Client 1
     (let ((s1 (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
       (unwrap-ok (perform tcp-send s1 "alpha") "send")
-      (let ((r1 (perform tcp-recv s1)))
+      (let ((r1 (unwrap-some (perform tcp-recv s1))))
         (perform println r1)
         (perform tcp-close s1)))
     ;; Client 2
     (let ((s2 (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
       (unwrap-ok (perform tcp-send s2 "beta") "send")
-      (let ((r2 (perform tcp-recv s2)))
+      (let ((r2 (unwrap-some (perform tcp-recv s2))))
         (perform println r2)
         (perform tcp-close s2)))
     (perform tcp-close listener)))
@@ -3736,12 +3798,17 @@ fn tcp_bidirectional() {
     ((Ok v) v)
     ((Err msg) (perform throw (string-append label ": " msg))))))
 
+(define unwrap-some (lambda (opt)
+  (match opt
+    ((Some v) v)
+    (None (perform throw "unwrap-some: got None")))))
+
 (run-fibers-parallel (lambda ()
   (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
     ;; Server: recv then send
     (perform fiber-spawn (lambda ()
-      (let ((client (perform tcp-accept listener)))
-        (let ((msg (perform tcp-recv client)))
+      (let ((client (unwrap-some (perform tcp-accept listener))))
+        (let ((msg (unwrap-some (perform tcp-recv client))))
           (unwrap-ok (perform tcp-send client "pong") "send")
           (perform tcp-close client)))))
     (perform fiber-yield)
@@ -3749,7 +3816,7 @@ fn tcp_bidirectional() {
     ;; Client: send then recv
     (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
       (unwrap-ok (perform tcp-send sock "ping") "send")
-      (let ((resp (perform tcp-recv sock)))
+      (let ((resp (unwrap-some (perform tcp-recv sock))))
         (perform println resp)
         (perform tcp-close sock)))
     (perform tcp-close listener)))
@@ -3903,4 +3970,121 @@ fn throw_with_tcp_listen_and_handle() {
     );
     assert!(result.is_ok(), "throw listen test failed: {:?}", result);
     assert!(output.contains("err:tcp-listen:"), "output: {}", output);
+}
+
+// ===== Variadic Functions (Rest Args) =====
+
+#[test]
+fn variadic_string_append_3_args() {
+    let (_, output) = eval_with_output(r#"(perform println (string-append "a" "b" "c"))"#);
+    assert_eq!(output.trim(), "abc");
+}
+
+#[test]
+fn variadic_string_append_1_arg() {
+    let (_, output) = eval_with_output(r#"(perform println (string-append "solo"))"#);
+    assert_eq!(output.trim(), "solo");
+}
+
+#[test]
+fn variadic_string_append_0_args() {
+    let result = eval_to_string(r#"(string-append)"#);
+    assert_eq!(result, r#""""#);
+}
+
+#[test]
+fn variadic_list_0_args() {
+    let result = eval_to_string("(list)");
+    assert_eq!(result, "()");
+}
+
+#[test]
+fn variadic_list_multiple_args() {
+    let result = eval_to_string("(list 1 2 3)");
+    assert_eq!(result, "(1 2 3)");
+}
+
+#[test]
+fn variadic_lambda_all_rest() {
+    // (lambda (. args) ...) captures all args as a list
+    let result = eval_to_string(
+        r#"
+        (define f (lambda (. args) args))
+        (f 1 2 3)
+        "#,
+    );
+    assert_eq!(result, "(1 2 3)");
+}
+
+#[test]
+fn variadic_lambda_all_rest_empty() {
+    let result = eval_to_string(
+        r#"
+        (define f (lambda (. args) args))
+        (f)
+        "#,
+    );
+    assert_eq!(result, "()");
+}
+
+#[test]
+fn variadic_lambda_required_plus_rest() {
+    // (lambda (a b . rest) ...) — a and b required, rest captures extras
+    let (_, output) = eval_with_output(
+        r#"
+        (define f (lambda (a b . rest)
+          (begin
+            (perform println (show a))
+            (perform println (show b))
+            (perform println (show rest)))))
+        (f 1 2 3 4 5)
+        "#,
+    );
+    let lines: Vec<&str> = output.trim().lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "2");
+    assert_eq!(lines[2], "(3 4 5)");
+}
+
+#[test]
+fn variadic_lambda_required_plus_empty_rest() {
+    // Calling with exactly the required params -> rest is empty list
+    let result = eval_to_string(
+        r#"
+        (define f (lambda (a b . rest) rest))
+        (f 1 2)
+        "#,
+    );
+    assert_eq!(result, "()");
+}
+
+#[test]
+fn variadic_lambda_tail_call() {
+    // Variadic functions should work with tail calls
+    let result = eval_to_string(
+        r#"
+        (define sum-list (lambda (lst acc)
+          (match lst
+            (Nil acc)
+            ((Cons x rest) (sum-list rest (+ acc x))))))
+        (define my-sum (lambda (. args)
+          (sum-list args 0)))
+        (my-sum 1 2 3 4 5)
+        "#,
+    );
+    assert_eq!(result, "15");
+}
+
+#[test]
+fn variadic_lambda_too_few_args_errors() {
+    // Calling a variadic function with fewer than required args should error
+    let result = eval(
+        r#"
+        (define f (lambda (a b . rest) a))
+        (f 1)
+        "#,
+    );
+    assert!(result.is_err());
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(err_msg.contains("at least 2"), "error: {}", err_msg);
 }

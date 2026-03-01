@@ -7,8 +7,8 @@ use marlang_core::lexer::lex;
 use marlang_core::parser::parse;
 
 use crate::ast::format_type;
-use crate::checker::{TypeCheckResult, TypeModuleLoader, type_check, type_check_with_modules};
-use crate::errors::{TypeError, format_error};
+use crate::checker::{type_check, type_check_with_modules, TypeCheckResult, TypeModuleLoader};
+use crate::errors::{format_error, TypeError};
 
 fn check(source: &str) -> Result<Vec<crate::ast::Type>, String> {
     let interner = Interner::new();
@@ -976,4 +976,86 @@ fn import_qualified_preserves_prelude_types() {
     // The result should be (Option Int), not (m/Option Int)
     // because Option already exists in the target env
     assert_eq!(last_type(&types), "(Option Int)");
+}
+
+// ===== Variadic Functions (Rest Args) =====
+
+#[test]
+fn variadic_string_append_3_args_typechecks() {
+    // This was the original net.mar bug: 3-arg string-append
+    check_ok(r#"(string-append "a" "b" "c")"#);
+}
+
+#[test]
+fn variadic_string_append_0_args_typechecks() {
+    check_ok(r#"(string-append)"#);
+}
+
+#[test]
+fn variadic_string_append_1_arg_typechecks() {
+    check_ok(r#"(string-append "solo")"#);
+}
+
+#[test]
+fn variadic_string_append_non_string_fails() {
+    let err = check_err(r#"(string-append "ok" 42)"#);
+    assert!(
+        err.contains("String") || err.contains("unif"),
+        "error: {}",
+        err
+    );
+}
+
+#[test]
+fn variadic_list_typechecks() {
+    let types = check_ok("(list 1 2 3)");
+    assert_eq!(last_type(&types), "(List Int)");
+}
+
+#[test]
+fn variadic_list_empty_typechecks() {
+    check_ok("(list)");
+}
+
+#[test]
+fn variadic_lambda_dot_notation() {
+    let types = check_ok(r#"(lambda (. args) args)"#);
+    // Result should be variadic function returning list
+    let ty = last_type(&types);
+    assert!(ty.contains("..."), "type should be variadic: {}", ty);
+    assert!(ty.contains("List"), "type should return List: {}", ty);
+}
+
+#[test]
+fn variadic_lambda_required_plus_rest() {
+    let types = check_ok(
+        r#"(define f (lambda (a b . rest) rest))
+           (f 1 2 3 4)"#,
+    );
+    assert_eq!(last_type(&types), "(List Int)");
+}
+
+#[test]
+fn variadic_lambda_rest_type_arrow_annotation() {
+    // Test (... T) syntax in type annotations
+    let types = check_ok(
+        r#"(define (f : (-> (... String) String))
+             (lambda (. args) (string-append "hello")))
+           (f "a" "b" "c")"#,
+    );
+    assert_eq!(last_type(&types), "String");
+}
+
+#[test]
+fn variadic_lambda_too_few_args_fails() {
+    // Calling a variadic function with fewer than required params
+    let err = check_err(
+        r#"(define f (lambda (a b . rest) a))
+           (f 1)"#,
+    );
+    assert!(
+        err.contains("argument") || err.contains("arity") || err.contains("Arity"),
+        "error: {}",
+        err
+    );
 }

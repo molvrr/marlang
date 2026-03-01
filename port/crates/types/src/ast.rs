@@ -76,6 +76,7 @@ pub enum Type {
     },
     Arrow {
         params: Vec<Type>,
+        rest: Option<Box<Type>>,
         effects: Option<EffectRow>,
         result: Box<Type>,
     },
@@ -173,6 +174,16 @@ pub fn type_app(constructor: Type, args: Vec<Type>) -> Type {
 pub fn type_arrow(params: Vec<Type>, result: Type) -> Type {
     Type::Arrow {
         params,
+        rest: None,
+        effects: None,
+        result: Box::new(result),
+    }
+}
+
+pub fn type_arrow_variadic(params: Vec<Type>, rest: Type, result: Type) -> Type {
+    Type::Arrow {
+        params,
+        rest: Some(Box::new(rest)),
         effects: None,
         result: Box::new(result),
     }
@@ -185,6 +196,21 @@ pub fn type_arrow_with_effects(
 ) -> Type {
     Type::Arrow {
         params,
+        rest: None,
+        effects,
+        result: Box::new(result),
+    }
+}
+
+pub fn type_arrow_variadic_with_effects(
+    params: Vec<Type>,
+    rest: Type,
+    effects: Option<EffectRow>,
+    result: Type,
+) -> Type {
+    Type::Arrow {
+        params,
+        rest: Some(Box::new(rest)),
         effects,
         result: Box::new(result),
     }
@@ -228,6 +254,9 @@ pub fn t_unit() -> Type {
 }
 pub fn t_list(elem: Type) -> Type {
     type_app(type_const("List"), vec![elem])
+}
+pub fn t_option(elem: Type) -> Type {
+    type_app(type_const("Option"), vec![elem])
 }
 pub fn t_ffi_library() -> Type {
     type_const("FFILibrary")
@@ -334,12 +363,16 @@ pub fn free_type_vars(t: &Type) -> HashSet<String> {
         }
         Type::Arrow {
             params,
+            rest,
             effects,
             result,
         } => {
             let mut s = HashSet::new();
             for p in params {
                 s.extend(free_type_vars(p));
+            }
+            if let Some(rest_ty) = rest {
+                s.extend(free_type_vars(rest_ty));
             }
             s.extend(free_type_vars(result));
             if let Some(row) = effects {
@@ -416,19 +449,24 @@ pub fn format_type(t: &Type) -> String {
         }
         Type::Arrow {
             params,
+            rest,
             effects,
             result,
         } => {
             let params_str: Vec<_> = params.iter().map(format_type).collect();
+            let rest_str = match rest {
+                Some(rest_ty) => format!(" (... {})", format_type(rest_ty)),
+                None => String::new(),
+            };
             let effects_str = match effects {
                 Some(row) => format!(" {}", format_effect_row(row)),
                 None => String::new(),
             };
-            if params.is_empty() {
+            if params.is_empty() && rest.is_none() {
                 format!("(->{effects_str} {})", format_type(result))
             } else {
                 format!(
-                    "(-> {}{effects_str} {})",
+                    "(-> {}{rest_str}{effects_str} {})",
                     params_str.join(" "),
                     format_type(result)
                 )

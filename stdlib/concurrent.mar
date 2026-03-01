@@ -7,15 +7,26 @@
 
 (effect Channel
   (chan-new   (-> Int Channel))
-  (chan-send  (-> Channel a Unit))
-  (chan-recv  (-> Channel a))
+  (chan-send  (-> Channel a (Result String Unit)))
+  (chan-recv  (-> Channel (Option a)))
   (chan-close (-> Channel Unit)))
 
 (define spawn     (lambda (f) (perform fiber-spawn f)))
 (define yield     (lambda () (perform fiber-yield ())))
 (define self      (lambda () (perform fiber-self ())))
 (define chan-new   (lambda (cap) (perform chan-new cap)))
+
+; chan-send : (-> Channel a {Channel} (Result String Unit))
+; Send a value to a channel. Returns (Ok nil) on success, (Err msg) on closed channel.
 (define chan-send  (lambda (ch v) (perform chan-send ch v)))
+
+; chan-send! : (-> Channel a {Channel, Exception} Unit)
+; Send a value to a channel. Throws on closed channel.
+(define chan-send! (lambda (ch v)
+  (match (perform chan-send ch v)
+    ((Ok _) nil)
+    ((Err msg) (perform throw (string-append "chan-send: " msg))))))
+
 (define chan-recv  (lambda (ch) (perform chan-recv ch)))
 (define chan-close (lambda (ch) (perform chan-close ch)))
 (define run       (lambda (f) (run-fibers f)))

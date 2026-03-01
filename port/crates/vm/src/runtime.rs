@@ -270,11 +270,28 @@ fn make_err(msg: &str) -> Value {
     })
 }
 
+/// Construct a `(Some value)` ADT value.
+fn make_some(value: Value) -> Value {
+    Value::object(VMObject::AdtValue {
+        tag: "Some".to_string(),
+        fields: vec![value],
+    })
+}
+
+/// Construct a `None` ADT value.
+fn make_none() -> Value {
+    Value::object(VMObject::AdtValue {
+        tag: "None".to_string(),
+        fields: vec![],
+    })
+}
+
 fn make_dummy_closure() -> Closure {
     Closure {
         proto: Arc::new(FunctionPrototype {
             name: "<scheduler>".to_string(),
             arity: 0,
+            is_variadic: false,
             upvalues: Vec::new(),
             chunk: Chunk::new(),
         }),
@@ -309,6 +326,7 @@ const HANDLED_EFFECTS: &[&str] = &[
     "tcp-send",
     "tcp-recv",
     "tcp-close",
+    "tcp-close-listener",
     // Exception effect (default handler crashes the fiber)
     "throw",
 ];
@@ -451,26 +469,29 @@ fn handle_effect(
                 .ok_or_else(|| VMError::runtime("chan-send: invalid channel"))?;
 
             if chan.closed {
-                return Err(VMError::runtime("Cannot send on closed channel"));
-            }
-
-            if !chan.waiting_receivers.is_empty() {
+                drop(channels);
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: make_err("channel is closed"),
+                    pid: sched.current_pid,
+                });
+            } else if !chan.waiting_receivers.is_empty() {
                 let receiver = chan.waiting_receivers.remove(0);
                 drop(channels);
-                // Wake the receiver on its scheduler
+                // Wake the receiver on its scheduler, wrapped in Some
                 wake_fiber(
                     sched,
                     shared,
                     receiver.pid,
                     Fiber::Suspended {
                         continuation: receiver.continuation,
-                        resume_value: value,
+                        resume_value: make_some(value),
                         pid: receiver.pid,
                     },
                 );
                 sched.ready_queue.push_back(Fiber::Suspended {
                     continuation: cont,
-                    resume_value: Value::nil(),
+                    resume_value: make_ok(Value::nil()),
                     pid: sched.current_pid,
                 });
             } else if chan.buffer.len() < chan.capacity {
@@ -478,7 +499,7 @@ fn handle_effect(
                 drop(channels);
                 sched.ready_queue.push_back(Fiber::Suspended {
                     continuation: cont,
-                    resume_value: Value::nil(),
+                    resume_value: make_ok(Value::nil()),
                     pid: sched.current_pid,
                 });
             } else {
@@ -512,7 +533,7 @@ fn handle_effect(
                         sender.pid,
                         Fiber::Suspended {
                             continuation: sender.continuation,
-                            resume_value: Value::nil(),
+                            resume_value: make_ok(Value::nil()),
                             pid: sender.pid,
                         },
                     );
@@ -521,7 +542,7 @@ fn handle_effect(
                 }
                 sched.ready_queue.push_back(Fiber::Suspended {
                     continuation: cont,
-                    resume_value: value,
+                    resume_value: make_some(value),
                     pid: sched.current_pid,
                 });
             } else if !chan.waiting_senders.is_empty() {
@@ -533,20 +554,20 @@ fn handle_effect(
                     sender.pid,
                     Fiber::Suspended {
                         continuation: sender.continuation,
-                        resume_value: Value::nil(),
+                        resume_value: make_ok(Value::nil()),
                         pid: sender.pid,
                     },
                 );
                 sched.ready_queue.push_back(Fiber::Suspended {
                     continuation: cont,
-                    resume_value: sender.value,
+                    resume_value: make_some(sender.value),
                     pid: sched.current_pid,
                 });
             } else if chan.closed {
                 drop(channels);
                 sched.ready_queue.push_back(Fiber::Suspended {
                     continuation: cont,
-                    resume_value: Value::nil(),
+                    resume_value: make_none(),
                     pid: sched.current_pid,
                 });
             } else {
@@ -568,6 +589,7 @@ fn handle_effect(
 
             chan.closed = true;
             let receivers: Vec<WaitingReceiver> = chan.waiting_receivers.drain(..).collect();
+            let senders: Vec<WaitingSender> = chan.waiting_senders.drain(..).collect();
             drop(channels);
 
             for receiver in receivers {
@@ -577,8 +599,21 @@ fn handle_effect(
                     receiver.pid,
                     Fiber::Suspended {
                         continuation: receiver.continuation,
-                        resume_value: Value::nil(),
+                        resume_value: make_none(),
                         pid: receiver.pid,
+                    },
+                );
+            }
+            // Wake all blocked senders with Err
+            for sender in senders {
+                wake_fiber(
+                    sched,
+                    shared,
+                    sender.pid,
+                    Fiber::Suspended {
+                        continuation: sender.continuation,
+                        resume_value: make_err("channel is closed"),
+                        pid: sender.pid,
                     },
                 );
             }
@@ -843,10 +878,10 @@ fn handle_effect(
             shared.pending_io.fetch_add(1, Ordering::AcqRel);
 
             shared.tokio_handle.spawn(async move {
-                let result = tokio::fs::read_to_string(&path)
-                    .await
-                    .map(|s| Value::string(&*s))
-                    .map_err(|e| format!("read-file: {}", e));
+                let result = match tokio::fs::read_to_string(&path).await {
+                    Ok(s) => Ok(make_ok(Value::string(&*s))),
+                    Err(e) => Ok(make_err(&format!("read-file: {}", e))),
+                };
                 let _ = sender.send(SchedulerMessage::IoComplete { pid, result });
             });
         }
@@ -869,10 +904,10 @@ fn handle_effect(
             shared.pending_io.fetch_add(1, Ordering::AcqRel);
 
             shared.tokio_handle.spawn(async move {
-                let result = tokio::fs::write(&path, content.as_bytes())
-                    .await
-                    .map(|_| Value::nil())
-                    .map_err(|e| format!("write-file: {}", e));
+                let result = match tokio::fs::write(&path, content.as_bytes()).await {
+                    Ok(_) => Ok(make_ok(Value::nil())),
+                    Err(e) => Ok(make_err(&format!("write-file: {}", e))),
+                };
                 let _ = sender.send(SchedulerMessage::IoComplete { pid, result });
             });
         }
@@ -1098,17 +1133,17 @@ fn handle_effect(
                 // Local listener
                 if let Some(listener_state) = sched.tcp_listeners.get_mut(&listener_id) {
                     if let Some(socket_id) = listener_state.accept_queue.pop_front() {
-                        // Connection already waiting
+                        // Connection already waiting — wrap in Some
                         sched.ready_queue.push_back(Fiber::Suspended {
                             continuation: cont,
-                            resume_value: Value::object(VMObject::Port(socket_id)),
+                            resume_value: make_some(Value::object(VMObject::Port(socket_id))),
                             pid: sched.current_pid,
                         });
                     } else if listener_state.shutdown_tx.is_none() {
-                        // Listener is closed
+                        // Listener is closed — return None
                         sched.ready_queue.push_back(Fiber::Suspended {
                             continuation: cont,
-                            resume_value: Value::nil(),
+                            resume_value: make_none(),
                             pid: sched.current_pid,
                         });
                     } else {
@@ -1116,7 +1151,12 @@ fn handle_effect(
                         listener_state.waiting_accept = Some((sched.current_pid, cont));
                     }
                 } else {
-                    return Err(VMError::runtime("tcp-accept: invalid listener"));
+                    // Local owner but listener state gone — treat as closed
+                    sched.ready_queue.push_back(Fiber::Suspended {
+                        continuation: cont,
+                        resume_value: make_none(),
+                        pid: sched.current_pid,
+                    });
                 }
             } else if let Some(target_sched) = owner {
                 // Remote listener — route to owning scheduler
@@ -1131,7 +1171,12 @@ fn handle_effect(
                     },
                 ));
             } else {
-                return Err(VMError::runtime("tcp-accept: unknown listener"));
+                // Listener not in any ownership map — treat as closed
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: make_none(),
+                    pid: sched.current_pid,
+                });
             }
         }
 
@@ -1183,7 +1228,12 @@ fn handle_effect(
                         let _ = sender.send(SchedulerMessage::IoComplete { pid, result });
                     });
                 } else {
-                    return Err(VMError::runtime("tcp-send: unknown socket"));
+                    // Local owner but socket state gone — treat as closed
+                    sched.ready_queue.push_back(Fiber::Suspended {
+                        continuation: cont,
+                        resume_value: make_err("tcp-send: unknown socket"),
+                        pid: sched.current_pid,
+                    });
                 }
             } else if let Some(target_sched) = owner {
                 // Remote socket — route to owning scheduler
@@ -1197,7 +1247,12 @@ fn handle_effect(
                     },
                 ));
             } else {
-                return Err(VMError::runtime("tcp-send: unknown socket"));
+                // Socket not in any ownership map — treat as closed
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: make_err("tcp-send: unknown socket"),
+                    pid: sched.current_pid,
+                });
             }
         }
 
@@ -1220,18 +1275,18 @@ fn handle_effect(
                 // Local socket
                 if let Some(socket_state) = sched.tcp_sockets.get_mut(&socket_id) {
                     if let Some(data) = socket_state.recv_queue.pop_front() {
-                        // Data available
+                        // Data available — wrap in Some
                         let s = String::from_utf8_lossy(&data).into_owned();
                         sched.ready_queue.push_back(Fiber::Suspended {
                             continuation: cont,
-                            resume_value: Value::string(&*s),
+                            resume_value: make_some(Value::string(&*s)),
                             pid: sched.current_pid,
                         });
                     } else if socket_state.closed {
-                        // Socket closed, no more data
+                        // Socket closed, no more data — return None
                         sched.ready_queue.push_back(Fiber::Suspended {
                             continuation: cont,
-                            resume_value: Value::nil(),
+                            resume_value: make_none(),
                             pid: sched.current_pid,
                         });
                     } else {
@@ -1239,7 +1294,12 @@ fn handle_effect(
                         socket_state.waiting_recv = Some((sched.current_pid, cont));
                     }
                 } else {
-                    return Err(VMError::runtime("tcp-recv: unknown socket"));
+                    // Local owner but socket state gone — treat as closed
+                    sched.ready_queue.push_back(Fiber::Suspended {
+                        continuation: cont,
+                        resume_value: make_none(),
+                        pid: sched.current_pid,
+                    });
                 }
             } else if let Some(target_sched) = owner {
                 // Remote socket — route to owning scheduler
@@ -1253,7 +1313,12 @@ fn handle_effect(
                     },
                 ));
             } else {
-                return Err(VMError::runtime("tcp-recv: unknown socket"));
+                // Socket not in any ownership map — treat as closed
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: make_none(),
+                    pid: sched.current_pid,
+                });
             }
         }
 
@@ -1287,11 +1352,11 @@ fn handle_effect(
                             let mut owners = shared.tcp_listener_owners.lock().unwrap();
                             owners.remove(&id);
                         }
-                        // Wake any fiber waiting on accept with nil
+                        // Wake any fiber waiting on accept with None
                         if let Some((wait_pid, wait_cont)) = listener_state.waiting_accept.take() {
                             sched.ready_queue.push_back(Fiber::Suspended {
                                 continuation: wait_cont,
-                                resume_value: Value::nil(),
+                                resume_value: make_none(),
                                 pid: wait_pid,
                             });
                         }
@@ -1335,6 +1400,66 @@ fn handle_effect(
                 }
                 // Unknown ID — might already be closed, ignore
             }
+
+            // Resume fiber immediately
+            sched.ready_queue.push_back(Fiber::Suspended {
+                continuation: cont,
+                resume_value: Value::nil(),
+                pid: sched.current_pid,
+            });
+        }
+
+        "tcp-close-listener" => {
+            let id = args
+                .first()
+                .and_then(|v| match v.as_object() {
+                    Some(VMObject::Port(id)) => Some(*id),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    VMError::runtime("tcp-close-listener: argument must be a listener")
+                })?;
+
+            let listener_owner = {
+                let owners = shared.tcp_listener_owners.lock().unwrap();
+                owners.get(&id).copied()
+            };
+
+            if let Some(owner_sched) = listener_owner {
+                if owner_sched == sched.id {
+                    // Close local listener
+                    if let Some(mut listener_state) = sched.tcp_listeners.remove(&id) {
+                        if let Some(tx) = listener_state.shutdown_tx.take() {
+                            let _ = tx.send(());
+                        }
+                        shared.active_listeners.fetch_sub(1, Ordering::AcqRel);
+                        {
+                            let mut owners = shared.tcp_listener_owners.lock().unwrap();
+                            owners.remove(&id);
+                        }
+                        // Wake any fiber waiting on accept with None
+                        if let Some((wait_pid, wait_cont)) = listener_state.waiting_accept.take() {
+                            sched.ready_queue.push_back(Fiber::Suspended {
+                                continuation: wait_cont,
+                                resume_value: make_none(),
+                                pid: wait_pid,
+                            });
+                        }
+                    }
+                } else {
+                    // Remote listener — route to owning scheduler
+                    sched.io_parked.insert(sched.current_pid, cont.clone());
+                    let _ = shared.scheduler_senders[owner_sched].send(SchedulerMessage::TcpOp(
+                        TcpOp::Close {
+                            socket_id: id,
+                            fiber_pid: sched.current_pid,
+                            reply_scheduler: sched.id,
+                        },
+                    ));
+                    return Ok(());
+                }
+            }
+            // Unknown ID — might already be closed, ignore
 
             // Resume fiber immediately
             sched.ready_queue.push_back(Fiber::Suspended {
@@ -1610,16 +1735,16 @@ fn kill_fiber_shared(
 // TCP helpers
 // ---------------------------------------------------------------------------
 
-/// Close a local TCP socket: mark closed, wake waiting receiver with nil,
+/// Close a local TCP socket: mark closed, wake waiting receiver with None,
 /// drop the write handle, remove from ownership.
 fn tcp_close_socket(sched: &mut PerScheduler, shared: &SharedState, socket_id: u64) {
     if let Some(mut socket_state) = sched.tcp_sockets.remove(&socket_id) {
         socket_state.closed = true;
-        // Wake any fiber waiting on recv with nil
+        // Wake any fiber waiting on recv with None
         if let Some((wait_pid, wait_cont)) = socket_state.waiting_recv.take() {
             sched.ready_queue.push_back(Fiber::Suspended {
                 continuation: wait_cont,
-                resume_value: Value::nil(),
+                resume_value: make_none(),
                 pid: wait_pid,
             });
         }
@@ -1637,11 +1762,11 @@ fn tcp_close_socket(sched: &mut PerScheduler, shared: &SharedState, socket_id: u
 fn tcp_handle_data(sched: &mut PerScheduler, socket_id: u64, data: Vec<u8>) {
     if let Some(socket_state) = sched.tcp_sockets.get_mut(&socket_id) {
         if let Some((wait_pid, wait_cont)) = socket_state.waiting_recv.take() {
-            // Fiber is waiting — deliver immediately
+            // Fiber is waiting — deliver immediately, wrapped in Some
             let s = String::from_utf8_lossy(&data).into_owned();
             sched.ready_queue.push_back(Fiber::Suspended {
                 continuation: wait_cont,
-                resume_value: Value::string(&*s),
+                resume_value: make_some(Value::string(&*s)),
                 pid: wait_pid,
             });
         } else {
@@ -1656,11 +1781,11 @@ fn tcp_handle_data(sched: &mut PerScheduler, socket_id: u64, data: Vec<u8>) {
 fn tcp_handle_closed(sched: &mut PerScheduler, socket_id: u64) {
     if let Some(socket_state) = sched.tcp_sockets.get_mut(&socket_id) {
         socket_state.closed = true;
-        // Wake any fiber waiting on recv with nil
+        // Wake any fiber waiting on recv with None
         if let Some((wait_pid, wait_cont)) = socket_state.waiting_recv.take() {
             sched.ready_queue.push_back(Fiber::Suspended {
                 continuation: wait_cont,
-                resume_value: Value::nil(),
+                resume_value: make_none(),
                 pid: wait_pid,
             });
         }
@@ -1703,7 +1828,7 @@ fn tcp_handle_accepted(
         if let Some((wait_pid, wait_cont)) = listener_state.waiting_accept.take() {
             sched.ready_queue.push_back(Fiber::Suspended {
                 continuation: wait_cont,
-                resume_value: Value::object(VMObject::Port(socket_id)),
+                resume_value: make_some(Value::object(VMObject::Port(socket_id))),
                 pid: wait_pid,
             });
         } else {
@@ -1763,53 +1888,19 @@ fn tcp_handle_op(sched: &mut PerScheduler, shared: &SharedState, op: TcpOp) {
                     let _ = shared.scheduler_senders[reply_scheduler].send(
                         SchedulerMessage::TcpOpResult {
                             fiber_pid,
-                            result: Ok(Value::string(&*s)),
+                            result: Ok(make_some(Value::string(&*s))),
                         },
                     );
                 } else if socket_state.closed {
                     let _ = shared.scheduler_senders[reply_scheduler].send(
                         SchedulerMessage::TcpOpResult {
                             fiber_pid,
-                            result: Ok(Value::nil()),
+                            result: Ok(make_none()),
                         },
                     );
                 } else {
-                    // No data yet — we can't park on a remote scheduler easily.
-                    // Instead, store the waiting info and when data arrives, send result back.
-                    // We reuse waiting_recv but with the reply_scheduler info encoded.
-                    // For cross-scheduler, we store a sentinel and handle it in tcp_handle_data.
-                    // Actually, let's use a different approach: store the reply info in a separate map.
-                    // For simplicity, just park the fiber on the reply scheduler's io_parked
-                    // and when data arrives, send TcpOpResult back.
-                    // We need to store the waiting info here on the owning scheduler.
-                    socket_state.waiting_recv = Some((fiber_pid, Value::nil())); // sentinel
-                    // Store reply info — we need to know where to send the result
-                    // We'll embed reply_scheduler in the waiting_recv by using a special approach
-                    // Actually the cleanest way: add a remote_waiting field to TcpSocketState
-                    // But for now, let's use a pragmatic approach:
-                    // When tcp_handle_data fires and waiting_recv has a pid that's not in our
-                    // local ready_queue, it's a remote fiber. Send via TcpOpResult.
-                    // Hmm, this is getting complex. Let me use a dedicated field.
-
-                    // For now: just respond with nil immediately. The caller will retry or handle it.
-                    // Actually, a better approach: since the fiber is parked on io_parked on the
-                    // reply scheduler, we can just route the TcpData when it arrives.
-                    // But TcpData goes to the socket's owning scheduler...
-                    // The right solution: add remote_recv_waiter to TcpSocketState.
-                    // Let's do that.
-                    socket_state.waiting_recv = None; // undo
-                    // For now, fall back to a simple model: if no data, park here.
-                    // We can't easily park across schedulers for recv. Let's make it simple:
-                    // wake the remote fiber with nil (not ideal) or store the waiter info.
-
-                    // Actually let's just store the remote waiter info properly:
-                    // We'll use waiting_recv with a special value. When data arrives,
-                    // tcp_handle_data checks if it should send locally or remotely.
-
-                    // Clean solution: waiting_recv stores Option<(pid, cont, Option<reply_scheduler>)>
-                    // But that changes the type. Simplest: don't support cross-scheduler tcp-recv for now.
-                    // In practice, sockets are used by the fiber that created them, which is on the
-                    // same scheduler. Cross-scheduler socket operations are very rare.
+                    // Cross-scheduler recv not yet supported when no data is buffered.
+                    // In practice, sockets are used by the fiber that created them.
                     let _ = shared.scheduler_senders[reply_scheduler].send(
                         SchedulerMessage::TcpOpResult {
                             fiber_pid,
@@ -1824,14 +1915,14 @@ fn tcp_handle_op(sched: &mut PerScheduler, shared: &SharedState, op: TcpOp) {
                         let _ = shared.scheduler_senders[reply_scheduler].send(
                             SchedulerMessage::TcpOpResult {
                                 fiber_pid,
-                                result: Ok(Value::object(VMObject::Port(sid))),
+                                result: Ok(make_some(Value::object(VMObject::Port(sid)))),
                             },
                         );
                     } else if listener_state.shutdown_tx.is_none() {
                         let _ = shared.scheduler_senders[reply_scheduler].send(
                             SchedulerMessage::TcpOpResult {
                                 fiber_pid,
-                                result: Ok(Value::nil()),
+                                result: Ok(make_none()),
                             },
                         );
                     } else {
@@ -1846,10 +1937,11 @@ fn tcp_handle_op(sched: &mut PerScheduler, shared: &SharedState, op: TcpOp) {
                         );
                     }
                 } else {
+                    // Not a socket or listener — treat as closed
                     let _ = shared.scheduler_senders[reply_scheduler].send(
                         SchedulerMessage::TcpOpResult {
                             fiber_pid,
-                            result: Ok(make_err("tcp-recv: unknown socket")),
+                            result: Ok(make_none()),
                         },
                     );
                 }
@@ -1875,7 +1967,7 @@ fn tcp_handle_op(sched: &mut PerScheduler, shared: &SharedState, op: TcpOp) {
                     if let Some((wait_pid, wait_cont)) = listener_state.waiting_accept.take() {
                         sched.ready_queue.push_back(Fiber::Suspended {
                             continuation: wait_cont,
-                            resume_value: Value::nil(),
+                            resume_value: make_none(),
                             pid: wait_pid,
                         });
                     }

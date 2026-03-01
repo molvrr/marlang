@@ -46,8 +46,8 @@ cargo run -p marlang-cli -- repl                   # Interactive REPL
 ```bash
 cargo test --workspace                # Run all Rust tests
 cargo test -p marlang-core            # Core: lexer + parser (75 tests)
-cargo test -p marlang-types           # Type system (90 tests)
-cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI + scheduler + macros + TCP + Exception (318 tests)
+cargo test -p marlang-types           # Type system (100 tests)
+cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI + scheduler + macros + TCP + Exception + Variadic (331 tests)
 ```
 
 ### Running .mar Programs
@@ -144,14 +144,14 @@ Defined in `interpreter.ts` builtins array (tree-walker) and `builtins.ts` (VM):
 - Arithmetic: `+`, `-`, `*`, `/`, `negate`
 - Comparison: `<`, `>`, `=`, `<=`, `>=`
 - Lists: `list`
-- Strings: `show`, `string-length`, `string-append`, `number->string`, `string->number`
+- Strings: `show`, `string-length`, `string-append`, `number->string`, `__try-string->number`
 - FFI: `ffi-open`, `ffi-call`, `ffi-close` (both tree-walker and VM)
 - Structs: `ffi-struct`, `struct-new`, `struct-get`, `struct-set` (both tree-walker and VM)
 - Macros: `make-symbol`, `gensym`, `symbol->string`, `string->symbol` (VM only)
 - Type predicates: `symbol?`, `pair?`, `nil?`, `number?`, `string?`, `list?` (VM only)
 - Environment: `env-bindings`, `env-get`, `env-parent` (tree-walker only)
 
-Note: In the Rust port, ADT constructors (None, Some, Nil, Cons, MkPair, Ok, Err) and utility functions (not, cons, car, cdr, append) are defined in `stdlib/prelude.mar`, not as Rust builtins. The prelude is auto-loaded before every program.
+Note: In the Rust port, ADT constructors (None, Some, Nil, Cons, MkPair, Ok, Err) and utility functions (not, cons, car, cdr, append, string->number) are defined in `stdlib/prelude.mar`, not as Rust builtins. The prelude is auto-loaded before every program.
 
 ### Known Issues (Rust Port)
 
@@ -159,7 +159,7 @@ Note: In the Rust port, ADT constructors (None, Some, Nil, Cons, MkPair, Ok, Err
 
 2. **Recursive `define` + TCP effects hangs:** Using `(define f (lambda () ... (f)))` inside `fiber-spawn` where the body does TCP effects causes hangs. The `define` sets a global, but after TCP suspend/resume the `PUSH_GLOBAL` may not resolve. Workaround: unroll recursion or avoid combining recursive `define` with scheduler-suspending effects.
 
-3. **Type checker rejects `net.mar`:** Running with type checking fails on parameterized types like `(Result String TcpSocket)` in effect signatures. Always use `--no-typecheck` for programs importing `std:net`.
+3. **~~Type checker rejects `net.mar` / `tcp.mar`~~:** FIXED. Two issues resolved: (a) `string-append` was typed as binary but runtime was variadic — fixed via full variadic function support with rest types `(-> (... T) R)` and dot notation `(lambda (a . rest) ...)`; (b) `tcp-accept`/`tcp-recv` returned raw `nil` but were typed as returning `TcpSocket`/`String` — fixed by making runtime return `Option`-wrapped values (`Some`/`None` ADT), updating effect signatures, and adding `tcp-close-listener` for type-safe listener close. Both `net.mar` and `tcp.mar` type check successfully.
 
 4. **`handle`/`throw` unreliable across scheduler effects:** User `handle` blocks don't work correctly when the body performs scheduler-suspending effects (TCP, etc.). Workaround: use `try-` wrappers and match on Result directly.
 
@@ -170,8 +170,29 @@ Both tree-walker and VM provide built-in handlers for IO effects (no `handle` bl
 - `print` — write string to stdout (no newline)
 - `println` — write string to stdout with newline
 - `read-line` — read a line from stdin
-- `read-file` — read file contents as string
-- `write-file` — write string to file
+- `read-file` — returns `(Result String String)` — `(Ok content)` or `(Err msg)` on IO error
+- `write-file` — returns `(Result String Unit)` — `(Ok nil)` or `(Err msg)` on IO error
+
+### Failable Operations Convention
+Operations that can fail at runtime follow a consistent pattern:
+- **Raw effect**: returns `(Result String a)` or `(Option a)` — caller matches on result
+- **Throwing wrapper** (name ends with `!`): unwraps the Result and does `(perform throw msg)` on error via the Exception effect
+- Examples: `chan-send` / `chan-send!`, `read-file` / `read-file!`, `write-file` / `write-file!`, TCP `try-connect` / `connect`
+
+### Exception Effect
+The `Exception` effect is declared in the prelude with a polymorphic return type:
+```lisp
+(effect Exception
+  (throw (-> String a)))
+```
+The `a` return type allows `(perform throw msg)` to unify with any expected type (since it never actually returns). Without a handler, `throw` crashes the fiber. Use `handle` to catch exceptions:
+```lisp
+(handle (string->number "abc")
+  ((throw msg k) -> (perform println (string-append "caught: " msg))))
+```
+
+### string->number
+`string->number` is defined in the prelude as a wrapper around the `__try-string->number` builtin. On parse failure, it does `(perform throw ...)`. The raw builtin `__try-string->number` returns `(Option Float)` — `(Some n)` on success, `None` on failure.
 
 ## Code Conventions
 

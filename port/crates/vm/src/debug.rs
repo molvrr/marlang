@@ -57,7 +57,11 @@ pub fn get_annotation(chunk: &Chunk, inst: &Instruction) -> Option<String> {
         Op::Closure => {
             let constant = chunk.constants.get(inst.operand as usize)?;
             if let ConstantValue::Prototype(proto) = constant {
-                Some(format!("<fn {}/{}>", proto.name, proto.arity))
+                let variadic_marker = if proto.is_variadic { "+" } else { "" };
+                Some(format!(
+                    "<fn {}/{}{}>",
+                    proto.name, proto.arity, variadic_marker
+                ))
             } else {
                 None
             }
@@ -87,7 +91,8 @@ fn format_constant(constant: &ConstantValue) -> String {
         }
         ConstantValue::Nil => "nil".to_string(),
         ConstantValue::Prototype(proto) => {
-            format!("<fn {}/{}>", proto.name, proto.arity)
+            let variadic_marker = if proto.is_variadic { "+" } else { "" };
+            format!("<fn {}/{}{}>", proto.name, proto.arity, variadic_marker)
         }
         ConstantValue::FfiSigs(sigs) => {
             format!("<ffi-sigs({})>", sigs.len())

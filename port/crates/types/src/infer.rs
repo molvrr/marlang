@@ -84,8 +84,7 @@ fn variadic_arith_ops() -> HashMap<&'static str, VariadicArithInfo> {
     m
 }
 
-const FFI_VARIADIC_FUNCTIONS: &[&str] =
-    &["ffi-call", "struct-new", "struct-get", "struct-set", "list"];
+const FFI_VARIADIC_FUNCTIONS: &[&str] = &["ffi-call", "struct-new", "struct-get", "struct-set"];
 
 // ===== Type Expression Parsing =====
 
@@ -125,7 +124,7 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
 
             let first_sym = get_symbol(elements[0], interner);
 
-            // Arrow type: (-> a b c)
+            // Arrow type: (-> a b c) or (-> a (... b) c) for variadic
             if first_sym == Some("->") {
                 if elements.len() < 2 {
                     return Err(TypeError::InvalidTypeAnnotation {
@@ -134,13 +133,43 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                     });
                 }
                 let mut types = Vec::new();
+                let mut rest_type: Option<Type> = None;
                 for e in &elements[1..] {
+                    // Check for (... T) rest type syntax
+                    if let Expr::List { .. } = e {
+                        let sub_elems = list_to_array(e);
+                        if sub_elems.len() == 2 {
+                            if let Some("...") = get_symbol(sub_elems[0], interner) {
+                                if rest_type.is_some() {
+                                    return Err(TypeError::InvalidTypeAnnotation {
+                                        message:
+                                            "Arrow type can have at most one (... T) rest type"
+                                                .into(),
+                                        span: None,
+                                    });
+                                }
+                                rest_type = Some(parse_type_expr(sub_elems[1], env, interner)?);
+                                continue;
+                            }
+                        }
+                    }
                     types.push(parse_type_expr(e, env, interner)?);
                 }
-                if types.len() == 1 {
+                if types.is_empty() && rest_type.is_some() {
+                    // (-> (... T) R) — variadic with no required params, result is from rest_type? No.
+                    // Actually this means: no required params, no result parsed yet. That's malformed.
+                    return Err(TypeError::InvalidTypeAnnotation {
+                        message: "Arrow type needs at least a result type".into(),
+                        span: None,
+                    });
+                }
+                if types.len() == 1 && rest_type.is_none() {
                     return Ok(type_arrow(vec![], types.pop().unwrap()));
                 }
                 let result = types.pop().unwrap();
+                if let Some(rest_ty) = rest_type {
+                    return Ok(type_arrow_variadic(types, rest_ty, result));
+                }
                 return Ok(type_arrow(types, result));
             }
 
@@ -465,9 +494,33 @@ fn infer_lambda(
 
     let param_list = list_to_array(params_expr);
     let mut params: Vec<(String, Type)> = Vec::new();
+    let mut rest_param: Option<(String, Type)> = None; // (name, element_type)
     let mut param_env = child_env(env);
 
-    for param in &param_list {
+    // Detect dot notation: (a b . rest) => param_list = [a, b, ., rest]
+    let dot_pos = param_list
+        .iter()
+        .position(|p| get_symbol(p, interner) == Some("."));
+
+    let (required_params, rest_param_expr) = if let Some(pos) = dot_pos {
+        if pos + 1 >= param_list.len() {
+            return Err(TypeError::InvalidTypeAnnotation {
+                message: "rest parameter name expected after '.'".into(),
+                span: None,
+            });
+        }
+        if pos + 2 != param_list.len() {
+            return Err(TypeError::InvalidTypeAnnotation {
+                message: "only one rest parameter name allowed after '.'".into(),
+                span: None,
+            });
+        }
+        (&param_list[..pos], Some(param_list[pos + 1]))
+    } else {
+        (&param_list[..], None)
+    };
+
+    for param in required_params {
         // Check for annotated param: (x : Int)
         if let Expr::List { .. } = param {
             let param_elements = list_to_array(param);
@@ -514,6 +567,50 @@ fn infer_lambda(
         );
     }
 
+    // Handle rest parameter
+    if let Some(rest_expr) = rest_param_expr {
+        // Check for annotated rest param: (rest : Type) — Type is the element type
+        let (rest_name, elem_type) = if let Expr::List { .. } = rest_expr {
+            let param_elements = list_to_array(rest_expr);
+            if param_elements.len() == 3 && is_symbol(param_elements[1], interner, ":") {
+                let name = get_symbol(param_elements[0], interner).ok_or(
+                    TypeError::InvalidTypeAnnotation {
+                        message: "Rest parameter name must be a symbol".into(),
+                        span: None,
+                    },
+                )?;
+                let ty = parse_type_expr(param_elements[2], env, interner)?;
+                (name, ty)
+            } else {
+                return Err(TypeError::InvalidTypeAnnotation {
+                    message: "Rest parameter must be a symbol or (name : Type)".into(),
+                    span: None,
+                });
+            }
+        } else {
+            let name = get_symbol(rest_expr, interner).ok_or(TypeError::InvalidTypeAnnotation {
+                message: "Rest parameter must be a symbol".into(),
+                span: None,
+            })?;
+            (name, fresh_type_var())
+        };
+
+        // The rest parameter has type (List elem_type) in the function body
+        let list_type = t_list(elem_type.clone());
+        param_env = extend_env(
+            &param_env,
+            rest_name,
+            TypeScheme {
+                quantified_vars: vec![],
+                qual_type: QualType {
+                    constraints: vec![],
+                    ty: list_type,
+                },
+            },
+        );
+        rest_param = Some((rest_name.to_string(), elem_type));
+    }
+
     // Infer body
     let mut body_subst = empty_subst();
     let mut body_type = t_unit();
@@ -537,6 +634,7 @@ fn infer_lambda(
         .iter()
         .map(|(_, t)| apply_subst(&body_subst, t))
         .collect();
+    let rest_type = rest_param.map(|(_, t)| apply_subst(&body_subst, &t));
     let result_type = apply_subst(&body_subst, &body_type);
     let fn_effects =
         if !body_effects.effects().is_empty() || matches!(body_effects, EffectRow::Open { .. }) {
@@ -544,7 +642,11 @@ fn infer_lambda(
         } else {
             None
         };
-    let fn_type = type_arrow_with_effects(param_types, fn_effects, result_type);
+    let fn_type = if let Some(rest_ty) = rest_type {
+        type_arrow_variadic_with_effects(param_types, rest_ty, fn_effects, result_type)
+    } else {
+        type_arrow_with_effects(param_types, fn_effects, result_type)
+    };
 
     Ok(InferResult {
         ty: fn_type,
@@ -2182,6 +2284,7 @@ fn ffi_type_to_marlang(ty: &Type, env: &TypeEnv) -> Result<Type, TypeError> {
         },
         Type::Arrow {
             params,
+            rest,
             effects,
             result,
         } => {
@@ -2189,9 +2292,14 @@ fn ffi_type_to_marlang(ty: &Type, env: &TypeEnv) -> Result<Type, TypeError> {
             for p in params {
                 new_params.push(ffi_type_to_marlang(p, env)?);
             }
+            let new_rest = match rest {
+                Some(r) => Some(Box::new(ffi_type_to_marlang(r, env)?)),
+                None => None,
+            };
             let new_result = ffi_type_to_marlang(result, env)?;
             Ok(Type::Arrow {
                 params: new_params,
+                rest: new_rest,
                 effects: effects.clone(),
                 result: Box::new(new_result),
             })

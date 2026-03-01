@@ -160,7 +160,7 @@ pub fn create_builtin_env() -> TypeEnv {
         "list",
         polytype(
             vec!["a"],
-            type_arrow(vec![type_var("a")], t_list(type_var("a"))),
+            type_arrow_variadic(vec![], type_var("a"), t_list(type_var("a"))),
         ),
     );
 
@@ -306,12 +306,12 @@ pub fn create_builtin_env() -> TypeEnv {
     env = extend_env(
         &env,
         "string-concat",
-        monotype(type_arrow(vec![t_string(), t_string()], t_string())),
+        monotype(type_arrow_variadic(vec![], t_string(), t_string())),
     );
     env = extend_env(
         &env,
         "string-append",
-        monotype(type_arrow(vec![t_string(), t_string()], t_string())),
+        monotype(type_arrow_variadic(vec![], t_string(), t_string())),
     );
     env = extend_env(
         &env,
@@ -422,6 +422,18 @@ pub fn create_builtin_env() -> TypeEnv {
         monotype(type_arrow(vec![t_int()], t_string())),
     );
 
+    // number/string conversion builtins
+    env = extend_env(
+        &env,
+        "number->string",
+        monotype(type_arrow(vec![t_float()], t_string())),
+    );
+    env = extend_env(
+        &env,
+        "__try-string->number",
+        monotype(type_arrow(vec![t_string()], t_option(t_float()))),
+    );
+
     // Concurrency builtins
     env = extend_env(
         &env,
@@ -429,6 +441,17 @@ pub fn create_builtin_env() -> TypeEnv {
         polytype(
             vec!["a"],
             type_arrow(vec![type_arrow(vec![], type_var("a"))], type_var("a")),
+        ),
+    );
+    env = extend_env(
+        &env,
+        "run-fibers-parallel",
+        polytype(
+            vec!["a"],
+            type_arrow(
+                vec![type_arrow(vec![], type_var("a")), t_int()],
+                type_var("a"),
+            ),
         ),
     );
     env = extend_env(
@@ -483,14 +506,14 @@ pub fn create_builtin_env() -> TypeEnv {
                 type_params: vec!["a".into()],
                 constraints: vec![],
                 params: vec![t_channel(), type_var("a")],
-                result: t_unit(),
+                result: type_app(type_const("Result"), vec![t_string(), t_unit()]),
             },
             EffectOp {
                 name: "chan-recv".into(),
                 type_params: vec!["a".into()],
                 constraints: vec![],
                 params: vec![t_channel()],
-                result: type_var("a"),
+                result: t_option(type_var("a")),
             },
             EffectOp {
                 name: "chan-close".into(),
@@ -596,14 +619,14 @@ pub fn create_builtin_env() -> TypeEnv {
                 type_params: vec![],
                 constraints: vec![],
                 params: vec![t_string()],
-                result: t_string(),
+                result: type_app(type_const("Result"), vec![t_string(), t_string()]),
             },
             EffectOp {
                 name: "write-file".into(),
                 type_params: vec![],
                 constraints: vec![],
                 params: vec![t_string(), t_string()],
-                result: t_unit(),
+                result: type_app(type_const("Result"), vec![t_string(), t_unit()]),
             },
         ],
     };

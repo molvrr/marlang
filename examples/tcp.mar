@@ -3,7 +3,7 @@
 ; TCP operations are effects handled by the multi-threaded scheduler.
 ; They require run-fibers-parallel (not run-fibers).
 ;
-; Run with: cargo run -p marlang-cli -- run examples/tcp.mar --no-typecheck
+; Run with: cargo run -p marlang-cli -- run examples/tcp.mar
 
 (import "std:net" as net)
 
@@ -16,13 +16,14 @@
 
     ; Server fiber: accept one connection, echo, close
     (perform fiber-spawn (lambda ()
-      (let ((client (net/accept listener)))
-        (if (= client nil)
-          nil
-          (let ((data (net/recv client)))
-            (if (= data nil)
-              nil
-              (net/send client (string-append "echo: " data)))
+      (match (net/accept listener)
+        (None nil)
+        ((Some client)
+          (begin
+            (match (net/recv client)
+              (None nil)
+              ((Some data)
+                (net/send client (string-append "echo: " data))))
             (net/close client))))))
 
     ; Give server time to start accepting
@@ -32,11 +33,12 @@
     ; Client: connect, send, receive, print
     (let ((sock (net/connect "127.0.0.1" 9001)))
       (net/send sock "hello from marlang!")
-      (let ((resp (net/recv sock)))
-        (perform println resp))
+      (match (net/recv sock)
+        (None nil)
+        ((Some resp) (perform println resp)))
       (net/close sock))
 
-    (net/close listener)))
+    (net/close-listener listener)))
   2)
 
 ; Output:
@@ -70,38 +72,50 @@
 
     ; Server fiber: handle 3 connections
     (perform fiber-spawn (lambda ()
-      (let ((c1 (net/accept listener)))
-        (if (= c1 nil) nil
-          (let ((d1 (net/recv c1)))
-            (net/send c1 (string-append "reply-1: " d1))
+      (match (net/accept listener)
+        (None nil)
+        ((Some c1)
+          (begin
+            (match (net/recv c1)
+              (None nil)
+              ((Some d1)
+                (net/send c1 (string-append "reply-1: " d1))))
             (net/close c1))))
-      (let ((c2 (net/accept listener)))
-        (if (= c2 nil) nil
-          (let ((d2 (net/recv c2)))
-            (net/send c2 (string-append "reply-2: " d2))
+      (match (net/accept listener)
+        (None nil)
+        ((Some c2)
+          (begin
+            (match (net/recv c2)
+              (None nil)
+              ((Some d2)
+                (net/send c2 (string-append "reply-2: " d2))))
             (net/close c2))))
-      (let ((c3 (net/accept listener)))
-        (if (= c3 nil) nil
-          (let ((d3 (net/recv c3)))
-            (net/send c3 (string-append "reply-3: " d3))
+      (match (net/accept listener)
+        (None nil)
+        ((Some c3)
+          (begin
+            (match (net/recv c3)
+              (None nil)
+              ((Some d3)
+                (net/send c3 (string-append "reply-3: " d3))))
             (net/close c3))))))
 
     (perform fiber-yield)
     (perform fiber-yield)
 
     ; Three clients connect sequentially
-    (define do-request (lambda (msg)
-      (let ((sock (net/connect "127.0.0.1" 9002)))
-        (net/send sock msg)
-        (let ((resp (net/recv sock)))
-          (perform println resp)
-          (net/close sock)))))
+    (let ((do-request (lambda (msg)
+            (let ((sock (net/connect "127.0.0.1" 9002)))
+              (net/send sock msg)
+              (match (net/recv sock)
+                (None nil)
+                ((Some resp) (perform println resp)))
+              (net/close sock)))))
+      (do-request "alice")
+      (do-request "bob")
+      (do-request "carol"))
 
-    (do-request "alice")
-    (do-request "bob")
-    (do-request "carol")
-
-    (net/close listener)))
+    (net/close-listener listener)))
   2)
 
 ; Output:
@@ -122,7 +136,7 @@
         (perform println "bound twice (unexpected)"))
       ((Err msg)
         (perform println (string-append "bind error: " msg))))
-    (net/close listener)))
+    (net/close-listener listener)))
   2)
 
 ; Output:

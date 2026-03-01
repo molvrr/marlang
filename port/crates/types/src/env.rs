@@ -33,10 +33,12 @@ pub fn apply_subst(subst: &Substitution, t: &Type) -> Type {
         },
         Type::Arrow {
             params,
+            rest,
             effects,
             result,
         } => Type::Arrow {
             params: params.iter().map(|p| apply_subst(subst, p)).collect(),
+            rest: rest.as_ref().map(|r| Box::new(apply_subst(subst, r))),
             effects: effects.clone(),
             result: Box::new(apply_subst(subst, result)),
         },
@@ -391,10 +393,12 @@ fn rewrite_type(t: &Type, name_map: &HashMap<String, String>) -> Type {
         },
         Type::Arrow {
             params,
+            rest,
             effects,
             result,
         } => Type::Arrow {
             params: params.iter().map(|p| rewrite_type(p, name_map)).collect(),
+            rest: rest.as_ref().map(|r| Box::new(rewrite_type(r, name_map))),
             effects: effects
                 .as_ref()
                 .map(|row| rewrite_effect_row(row, name_map)),

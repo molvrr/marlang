@@ -1,6 +1,6 @@
 use crate::errors::VMError;
 use crate::object::VMObject;
-use crate::value::{Value, format_value};
+use crate::value::{format_value, Value};
 use crate::vm::VM;
 
 /// Register all built-in globals into the VM.
@@ -206,16 +206,22 @@ pub fn register_builtins(vm: &mut VM) {
         Ok(Value::string(s.as_str()))
     });
 
-    builtin(vm, "string->number", |_vm, args| {
+    builtin(vm, "__try-string->number", |_vm, args| {
         if args.len() != 1 {
-            return Err(VMError::runtime("string->number expects 1 argument"));
+            return Err(VMError::runtime("__try-string->number expects 1 argument"));
         }
         let s = args[0]
             .as_string()
-            .ok_or_else(|| VMError::runtime("string->number expects a string"))?;
+            .ok_or_else(|| VMError::runtime("__try-string->number expects a string"))?;
         match s.parse::<f64>() {
-            Ok(n) => Ok(Value::number(n)),
-            Err(_) => Ok(Value::nil()),
+            Ok(n) => Ok(Value::object(VMObject::AdtValue {
+                tag: "Some".to_string(),
+                fields: vec![Value::number(n)],
+            })),
+            Err(_) => Ok(Value::object(VMObject::AdtValue {
+                tag: "None".to_string(),
+                fields: vec![],
+            })),
         }
     });
 

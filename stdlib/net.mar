@@ -12,9 +12,9 @@
 ;   - Try variants (try-connect, try-listen, try-send): return the Result
 ;     directly for the caller to match on.
 ;
-; Non-failable operations (accept, recv, close) are the same in both variants.
-; accept returns nil when the listener is closed.
-; recv returns nil on EOF / remote close.
+; Nullable operations (accept, recv) return (Option a):
+;   accept returns (Some socket) or None when the listener is closed.
+;   recv returns (Some data) or None on EOF / remote close.
 ;
 ; Example usage (throwing):
 ;   (import "std:net" as net)
@@ -22,8 +22,9 @@
 ;   (run-fibers-parallel (lambda ()
 ;     (let ((sock (net/connect "127.0.0.1" 8080)))
 ;       (net/send sock "hello\n")
-;       (let ((resp (net/recv sock)))
-;         (perform println resp))
+;       (match (net/recv sock)
+;         ((Some resp) (perform println resp))
+;         (None (perform println "connection closed")))
 ;       (net/close sock)))
 ;     2)
 ;
@@ -42,17 +43,18 @@
 ; === TCP Effect ===
 ;
 ; Raw effect signatures — failable operations return (Result String a).
-; accept returns the socket or nil (closed listener).
-; recv returns a string or nil (EOF).
+; accept returns (Option TcpSocket) — None when listener is closed.
+; recv returns (Option String) — None on EOF / remote close.
 ; close always succeeds.
 
 (effect Tcp
   (tcp-connect (-> String Int (Result String TcpSocket)))
   (tcp-listen  (-> Int (Result String TcpListener)))
-  (tcp-accept  (-> TcpListener TcpSocket))
+  (tcp-accept  (-> TcpListener (Option TcpSocket)))
   (tcp-send    (-> TcpSocket String (Result String Unit)))
-  (tcp-recv    (-> TcpSocket String))
-  (tcp-close   (-> TcpSocket Unit)))
+  (tcp-recv    (-> TcpSocket (Option String)))
+  (tcp-close   (-> TcpSocket Unit))
+  (tcp-close-listener (-> TcpListener Unit)))
 
 ; === Internal helper ===
 
@@ -104,16 +106,20 @@
 ;
 ; These are the same for both throwing and try variants.
 
-; accept : (-> TcpListener {Tcp} TcpSocket)
+; accept : (-> TcpListener {Tcp} (Option TcpSocket))
 ; Accept the next incoming connection (blocks until one arrives).
-; Returns nil if the listener has been closed.
+; Returns None if the listener has been closed.
 (define accept (lambda (listener) (perform tcp-accept listener)))
 
-; recv : (-> TcpSocket {Tcp} String)
+; recv : (-> TcpSocket {Tcp} (Option String))
 ; Receive data from a TCP socket (blocks until data arrives).
-; Returns nil on EOF or remote close.
+; Returns None on EOF or remote close.
 (define recv (lambda (sock) (perform tcp-recv sock)))
 
 ; close : (-> TcpSocket {Tcp} Unit)
-; Close a TCP socket or listener.
+; Close a TCP socket.
 (define close (lambda (sock) (perform tcp-close sock)))
+
+; close-listener : (-> TcpListener {Tcp} Unit)
+; Close a TCP listener.
+(define close-listener (lambda (listener) (perform tcp-close-listener listener)))

@@ -62,6 +62,7 @@ struct KnownSymbols {
     unquote: Symbol,
     unquote_splicing: Symbol,
     defmacro: Symbol,
+    dot: Symbol,
 }
 
 impl KnownSymbols {
@@ -100,6 +101,7 @@ impl KnownSymbols {
             unquote: interner.intern("unquote"),
             unquote_splicing: interner.intern("unquote-splicing"),
             defmacro: interner.intern("defmacro"),
+            dot: interner.intern("."),
         }
     }
 }
@@ -595,10 +597,39 @@ impl<'a> Compiler<'a> {
 
         let params_expr = elements[1];
         let param_exprs = ast::list_to_array(params_expr);
-        let mut params = Vec::new();
-        for p in &param_exprs {
-            params.push(self.get_param_name(p)?);
-        }
+
+        // Detect dot notation for rest params: (a b . rest)
+        let dot_pos = param_exprs.iter().position(|p| {
+            matches!(p, Expr::Atom(LispValue::Symbol(sym), _) if *sym == self.known_symbols.dot)
+        });
+
+        let (required_params, rest_param, is_variadic) = if let Some(pos) = dot_pos {
+            if pos + 1 >= param_exprs.len() {
+                return Err(CompileError::new(
+                    "rest parameter name expected after '.'",
+                    line,
+                ));
+            }
+            if pos + 2 != param_exprs.len() {
+                return Err(CompileError::new(
+                    "only one rest parameter name allowed after '.'",
+                    line,
+                ));
+            }
+            let mut required = Vec::new();
+            for p in &param_exprs[..pos] {
+                required.push(self.get_param_name(p)?);
+            }
+            let rest = self.get_param_name(param_exprs[pos + 1])?;
+            (required, Some(rest), true)
+        } else {
+            let mut params = Vec::new();
+            for p in &param_exprs {
+                params.push(self.get_param_name(p)?);
+            }
+            (params, None, false)
+        };
+
         let body_exprs: Vec<&Expr> = elements[2..].to_vec();
 
         // Create child compiler
@@ -612,9 +643,13 @@ impl<'a> Compiler<'a> {
             self.known_effect_ops.clone(),
         );
 
-        // Add parameters as locals
-        for &param in &params {
+        // Add required parameters as locals
+        for &param in &required_params {
             fn_compiler.add_local(param);
+        }
+        // Add rest parameter as a local (will hold the packed list at runtime)
+        if let Some(rest) = rest_param {
+            fn_compiler.add_local(rest);
         }
 
         // Compile body
@@ -622,10 +657,11 @@ impl<'a> Compiler<'a> {
         fn_compiler.emit(Op::Return, line);
         fn_compiler.chunk.local_count = fn_compiler.local_count;
 
-        // Create prototype
+        // Create prototype — arity is the number of REQUIRED params
         let proto = FunctionPrototype {
             name: "<lambda>".to_string(),
-            arity: params.len() as u8,
+            arity: required_params.len() as u8,
+            is_variadic,
             upvalues: fn_compiler.upvalues,
             chunk: fn_compiler.chunk,
         };
@@ -1159,6 +1195,7 @@ impl<'a> Compiler<'a> {
                 let proto = FunctionPrototype {
                     name: "<return-handler>".to_string(),
                     arity: 1,
+                    is_variadic: false,
                     upvalues: fn_compiler.upvalues,
                     chunk: fn_compiler.chunk,
                 };
@@ -1198,6 +1235,7 @@ impl<'a> Compiler<'a> {
                 let proto = FunctionPrototype {
                     name: handler_name,
                     arity,
+                    is_variadic: false,
                     upvalues: fn_compiler.upvalues,
                     chunk: fn_compiler.chunk,
                 };
@@ -1229,6 +1267,7 @@ impl<'a> Compiler<'a> {
         let body_proto = FunctionPrototype {
             name: "<handle-body>".to_string(),
             arity: 0,
+            is_variadic: false,
             upvalues: body_compiler.upvalues,
             chunk: body_compiler.chunk,
         };

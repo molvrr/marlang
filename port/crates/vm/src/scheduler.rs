@@ -10,9 +10,9 @@ use std::sync::Arc;
 use crate::bytecode::{Chunk, FunctionPrototype};
 use crate::errors::VMError;
 use crate::object::{Closure, HandlerEntry, VMHandlerFrame, VMObject};
-use crate::value::{Value, format_value_unquoted};
+use crate::value::{format_value_unquoted, Value};
 use crate::vm::{
-    EffectSignal, VM, VMSignal, call_closure, call_value, next_handler_id, resume_continuation,
+    call_closure, call_value, next_handler_id, resume_continuation, EffectSignal, VMSignal, VM,
 };
 
 // ---------------------------------------------------------------------------
@@ -119,6 +119,38 @@ fn as_channel(val: &Value) -> Option<u64> {
         Some(VMObject::Port(id)) => Some(*id),
         _ => None,
     }
+}
+
+/// Construct a `(Some value)` ADT value.
+fn make_some(value: Value) -> Value {
+    Value::object(VMObject::AdtValue {
+        tag: "Some".to_string(),
+        fields: vec![value],
+    })
+}
+
+/// Construct a `None` ADT value.
+fn make_none() -> Value {
+    Value::object(VMObject::AdtValue {
+        tag: "None".to_string(),
+        fields: vec![],
+    })
+}
+
+/// Construct an `(Ok value)` ADT value.
+fn make_ok(value: Value) -> Value {
+    Value::object(VMObject::AdtValue {
+        tag: "Ok".to_string(),
+        fields: vec![value],
+    })
+}
+
+/// Construct an `(Err msg)` ADT value.
+fn make_err(msg: &str) -> Value {
+    Value::object(VMObject::AdtValue {
+        tag: "Err".to_string(),
+        fields: vec![Value::string(msg)],
+    })
 }
 
 /// Call a predicate closure synchronously. Returns true if truthy, false on error.
@@ -259,6 +291,7 @@ const HANDLED_EFFECTS: &[&str] = &[
     "tcp-send",
     "tcp-recv",
     "tcp-close",
+    "tcp-close-listener",
     // Exception effect (default handler crashes the fiber)
     "throw",
 ];
@@ -268,6 +301,7 @@ fn make_dummy_closure() -> Closure {
         proto: Arc::new(FunctionPrototype {
             name: "<scheduler>".to_string(),
             arity: 0,
+            is_variadic: false,
             upvalues: Vec::new(),
             chunk: Chunk::new(),
         }),
@@ -384,18 +418,21 @@ fn handle_effect(
                 .ok_or_else(|| VMError::runtime("chan-send: invalid channel"))?;
 
             if chan.closed {
-                return Err(VMError::runtime("Cannot send on closed channel"));
-            }
-
-            if !chan.waiting_receivers.is_empty() {
-                // Hand off to waiting receiver
+                enqueue_resumed(
+                    state,
+                    state.current_pid,
+                    cont,
+                    make_err("channel is closed"),
+                );
+            } else if !chan.waiting_receivers.is_empty() {
+                // Hand off to waiting receiver, wrapped in Some
                 let receiver = chan.waiting_receivers.remove(0);
-                enqueue_resumed(state, receiver.pid, receiver.continuation, value);
-                enqueue_resumed(state, state.current_pid, cont, Value::nil());
+                enqueue_resumed(state, receiver.pid, receiver.continuation, make_some(value));
+                enqueue_resumed(state, state.current_pid, cont, make_ok(Value::nil()));
             } else if chan.buffer.len() < chan.capacity {
                 // Buffer the value
                 chan.buffer.push_back(value);
-                enqueue_resumed(state, state.current_pid, cont, Value::nil());
+                enqueue_resumed(state, state.current_pid, cont, make_ok(Value::nil()));
             } else {
                 // Block sender
                 chan.waiting_senders.push(WaitingSender {
@@ -420,16 +457,26 @@ fn handle_effect(
                 if !chan.waiting_senders.is_empty() {
                     let sender = chan.waiting_senders.remove(0);
                     chan.buffer.push_back(sender.value);
-                    enqueue_resumed(state, sender.pid, sender.continuation, Value::nil());
+                    enqueue_resumed(
+                        state,
+                        sender.pid,
+                        sender.continuation,
+                        make_ok(Value::nil()),
+                    );
                 }
-                enqueue_resumed(state, state.current_pid, cont, value);
+                enqueue_resumed(state, state.current_pid, cont, make_some(value));
             } else if !chan.waiting_senders.is_empty() {
                 // Unbuffered: hand off directly from sender
                 let sender = chan.waiting_senders.remove(0);
-                enqueue_resumed(state, sender.pid, sender.continuation, Value::nil());
-                enqueue_resumed(state, state.current_pid, cont, sender.value);
+                enqueue_resumed(
+                    state,
+                    sender.pid,
+                    sender.continuation,
+                    make_ok(Value::nil()),
+                );
+                enqueue_resumed(state, state.current_pid, cont, make_some(sender.value));
             } else if chan.closed {
-                enqueue_resumed(state, state.current_pid, cont, Value::nil());
+                enqueue_resumed(state, state.current_pid, cont, make_none());
             } else {
                 // Block receiver
                 chan.waiting_receivers.push(WaitingReceiver {
@@ -442,16 +489,28 @@ fn handle_effect(
         "chan-close" => {
             let ch_id = as_channel(args.first().unwrap_or(&Value::nil()))
                 .ok_or_else(|| VMError::runtime("chan-close: first argument must be a channel"))?;
-            let chan = state
-                .channels
-                .get_mut(&ch_id)
-                .ok_or_else(|| VMError::runtime("chan-close: invalid channel"))?;
-
-            chan.closed = true;
-            // Wake all blocked receivers with nil
-            let receivers: Vec<WaitingReceiver> = chan.waiting_receivers.drain(..).collect();
+            let (receivers, senders) = {
+                let chan = state
+                    .channels
+                    .get_mut(&ch_id)
+                    .ok_or_else(|| VMError::runtime("chan-close: invalid channel"))?;
+                chan.closed = true;
+                let receivers: Vec<WaitingReceiver> = chan.waiting_receivers.drain(..).collect();
+                let senders: Vec<WaitingSender> = chan.waiting_senders.drain(..).collect();
+                (receivers, senders)
+            };
+            // Wake all blocked receivers with None
             for receiver in receivers {
-                enqueue_resumed(state, receiver.pid, receiver.continuation, Value::nil());
+                enqueue_resumed(state, receiver.pid, receiver.continuation, make_none());
+            }
+            // Wake all blocked senders with Err
+            for sender in senders {
+                enqueue_resumed(
+                    state,
+                    sender.pid,
+                    sender.continuation,
+                    make_err("channel is closed"),
+                );
             }
             enqueue_resumed(state, state.current_pid, cont, Value::nil());
         }
@@ -606,19 +665,11 @@ fn handle_effect(
                 .first()
                 .and_then(|v| v.as_string())
                 .ok_or_else(|| VMError::runtime("read-file: path must be a string"))?;
-            match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    enqueue_resumed(
-                        state,
-                        state.current_pid,
-                        cont,
-                        Value::string(content.as_str()),
-                    );
-                }
-                Err(e) => {
-                    return Err(VMError::runtime(format!("read-file: {}", e)));
-                }
-            }
+            let result = match std::fs::read_to_string(path) {
+                Ok(content) => make_ok(Value::string(content.as_str())),
+                Err(e) => make_err(&format!("read-file: {}", e)),
+            };
+            enqueue_resumed(state, state.current_pid, cont, result);
         }
 
         "write-file" => {
@@ -630,13 +681,16 @@ fn handle_effect(
                 .get(1)
                 .and_then(|v| v.as_string())
                 .ok_or_else(|| VMError::runtime("write-file: content must be a string"))?;
-            std::fs::write(path, content)
-                .map_err(|e| VMError::runtime(format!("write-file: {}", e)))?;
-            enqueue_resumed(state, state.current_pid, cont, Value::nil());
+            let result = match std::fs::write(path, content) {
+                Ok(_) => make_ok(Value::nil()),
+                Err(e) => make_err(&format!("write-file: {}", e)),
+            };
+            enqueue_resumed(state, state.current_pid, cont, result);
         }
 
         // --- Layer 4: TCP (not supported in single-threaded scheduler) ---
-        "tcp-connect" | "tcp-listen" | "tcp-accept" | "tcp-send" | "tcp-recv" | "tcp-close" => {
+        "tcp-connect" | "tcp-listen" | "tcp-accept" | "tcp-send" | "tcp-recv" | "tcp-close"
+        | "tcp-close-listener" => {
             return Err(VMError::runtime(
                 "TCP effects require the multi-threaded scheduler (run-fibers-parallel)",
             ));

@@ -113,33 +113,111 @@ fn unify_internal(
     if let (
         Type::Arrow {
             params: p1,
+            rest: rest1,
             result: r1,
             ..
         },
         Type::Arrow {
             params: p2,
+            rest: rest2,
             result: r2,
             ..
         },
     ) = (t1, t2)
     {
-        if p1.len() != p2.len() {
-            return Err(TypeError::ArityMismatch {
-                expected: p1.len(),
-                got: p2.len(),
-                context: "function type".to_string(),
-                span: None,
-            });
-        }
-
         let mut subst = empty_subst();
 
-        // Unify parameter types
-        for i in 0..p1.len() {
-            let pa = apply_subst(&subst, &p1[i]);
-            let pb = apply_subst(&subst, &p2[i]);
-            let s = unify_internal(&pa, &pb, seen)?;
-            subst = compose_subst(&s, &subst);
+        match (rest1, rest2) {
+            // Neither is variadic: strict arity match (original behavior)
+            (None, None) => {
+                if p1.len() != p2.len() {
+                    return Err(TypeError::ArityMismatch {
+                        expected: p1.len(),
+                        got: p2.len(),
+                        context: "function type".to_string(),
+                        span: None,
+                    });
+                }
+                for i in 0..p1.len() {
+                    let pa = apply_subst(&subst, &p1[i]);
+                    let pb = apply_subst(&subst, &p2[i]);
+                    let s = unify_internal(&pa, &pb, seen)?;
+                    subst = compose_subst(&s, &subst);
+                }
+            }
+            // Both variadic: unify required params pairwise, then unify rest types
+            (Some(rt1), Some(rt2)) => {
+                if p1.len() != p2.len() {
+                    return Err(TypeError::ArityMismatch {
+                        expected: p1.len(),
+                        got: p2.len(),
+                        context: "function type".to_string(),
+                        span: None,
+                    });
+                }
+                for i in 0..p1.len() {
+                    let pa = apply_subst(&subst, &p1[i]);
+                    let pb = apply_subst(&subst, &p2[i]);
+                    let s = unify_internal(&pa, &pb, seen)?;
+                    subst = compose_subst(&s, &subst);
+                }
+                let ra = apply_subst(&subst, rt1);
+                let rb = apply_subst(&subst, rt2);
+                let s = unify_internal(&ra, &rb, seen)?;
+                subst = compose_subst(&s, &subst);
+            }
+            // t1 is variadic, t2 is not: t2 must have at least p1.len() params,
+            // extra t2 params unify with rest type
+            (Some(rt1), None) => {
+                if p2.len() < p1.len() {
+                    return Err(TypeError::ArityMismatch {
+                        expected: p1.len(),
+                        got: p2.len(),
+                        context: "variadic function type (too few arguments)".to_string(),
+                        span: None,
+                    });
+                }
+                // Unify required params
+                for i in 0..p1.len() {
+                    let pa = apply_subst(&subst, &p1[i]);
+                    let pb = apply_subst(&subst, &p2[i]);
+                    let s = unify_internal(&pa, &pb, seen)?;
+                    subst = compose_subst(&s, &subst);
+                }
+                // Extra params in t2 unify with rest type
+                for i in p1.len()..p2.len() {
+                    let rest_ty = apply_subst(&subst, rt1);
+                    let pb = apply_subst(&subst, &p2[i]);
+                    let s = unify_internal(&rest_ty, &pb, seen)?;
+                    subst = compose_subst(&s, &subst);
+                }
+            }
+            // t2 is variadic, t1 is not: t1 must have at least p2.len() params,
+            // extra t1 params unify with rest type
+            (None, Some(rt2)) => {
+                if p1.len() < p2.len() {
+                    return Err(TypeError::ArityMismatch {
+                        expected: p2.len(),
+                        got: p1.len(),
+                        context: "variadic function type (too few arguments)".to_string(),
+                        span: None,
+                    });
+                }
+                // Unify required params
+                for i in 0..p2.len() {
+                    let pa = apply_subst(&subst, &p1[i]);
+                    let pb = apply_subst(&subst, &p2[i]);
+                    let s = unify_internal(&pa, &pb, seen)?;
+                    subst = compose_subst(&s, &subst);
+                }
+                // Extra params in t1 unify with rest type
+                for i in p2.len()..p1.len() {
+                    let pa = apply_subst(&subst, &p1[i]);
+                    let rest_ty = apply_subst(&subst, rt2);
+                    let s = unify_internal(&pa, &rest_ty, seen)?;
+                    subst = compose_subst(&s, &subst);
+                }
+            }
         }
 
         // Unify result types
@@ -269,31 +347,100 @@ pub fn match_types(pattern: &Type, target: &Type) -> Result<Substitution, TypeEr
     if let (
         Type::Arrow {
             params: p1,
+            rest: rest1,
             result: r1,
             ..
         },
         Type::Arrow {
             params: p2,
+            rest: rest2,
             result: r2,
             ..
         },
     ) = (pattern, target)
     {
-        if p1.len() != p2.len() {
-            return Err(TypeError::UnificationError {
-                t1: pattern.clone(),
-                t2: target.clone(),
-                context: None,
-                span: None,
-            });
-        }
-
         let mut subst = empty_subst();
-        for i in 0..p1.len() {
-            let p = apply_subst(&subst, &p1[i]);
-            let t = &p2[i];
-            let s = match_types(&p, t)?;
-            subst = compose_subst(&s, &subst);
+
+        match (rest1, rest2) {
+            (None, None) => {
+                if p1.len() != p2.len() {
+                    return Err(TypeError::UnificationError {
+                        t1: pattern.clone(),
+                        t2: target.clone(),
+                        context: None,
+                        span: None,
+                    });
+                }
+                for i in 0..p1.len() {
+                    let p = apply_subst(&subst, &p1[i]);
+                    let t = &p2[i];
+                    let s = match_types(&p, t)?;
+                    subst = compose_subst(&s, &subst);
+                }
+            }
+            (Some(rt1), None) => {
+                if p2.len() < p1.len() {
+                    return Err(TypeError::UnificationError {
+                        t1: pattern.clone(),
+                        t2: target.clone(),
+                        context: None,
+                        span: None,
+                    });
+                }
+                for i in 0..p1.len() {
+                    let p = apply_subst(&subst, &p1[i]);
+                    let t = &p2[i];
+                    let s = match_types(&p, t)?;
+                    subst = compose_subst(&s, &subst);
+                }
+                for i in p1.len()..p2.len() {
+                    let rest_ty = apply_subst(&subst, rt1);
+                    let t = &p2[i];
+                    let s = match_types(&rest_ty, t)?;
+                    subst = compose_subst(&s, &subst);
+                }
+            }
+            (None, Some(rt2)) => {
+                if p1.len() < p2.len() {
+                    return Err(TypeError::UnificationError {
+                        t1: pattern.clone(),
+                        t2: target.clone(),
+                        context: None,
+                        span: None,
+                    });
+                }
+                for i in 0..p2.len() {
+                    let p = apply_subst(&subst, &p1[i]);
+                    let t = &p2[i];
+                    let s = match_types(&p, t)?;
+                    subst = compose_subst(&s, &subst);
+                }
+                for i in p2.len()..p1.len() {
+                    let p = apply_subst(&subst, &p1[i]);
+                    let rest_ty = rt2;
+                    let s = match_types(&p, rest_ty)?;
+                    subst = compose_subst(&s, &subst);
+                }
+            }
+            (Some(rt1), Some(rt2)) => {
+                if p1.len() != p2.len() {
+                    return Err(TypeError::UnificationError {
+                        t1: pattern.clone(),
+                        t2: target.clone(),
+                        context: None,
+                        span: None,
+                    });
+                }
+                for i in 0..p1.len() {
+                    let p = apply_subst(&subst, &p1[i]);
+                    let t = &p2[i];
+                    let s = match_types(&p, t)?;
+                    subst = compose_subst(&s, &subst);
+                }
+                let rp = apply_subst(&subst, rt1);
+                let s = match_types(&rp, rt2)?;
+                subst = compose_subst(&s, &subst);
+            }
         }
 
         let pr = apply_subst(&subst, r1);

@@ -8,13 +8,20 @@
 
 ; --- Effects ---
 (effect Exception
-  (throw (-> String Unit)))
+  (throw (-> String a)))
 
 ; --- Macros ---
 (defmacro when (cond body)
   `(if ,cond (begin ,body nil) nil))
 
 ; --- Core Functions ---
+
+; string->number: parses a string to a Float, throws on failure
+(define string->number (lambda (s)
+  (match (__try-string->number s)
+    ((Some n) n)
+    (None (perform throw (string-append "string->number: invalid number: " s))))))
+
 (define not (lambda (x) (if x #f #t)))
 (define cons (lambda (h t) (Cons h t)))
 (define car (lambda (l) (match l ((Cons h _) h) (Nil (error "car: empty list")))))
