@@ -3,7 +3,11 @@
 ; Actors are fibers with mailboxes. They communicate via
 ; asynchronous message passing, inspired by Erlang/Elixir.
 ;
-; Run with: bun index.ts run examples/actors.mar --vm
+; Run with: cargo run -p marlang-cli -- run examples/actors.mar
+
+(import "std:concurrent")
+(import "std:actor")
+(import "std:io")
 
 ; === Example 1: Ping-Pong ===
 ;

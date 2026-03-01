@@ -375,7 +375,7 @@ pub fn infer_expr(
                             span: Some(elements[0].span()),
                         });
                     }
-                    "type" | "foreign" | "foreign-lib" | "defmacro" => {
+                    "type" | "foreign" | "foreign-lib" | "defmacro" | "declare" => {
                         return Ok(pure_result(t_unit()));
                     }
                     "quote" | "quasiquote" => {
@@ -2035,6 +2035,40 @@ fn process_data_def(
     Ok(new_env)
 }
 
+/// Process a top-level `(declare name Type)` form.
+/// Registers a type signature for a name that already has a runtime implementation
+/// (e.g. a Rust builtin). No body is required or inferred.
+fn process_declare(
+    env: &TypeEnv,
+    elements: &[&Expr],
+    interner: &Interner,
+) -> Result<TypeEnv, TypeError> {
+    if elements.len() != 3 {
+        return Err(TypeError::ArityMismatch {
+            expected: 2,
+            got: elements.len() - 1,
+            context: "declare".into(),
+            span: Some(elements[0].span()),
+        });
+    }
+
+    let name = get_symbol(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
+        message: "declare expects a symbol name".into(),
+        span: Some(elements[1].span()),
+    })?;
+
+    let ty = parse_type_expr(elements[2], env, interner)?;
+
+    // Generalize: quantify over all free type variables
+    let free_vars: Vec<String> = free_type_vars(&ty).into_iter().collect();
+    let scheme = TypeScheme {
+        quantified_vars: free_vars,
+        ty,
+    };
+
+    Ok(extend_env(env, name, scheme))
+}
+
 fn process_define(
     env: &TypeEnv,
     elements: &[&Expr],
@@ -2465,6 +2499,12 @@ fn infer_program_inner(
                     continue;
                 }
 
+                if first_sym == Some("declare") && elements.len() >= 3 {
+                    current_env = process_declare(&current_env, &elements, interner)?;
+                    types.push(t_unit());
+                    continue;
+                }
+
                 if first_sym == Some("effect") && elements.len() >= 2 {
                     current_env = process_effect_def(&current_env, &elements, interner)?;
                     types.push(t_unit());
@@ -2607,15 +2647,14 @@ fn process_import(
     // Mark as loading
     cache.mark_loading(resolved_path.clone());
 
-    // Create a fresh builtins env for the module (like the VM does).
-    // This way, after type-checking, we can extract everything the module
-    // added on top of builtins as its exports.
-    let builtins = crate::builtins::create_builtin_env();
-    let builtin_binding_keys: HashSet<String> = builtins.bindings.keys().cloned().collect();
-    let builtin_data_type_keys: HashSet<String> = builtins.data_types.keys().cloned().collect();
-    let builtin_constructor_keys: HashSet<String> = builtins.constructors.keys().cloned().collect();
-    let builtin_effect_keys: HashSet<String> = builtins.effects.keys().cloned().collect();
-    let builtin_alias_keys: HashSet<String> = builtins.aliases.keys().cloned().collect();
+    // Use the current env (builtins + prelude + prior imports) as the baseline.
+    // After type-checking the module, we extract everything it added on top
+    // of this baseline as its exports.
+    let baseline_binding_keys: HashSet<String> = env.bindings.keys().cloned().collect();
+    let baseline_data_type_keys: HashSet<String> = env.data_types.keys().cloned().collect();
+    let baseline_constructor_keys: HashSet<String> = env.constructors.keys().cloned().collect();
+    let baseline_effect_keys: HashSet<String> = env.effects.keys().cloned().collect();
+    let baseline_alias_keys: HashSet<String> = env.aliases.keys().cloned().collect();
 
     // Type-check the module using the current env as base (has builtins + prelude).
     // The prelude types (Option, Result, etc.) are available for the module code.
@@ -2628,16 +2667,14 @@ fn process_import(
         Some(cache),
     )?;
 
-    // Extract everything the module defines beyond builtins.
-    // This includes prelude re-declarations (like Ok, Err) since modules
-    // typically re-export data types they define.
+    // Extract everything the module defines beyond the baseline env.
     let module_own_env = extract_module_exports(
         &module_env,
-        &builtin_binding_keys,
-        &builtin_data_type_keys,
-        &builtin_constructor_keys,
-        &builtin_effect_keys,
-        &builtin_alias_keys,
+        &baseline_binding_keys,
+        &baseline_data_type_keys,
+        &baseline_constructor_keys,
+        &baseline_effect_keys,
+        &baseline_alias_keys,
     );
 
     cache.mark_loaded(resolved_path, module_own_env.clone());

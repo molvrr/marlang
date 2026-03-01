@@ -65,6 +65,7 @@ struct KnownSymbols {
     unquote_splicing: Symbol,
     defmacro: Symbol,
     dot: Symbol,
+    declare: Symbol,
 }
 
 impl KnownSymbols {
@@ -106,6 +107,7 @@ impl KnownSymbols {
             unquote_splicing: interner.intern("unquote-splicing"),
             defmacro: interner.intern("defmacro"),
             dot: interner.intern("."),
+            declare: interner.intern("declare"),
         }
     }
 }
@@ -549,7 +551,7 @@ impl<'a> Compiler<'a> {
                             ),
                             line,
                         ));
-                    } else if sym == ks.type_ || sym == ks.foreign {
+                    } else if sym == ks.type_ || sym == ks.foreign || sym == ks.declare {
                         self.emit_constant(ConstantValue::Nil, line);
                         return Ok(());
                     }

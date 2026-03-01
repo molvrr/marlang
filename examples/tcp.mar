@@ -5,6 +5,8 @@
 ;
 ; Run with: cargo run -p marlang-cli -- run examples/tcp.mar
 
+(import "std:concurrent")
+(import "std:io")
 (import "std:net" as net)
 
 ; === Example 1: Echo Server ===

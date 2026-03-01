@@ -5,7 +5,7 @@ use std::sync::Arc;
 use marlang_core::ast::{self, Expr, LispValue};
 use marlang_core::intern::{Interner, Symbol};
 use marlang_core::lexer::lex;
-use marlang_core::parser::parse;
+use marlang_core::parser::{parse, parse_with_interner};
 use marlang_core::span::Span;
 
 use crate::builtins::register_builtins;
@@ -115,7 +115,7 @@ impl<'a> MacroExpander<'a> {
             Ok(t) => t,
             Err(_) => return vec![],
         };
-        let exprs = match parse(&tokens) {
+        let exprs = match parse_with_interner(&tokens, self.interner) {
             Ok(e) => e,
             Err(_) => return vec![],
         };
@@ -468,7 +468,7 @@ impl<'a> MacroExpander<'a> {
             Ok(t) => t,
             Err(_) => return Ok(()),
         };
-        let exprs = match parse(&tokens) {
+        let exprs = match parse_with_interner(&tokens, self.interner) {
             Ok(e) => e,
             Err(_) => return Ok(()),
         };
@@ -728,6 +728,7 @@ fn build_immune_set(interner: &Interner) -> HashSet<Symbol> {
         "resume",
         "import",
         "type",
+        "declare",
         "foreign",
         "foreign-lib",
         "else",

@@ -5,6 +5,9 @@
 ;
 ; Run with: cargo run -p marlang-cli -- run examples/channels.mar
 
+(import "std:concurrent")
+(import "std:io")
+
 ; === Example 1: Unbuffered Channel ===
 ;
 ; Sender blocks until a receiver is ready (and vice versa)

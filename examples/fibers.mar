@@ -4,7 +4,11 @@
 ; All concurrency operations are algebraic effects handled
 ; by the run-fibers scheduler.
 ;
-; Run with: bun index.ts run examples/fibers.mar --vm 
+; Run with: cargo run -p marlang-cli -- run examples/fibers.mar
+
+(import "std:concurrent")
+(import "std:io")
+
 ; === Example 1: Spawn and Yield ===
 ;
 ; Fibers interleave execution at yield points

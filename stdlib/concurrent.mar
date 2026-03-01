@@ -1,7 +1,7 @@
 ;; Concurrency primitives: fibers (green threads) and channels
 
-(effect Concurrent
-  (fiber-spawn (-> (-> Unit Unit) Pid))
+(effect Fiber
+  (fiber-spawn (-> (-> Unit {| e} Unit) Pid))
   (fiber-yield (-> Unit Unit))
   (fiber-self  (-> Unit Pid)))
 

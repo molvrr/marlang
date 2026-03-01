@@ -3,7 +3,11 @@
 ; Monitors and links provide fault-tolerance patterns
 ; inspired by Erlang's "let it crash" philosophy.
 ;
-; Run with: bun index.ts run examples/supervision.mar --vm
+; Run with: cargo run -p marlang-cli -- run examples/supervision.mar
+
+(import "std:concurrent")
+(import "std:actor")
+(import "std:io")
 
 (data Signal (Down Pid String) (Exit Pid String))
 

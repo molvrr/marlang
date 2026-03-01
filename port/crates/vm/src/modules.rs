@@ -4,14 +4,14 @@ use std::path::{Path, PathBuf};
 use marlang_core::ast::{self, Expr, LispValue};
 use marlang_core::intern::{Interner, Symbol};
 use marlang_core::lexer::lex;
-use marlang_core::parser::parse;
+use marlang_core::parser::parse_with_interner;
 
 use crate::builtins::register_builtins;
 use crate::compiler::compile_expr_with_context;
 use crate::errors::VMError;
 use crate::expand::MacroExpander;
 use crate::value::Value;
-use crate::vm::{VM, interpret};
+use crate::vm::{interpret, VM};
 
 // --- Module state ---
 
@@ -48,7 +48,11 @@ impl ModuleLoader {
                 let manifest = env!("CARGO_MANIFEST_DIR");
                 let workspace = Path::new(manifest).parent()?.parent()?.parent()?;
                 let stdlib = workspace.join("stdlib");
-                if stdlib.is_dir() { Some(stdlib) } else { None }
+                if stdlib.is_dir() {
+                    Some(stdlib)
+                } else {
+                    None
+                }
             });
 
         ModuleLoader {
@@ -147,7 +151,8 @@ pub fn run_program(
 ) -> Result<Value, VMError> {
     let tokens =
         lex(source, interner).map_err(|e| VMError::runtime(format!("Lex error: {}", e)))?;
-    let exprs = parse(&tokens).map_err(|e| VMError::runtime(format!("Parse error: {}", e)))?;
+    let exprs = parse_with_interner(&tokens, interner)
+        .map_err(|e| VMError::runtime(format!("Parse error: {}", e)))?;
 
     if exprs.is_empty() {
         return Ok(Value::nil());
