@@ -498,12 +498,16 @@ fn resume_opcode() {
 // ===== Type Forms =====
 
 #[test]
-fn class_emits_nil() {
-    let (chunk, _) = compile_source("(class Eq (a) (eq (-> a a Bool)))");
-    assert!(chunk
-        .constants
-        .iter()
-        .any(|c| matches!(c, ConstantValue::Nil)));
+fn class_compile_error() {
+    let interner = Interner::new();
+    let tokens = lex("(class Eq (a) (eq (-> a a Bool)))", &interner).expect("lex failed");
+    let exprs = parse(&tokens).expect("parse failed");
+    let result = compile_program(&exprs, &interner);
+    assert!(result.is_err(), "class should produce a compile error");
+    assert!(
+        result.unwrap_err().message.contains("not supported"),
+        "error should mention 'not supported'"
+    );
 }
 
 #[test]
@@ -1421,13 +1425,76 @@ fn exec_arity_mismatch() {
 // ===== Execution: Type forms (no-ops) =====
 
 #[test]
-fn exec_class_nil() {
-    assert_nil("(class Eq (a) (eq (-> a a Bool)))");
+fn exec_type_nil() {
+    assert_nil("(type Pair (a b) (MkPair a b))");
+}
+
+// ===== Execution: Float operators =====
+
+#[test]
+fn exec_float_add() {
+    assert_num("(+. 2.5 3.0)", 5.5);
 }
 
 #[test]
-fn exec_type_nil() {
-    assert_nil("(type Pair (a b) (MkPair a b))");
+fn exec_float_mul() {
+    assert_num("(*. 2.0 3.0)", 6.0);
+}
+
+#[test]
+fn exec_float_sub() {
+    assert_num("(-. 10.0 3.0)", 7.0);
+}
+
+#[test]
+fn exec_float_div() {
+    assert_num("(/. 10.0 2.0)", 5.0);
+}
+
+// ===== Execution: Polymorphic equality =====
+
+#[test]
+fn exec_equal_true() {
+    assert_bool("(equal? 1 1)", true);
+}
+
+#[test]
+fn exec_equal_false() {
+    assert_bool("(equal? 1 2)", false);
+}
+
+// ===== Execution: Conversion =====
+
+#[test]
+fn exec_int_to_float() {
+    assert_num("(int->float 42)", 42.0);
+}
+
+// ===== Execution: String comparison =====
+
+#[test]
+fn exec_string_eq() {
+    assert_bool("(string= \"hello\" \"hello\")", true);
+}
+
+#[test]
+fn exec_string_lt() {
+    assert_bool("(string< \"a\" \"b\")", true);
+}
+
+#[test]
+fn exec_string_gt() {
+    assert_bool("(string> \"b\" \"a\")", true);
+}
+
+#[test]
+fn exec_string_le() {
+    assert_bool("(string<= \"a\" \"a\")", true);
+}
+
+#[test]
+fn exec_string_ge() {
+    assert_bool("(string>= \"b\" \"a\")", true);
 }
 
 // ===== Execution: Complex programs =====

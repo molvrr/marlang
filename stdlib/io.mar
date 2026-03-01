@@ -21,21 +21,22 @@
 ; === IO Effect ===
 ;
 ; The IO effect provides operations for console and file IO.
+; print and println are polymorphic (work on any type via show).
 
 (effect IO
-  (print (=> (Show a) (-> a Unit)))
-  (println (=> (Show a) (-> a Unit)))
+  (print (-> a Unit))
+  (println (-> a Unit))
   (read-line (-> Unit String))
   (read-file (-> String (Result String String)))
   (write-file (-> String String (Result String Unit))))
 
 ; === Console IO Operations ===
 
-; print : forall a. (Show a) => (-> a {IO} Unit)
+; print : forall a. (-> a {IO} Unit)
 ; Output a value without a newline
 (define print (lambda (msg) (perform print msg)))
 
-; println : forall a. (Show a) => (-> a {IO} Unit)
+; println : forall a. (-> a {IO} Unit)
 ; Output a value with a newline
 (define println (lambda (msg) (perform println msg)))
 
@@ -69,38 +70,3 @@
   (match (perform write-file path content)
     ((Ok _) nil)
     ((Err msg) (perform throw msg)))))
-
-; === Convenience Functions ===
-
-; print-int : (-> Int {IO} Unit)
-; Print an integer
-(define print-int (lambda (n) (perform print (show n))))
-
-; println-int : (-> Int {IO} Unit)
-; Print an integer with a newline
-(define println-int (lambda (n) (perform println (show n))))
-
-; print-bool : (-> Bool {IO} Unit)
-; Print a boolean
-(define print-bool (lambda (b) (perform print (show b))))
-
-; println-bool : (-> Bool {IO} Unit)
-; Print a boolean with a newline
-(define println-bool (lambda (b) (perform println (show b))))
-
-; === Async IO Effects (for use inside run-fibers) ===
-
-(effect AsyncIO
-  (io-stdout    (-> Unit Channel))
-  (io-stderr    (-> Unit Channel))
-  (io-stdin     (-> Unit Channel))
-  (io-read-file  (-> String String))
-  (io-write-file (-> String String Unit))
-  (io-open-file  (-> String String Channel)))
-
-(define stdout     (lambda () (perform io-stdout)))
-(define stderr     (lambda () (perform io-stderr)))
-(define stdin      (lambda () (perform io-stdin)))
-(define async-read-file  (lambda (path) (perform io-read-file path)))
-(define async-write-file (lambda (path content) (perform io-write-file path content)))
-(define open-file  (lambda (path mode) (perform io-open-file path mode)))

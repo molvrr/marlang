@@ -5,7 +5,7 @@ A Lisp-like language written in Rust. Features include a bytecode VM with NaN-bo
 ## Features
 
 - **Bytecode VM**: Stack-based bytecode compiler and virtual machine with NaN-boxed values
-- **Type System**: Static type checking with local inference, parametric polymorphism, row-polymorphic effects, and typeclasses
+- **Type System**: Static type checking with local inference, parametric polymorphism, row-polymorphic effects, and OCaml-style operator split (Int/Float)
 - **Algebraic Data Types**: Define sum types with constructors
 - **Pattern Matching**: Destructure values with `match` expressions, exhaustiveness checking
 - **Algebraic Effects**: Delimited continuations with `effect`, `perform`, and `handle`
@@ -36,12 +36,6 @@ Run a Marlang file:
 
 ```bash
 cargo run -p marlang-cli -- run <filename.mar>
-```
-
-Run without type checking:
-
-```bash
-cargo run -p marlang-cli -- run <filename.mar> --no-typecheck
 ```
 
 Disassemble a file to view bytecode:
@@ -171,22 +165,38 @@ Types are inferred when annotations are omitted:
 (id "hello")                 ; OK: String
 ```
 
-### Typeclasses
+### OCaml-Style Operator Split
 
-Built-in typeclasses provide polymorphic operations:
+Arithmetic and comparison operators are split by type — Int operators are plain, Float operators use a dot suffix:
 
-| Class | Methods | Instances |
-|-------|---------|-----------|
-| `Num` | `+`, `-`, `*`, `/` | Int, Float |
-| `Eq` | `=` | Int, Float, Bool, String |
-| `Ord` | `<`, `>`, `<=`, `>=` | Int, Float, String |
-| `Show` | `show` | Int, Float, Bool, String |
+| Int | Float | Description |
+|-----|-------|-------------|
+| `+` `-` `*` `/` | `+.` `-.` `*.` `/.` | Arithmetic |
+| `=` `<` `>` `<=` `>=` | `=.` `<.` `>.` `<=.` `>=.` | Comparison |
+| `rem` `abs` `negate` | `rem.` `abs.` `negate.` | Other numeric |
+
+String comparison uses named functions: `string=`, `string<`, `string>`, `string<=`, `string>=`.
+
+Polymorphic operations (no split needed):
+- `equal?` — structural equality on any type
+- `show` — convert any value to String
+- `print` / `println` — output any value
 
 ```lisp
-; Works with any Num type
-(define double (lambda (x) (+ x x)))
-(double 5)      ; => 10 : Int
-(double 2.5)    ; => 5.0 : Float
+; Int arithmetic
+(+ 1 2)              ; => 3
+(< 1 2)              ; => #t
+
+; Float arithmetic (dot suffix)
+(+. 1.5 2.5)         ; => 4.0
+(<. 1.0 2.0)         ; => #t
+
+; Conversion
+(+. (int->float 42) 0.5)  ; => 42.5
+
+; Polymorphic
+(equal? (Some 1) (Some 1))  ; => #t
+(show 42)                    ; => "42"
 ```
 
 ## Algebraic Data Types
@@ -610,7 +620,7 @@ No import is needed for these -- they are available everywhere.
 | `std:list` | List utilities: `foldl`, `foldr`, `length`, `reverse`, `concat`, `map`, `filter`, `any`, `all`, `find`, `take`, `drop`, `zip`, `zip-with` |
 | `std:io` | IO effect with **built-in handlers**: `print`, `println`, `read-line`, `read-file`, `write-file`. Handlers work automatically without explicit `handle` blocks. |
 | `std:string` | String utilities: `length`, `concat`, `reverse`, `to-upper`, `to-lower`, `trim`, `split`, `join`, `replace`, `substring`, `char-at` |
-| `std:math` | Math utilities: `pi`, `e`, `min-of`, `max-of`, `clamp`, `square`, `cube`, `div`, `even`, `odd`, `gcd`, `lcm`, `factorial` |
+| `std:math` | Math utilities: `pi`, `e`, `min-of`/`min-of.`, `max-of`/`max-of.`, `clamp`/`clamp.`, `square`, `cube`, `div`/`div.`, `even`, `odd`, `gcd`, `lcm`, `factorial`, `log-base`, `degrees`, `radians` |
 | `std:concurrent` | Concurrency wrappers: `spawn`, `yield`, `self`, `chan-new`, `chan-send`, `chan-recv`, `chan-close`, `run` |
 | `std:actor` | Actor model: `send`, `receive`, `receive-match`, `monitor`, `link`, `unlink`, `trap-exit` |
 
@@ -621,7 +631,7 @@ marlang/
 ├── port/                 # Rust implementation (Cargo workspace)
 │   └── crates/
 │       ├── core/         # marlang-core: lexer, parser, string interning, spans
-│       ├── types/        # marlang-types: HM type inference, typeclasses, exhaustiveness
+│       ├── types/        # marlang-types: HM type inference, exhaustiveness
 │       ├── vm/           # marlang-vm: compiler, NaN-boxed VM, modules, FFI, schedulers, macros, TCP
 │       └── cli/          # marlang-cli: clap-based CLI (run, repl, typecheck, disasm)
 ├── stdlib/               # Standard library (.mar files)
@@ -648,7 +658,7 @@ marlang/
 ### Crate Structure
 
 - **`marlang-core`** -- Lexer, parser, string interning (`intern.rs`), spans. Tokenizes source into tokens, parses into S-expression AST.
-- **`marlang-types`** -- Hindley-Milner type inference with typeclasses, row-polymorphic effect types, exhaustiveness checking for `match`, FFI struct type validation.
+- **`marlang-types`** -- Hindley-Milner type inference, row-polymorphic effect types, exhaustiveness checking for `match`, FFI struct type validation.
 - **`marlang-vm`** -- Bytecode compiler, NaN-boxed value representation, stack-based VM with algebraic effect system (handler frames, continuations), module loader, FFI via libffi, single-threaded and multi-threaded fiber schedulers, async IO, hygienic macro expansion, TCP networking.
 - **`marlang-cli`** -- Clap-based CLI with `run`, `repl`, `typecheck`, `disasm` subcommands.
 

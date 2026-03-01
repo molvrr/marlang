@@ -8,14 +8,13 @@ cargo build --release -p marlang-cli
 
 # Or run directly via cargo
 cargo run -p marlang-cli -- run file.mar           # Run a file
-cargo run -p marlang-cli -- run file.mar --no-typecheck  # Skip type checking
 cargo run -p marlang-cli -- typecheck file.mar     # Type check only
 cargo run -p marlang-cli -- typecheck file.mar --verbose  # Show inferred types
 cargo run -p marlang-cli -- disasm file.mar        # Disassemble bytecode
 cargo run -p marlang-cli -- repl                   # Interactive REPL
 ```
 
-**Important:** When running `.mar` files to verify changes, always test both with and without `--no-typecheck`. The type checker and VM have separate code paths, so a program can succeed in one mode but fail in the other.
+**Important:** Type checking is mandatory — there is no `--no-typecheck` flag. Programs must pass the type checker before they can run.
 
 ## Testing
 
@@ -31,7 +30,7 @@ cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI
 ```
 port/crates/
   core/       - marlang-core: lexer, parser, string interning, spans
-  types/      - marlang-types: HM type inference, typeclasses, exhaustiveness
+  types/      - marlang-types: HM type inference, exhaustiveness
   vm/         - marlang-vm: compiler, NaN-boxed VM, modules, FFI, schedulers, macros, TCP
   cli/        - marlang-cli: clap-based CLI (run, repl, typecheck, disasm)
 stdlib/       - Standard library (.mar files, shared)
@@ -96,7 +95,7 @@ Effect row rules:
 The VM handles IO effects (`print`, `println`, `read-line`, `read-file`, `write-file`) without needing explicit `handle` blocks.
 
 ### Built-in Functions
-Defined in `vm/builtins.rs`. Categories: arithmetic (`+`, `-`, `*`, `/`, `rem`, `sqrt`, `pow`, etc.), comparison (`<`, `>`, `=`, `<=`, `>=`), lists (`list`), strings (`show`, `string-length`, `string-append`, `string-split`, `string-join`, etc.), FFI (`ffi-open`, `ffi-call`, `ffi-close`), structs (`struct-new`, `struct-get`, `struct-set`), macros (`gensym`, `symbol->string`, `string->symbol`), type predicates (`symbol?`, `pair?`, `nil?`, `number?`, `string?`, `list?`). See `vm/builtins.rs` for the full list.
+Defined in `vm/builtins.rs`. Categories: Int arithmetic (`+`, `-`, `*`, `/`, `rem`, `abs`, `negate`), Float arithmetic (`+.`, `-.`, `*.`, `/.`, `rem.`, `abs.`, `negate.`), Int comparison (`<`, `>`, `=`, `<=`, `>=`), Float comparison (`<.`, `>.`, `=.`, `<=.`, `>=.`), string comparison (`string=`, `string<`, `string>`, `string<=`, `string>=`), polymorphic (`equal?`, `show`, `int->float`), math (`sqrt`, `pow`, `floor`, `ceil`, `round`, `truncate`, `exp`, `log`, `sin`, `cos`, `tan`, etc.), lists (`list`), strings (`string-length`, `string-append`, `string-split`, `string-join`, etc.), FFI (`ffi-open`, `ffi-call`, `ffi-close`), structs (`struct-new`, `struct-get`, `struct-set`), macros (`gensym`, `symbol->string`, `string->symbol`), type predicates (`symbol?`, `pair?`, `nil?`, `number?`, `string?`, `list?`). See `vm/builtins.rs` for the full list.
 
 ### Failable Operations Convention
 Operations that can fail follow a consistent pattern:

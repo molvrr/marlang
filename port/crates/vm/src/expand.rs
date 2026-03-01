@@ -12,7 +12,7 @@ use crate::builtins::register_builtins;
 use crate::compiler::compile_program;
 use crate::object::VMObject;
 use crate::value::Value;
-use crate::vm::{VM, call_value, interpret};
+use crate::vm::{call_value, interpret, VM};
 
 // --- Macro expansion error ---
 
@@ -727,8 +727,6 @@ fn build_immune_set(interner: &Interner) -> HashSet<Symbol> {
         "handle",
         "resume",
         "import",
-        "class",
-        "instance",
         "type",
         "foreign",
         "foreign-lib",

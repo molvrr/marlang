@@ -121,13 +121,6 @@ fn chase_subst<'a>(subst: &'a Substitution, t: &'a Type) -> &'a Type {
     t
 }
 
-pub fn apply_subst_constraint(subst: &Substitution, c: &Constraint) -> Constraint {
-    Constraint {
-        class: c.class.clone(),
-        type_arg: apply_subst(subst, &c.type_arg),
-    }
-}
-
 pub fn apply_subst_scheme(subst: &Substitution, scheme: &TypeScheme) -> TypeScheme {
     let mut filtered = subst.clone();
     for v in &scheme.quantified_vars {
@@ -135,15 +128,7 @@ pub fn apply_subst_scheme(subst: &Substitution, scheme: &TypeScheme) -> TypeSche
     }
     TypeScheme {
         quantified_vars: scheme.quantified_vars.clone(),
-        qual_type: QualType {
-            constraints: scheme
-                .qual_type
-                .constraints
-                .iter()
-                .map(|c| apply_subst_constraint(&filtered, c))
-                .collect(),
-            ty: apply_subst(&filtered, &scheme.qual_type.ty),
-        },
+        ty: apply_subst(&filtered, &scheme.ty),
     }
 }
 
@@ -160,8 +145,6 @@ pub fn apply_subst_env(subst: &Substitution, env: &TypeEnv) -> TypeEnv {
         bindings: new_bindings,
         data_types: env.data_types.clone(),
         constructors: env.constructors.clone(),
-        classes: env.classes.clone(),
-        instances: env.instances.clone(),
         aliases: env.aliases.clone(),
         effects: env.effects.clone(),
         foreign_libs: env.foreign_libs.clone(),
@@ -222,8 +205,6 @@ pub struct TypeEnv {
     pub bindings: HashMap<String, TypeScheme>,
     pub data_types: HashMap<String, DataType>,
     pub constructors: HashMap<String, (DataType, Constructor)>,
-    pub classes: HashMap<String, TypeClass>,
-    pub instances: HashMap<String, Vec<ClassInstance>>,
     pub aliases: HashMap<String, TypeAlias>,
     pub effects: HashMap<String, EffectDeclaration>,
     pub foreign_libs: HashMap<String, Vec<ForeignFnDecl>>,
@@ -236,8 +217,6 @@ pub fn empty_env() -> TypeEnv {
         bindings: HashMap::new(),
         data_types: HashMap::new(),
         constructors: HashMap::new(),
-        classes: HashMap::new(),
-        instances: HashMap::new(),
         aliases: HashMap::new(),
         effects: HashMap::new(),
         foreign_libs: HashMap::new(),
@@ -251,8 +230,6 @@ pub fn child_env(parent: &TypeEnv) -> TypeEnv {
         bindings: HashMap::new(),
         data_types: HashMap::new(),
         constructors: HashMap::new(),
-        classes: HashMap::new(),
-        instances: HashMap::new(),
         aliases: HashMap::new(),
         effects: HashMap::new(),
         foreign_libs: HashMap::new(),
@@ -307,16 +284,6 @@ pub fn lookup_constructor(env: &TypeEnv, name: &str) -> Option<(DataType, Constr
     None
 }
 
-pub fn lookup_class(env: &TypeEnv, name: &str) -> Option<TypeClass> {
-    if let Some(cls) = env.classes.get(name) {
-        return Some(cls.clone());
-    }
-    if let Some(parent) = &env.parent {
-        return lookup_class(parent, name);
-    }
-    None
-}
-
 pub fn lookup_effect(env: &TypeEnv, name: &str) -> Option<EffectDeclaration> {
     if let Some(eff) = env.effects.get(name) {
         return Some(eff.clone());
@@ -354,22 +321,6 @@ pub fn define_data_type(env: &TypeEnv, dt: DataType) -> TypeEnv {
             .insert(ctor.name.clone(), (dt.clone(), ctor.clone()));
     }
     new_env.data_types.insert(dt.name.clone(), dt);
-    new_env
-}
-
-pub fn define_class(env: &TypeEnv, cls: TypeClass) -> TypeEnv {
-    let mut new_env = env.clone();
-    new_env.classes.insert(cls.name.clone(), cls);
-    new_env
-}
-
-pub fn define_instance(env: &TypeEnv, instance: ClassInstance) -> TypeEnv {
-    let mut new_env = env.clone();
-    let existing = new_env
-        .instances
-        .entry(instance.class_name.clone())
-        .or_default();
-    existing.push(instance);
     new_env
 }
 
@@ -498,25 +449,10 @@ fn rewrite_effect_row(row: &EffectRow, name_map: &HashMap<String, String>) -> Ef
     }
 }
 
-fn rewrite_constraint(c: &Constraint, name_map: &HashMap<String, String>) -> Constraint {
-    Constraint {
-        class: c.class.clone(),
-        type_arg: rewrite_type(&c.type_arg, name_map),
-    }
-}
-
 fn rewrite_type_scheme(scheme: &TypeScheme, name_map: &HashMap<String, String>) -> TypeScheme {
     TypeScheme {
         quantified_vars: scheme.quantified_vars.clone(),
-        qual_type: QualType {
-            constraints: scheme
-                .qual_type
-                .constraints
-                .iter()
-                .map(|c| rewrite_constraint(c, name_map))
-                .collect(),
-            ty: rewrite_type(&scheme.qual_type.ty, name_map),
-        },
+        ty: rewrite_type(&scheme.ty, name_map),
     }
 }
 
@@ -562,11 +498,6 @@ fn rewrite_effect_decl(
             .map(|op| EffectOp {
                 name: op.name.clone(),
                 type_params: op.type_params.clone(),
-                constraints: op
-                    .constraints
-                    .iter()
-                    .map(|c| rewrite_constraint(c, name_map))
-                    .collect(),
                 params: op
                     .params
                     .iter()
@@ -713,14 +644,9 @@ pub fn free_type_vars_env(env: &TypeEnv) -> HashSet<String> {
     result
 }
 
-pub fn generalize(env: &TypeEnv, constraints: &[Constraint], t: &Type) -> TypeScheme {
+pub fn generalize(env: &TypeEnv, t: &Type) -> TypeScheme {
     let env_free = free_type_vars_env(env);
-    let mut type_free = free_type_vars(t);
-
-    // Also include free vars from constraints
-    for c in constraints {
-        type_free.extend(free_type_vars(&c.type_arg));
-    }
+    let type_free = free_type_vars(t);
 
     let mut quantified: Vec<String> = type_free
         .iter()
@@ -729,26 +655,13 @@ pub fn generalize(env: &TypeEnv, constraints: &[Constraint], t: &Type) -> TypeSc
         .collect();
     quantified.sort(); // Deterministic ordering
 
-    let quantified_set: HashSet<_> = quantified.iter().cloned().collect();
-    let relevant_constraints: Vec<Constraint> = constraints
-        .iter()
-        .filter(|c| {
-            let c_free = free_type_vars(&c.type_arg);
-            c_free.iter().any(|v| quantified_set.contains(v))
-        })
-        .cloned()
-        .collect();
-
     TypeScheme {
         quantified_vars: quantified,
-        qual_type: QualType {
-            constraints: relevant_constraints,
-            ty: t.clone(),
-        },
+        ty: t.clone(),
     }
 }
 
-pub fn instantiate(scheme: &TypeScheme) -> (Type, Vec<Constraint>) {
+pub fn instantiate(scheme: &TypeScheme) -> Type {
     let mut subst = HashMap::new();
     for v in &scheme.quantified_vars {
         if v.starts_with('ε') {
@@ -765,12 +678,5 @@ pub fn instantiate(scheme: &TypeScheme) -> (Type, Vec<Constraint>) {
             subst.insert(v.clone(), fresh_type_var());
         }
     }
-    let ty = apply_subst(&subst, &scheme.qual_type.ty);
-    let constraints = scheme
-        .qual_type
-        .constraints
-        .iter()
-        .map(|c| apply_subst_constraint(&subst, c))
-        .collect();
-    (ty, constraints)
+    apply_subst(&subst, &scheme.ty)
 }

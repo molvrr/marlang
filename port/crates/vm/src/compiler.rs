@@ -13,15 +13,15 @@ use crate::errors::CompileError;
 fn binary_op(sym: Symbol, interner: &Interner) -> Option<Op> {
     let name = interner.resolve(sym);
     match name {
-        "+" => Some(Op::Add),
-        "-" => Some(Op::Sub),
-        "*" => Some(Op::Mul),
-        "/" => Some(Op::Div),
-        "<" => Some(Op::Lt),
-        ">" => Some(Op::Gt),
-        "=" => Some(Op::Eq),
-        "<=" => Some(Op::Le),
-        ">=" => Some(Op::Ge),
+        "+" | "+." => Some(Op::Add),
+        "-" | "-." => Some(Op::Sub),
+        "*" | "*." => Some(Op::Mul),
+        "/" | "/." => Some(Op::Div),
+        "<" | "<." => Some(Op::Lt),
+        ">" | ">." => Some(Op::Gt),
+        "=" | "=." | "equal?" => Some(Op::Eq),
+        "<=" | "<=." => Some(Op::Le),
+        ">=" | ">=." => Some(Op::Ge),
         _ => None,
     }
 }
@@ -44,6 +44,8 @@ struct KnownSymbols {
     import: Symbol,
     class: Symbol,
     instance: Symbol,
+    negate_dot: Symbol,
+    minus_dot: Symbol,
     type_: Symbol,
     else_: Symbol,
     arrow: Symbol,
@@ -83,6 +85,8 @@ impl KnownSymbols {
             import: interner.intern("import"),
             class: interner.intern("class"),
             instance: interner.intern("instance"),
+            negate_dot: interner.intern("negate."),
+            minus_dot: interner.intern("-."),
             type_: interner.intern("type"),
             else_: interner.intern("else"),
             arrow: interner.intern("->"),
@@ -537,11 +541,15 @@ impl<'a> Compiler<'a> {
                         // defmacro should be consumed by the macro expander; at compile time, emit nil
                         self.emit_constant(ConstantValue::Nil, line);
                         return Ok(());
-                    } else if sym == ks.class
-                        || sym == ks.instance
-                        || sym == ks.type_
-                        || sym == ks.foreign
-                    {
+                    } else if sym == ks.class || sym == ks.instance {
+                        return Err(CompileError::new(
+                            format!(
+                                "'{}' declarations are not supported",
+                                self.interner.resolve(sym)
+                            ),
+                            line,
+                        ));
+                    } else if sym == ks.type_ || sym == ks.foreign {
                         self.emit_constant(ConstantValue::Nil, line);
                         return Ok(());
                     }
@@ -556,8 +564,13 @@ impl<'a> Compiler<'a> {
                         }
                     }
 
-                    // Unary negate: (- x) or (negate x)
-                    if (sym == ks.minus || sym == ks.negate) && elements.len() == 2 {
+                    // Unary negate: (- x) or (negate x) or (-. x) or (negate. x)
+                    if (sym == ks.minus
+                        || sym == ks.negate
+                        || sym == ks.minus_dot
+                        || sym == ks.negate_dot)
+                        && elements.len() == 2
+                    {
                         self.compile_expr(elements[1], false)?;
                         self.emit(Op::Neg, line);
                         return Ok(());

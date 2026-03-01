@@ -34,9 +34,6 @@ enum Command {
     Run {
         /// Path to the .mar file
         file: PathBuf,
-        /// Skip type checking
-        #[arg(long)]
-        no_typecheck: bool,
     },
     /// Start interactive REPL
     Repl,
@@ -172,14 +169,14 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Run { file, no_typecheck } => cmd_run(&file, no_typecheck),
+        Command::Run { file } => cmd_run(&file),
         Command::Repl => cmd_repl(),
         Command::Typecheck { file, verbose } => cmd_typecheck(&file, verbose),
         Command::Disasm { file } => cmd_disasm(&file),
     }
 }
 
-fn cmd_run(file: &PathBuf, no_typecheck: bool) -> ExitCode {
+fn cmd_run(file: &PathBuf) -> ExitCode {
     let source = match fs::read_to_string(file) {
         Ok(s) => s,
         Err(e) => {
@@ -220,22 +217,20 @@ fn cmd_run(file: &PathBuf, no_typecheck: bool) -> ExitCode {
     };
 
     // Type check the expanded AST
-    if !no_typecheck {
-        let type_loader = CliModuleLoader::new(&loader);
-        match type_check_with_modules(
-            &expanded.exprs,
-            &interner,
-            Some(file.as_path()),
-            &type_loader,
-        ) {
-            TypeCheckResult::Ok { .. } => {}
-            TypeCheckResult::Err { error } => {
-                eprintln!(
-                    "{}",
-                    format_error_with_location(&error, &line_map, &filename)
-                );
-                return ExitCode::FAILURE;
-            }
+    let type_loader = CliModuleLoader::new(&loader);
+    match type_check_with_modules(
+        &expanded.exprs,
+        &interner,
+        Some(file.as_path()),
+        &type_loader,
+    ) {
+        TypeCheckResult::Ok { .. } => {}
+        TypeCheckResult::Err { error } => {
+            eprintln!(
+                "{}",
+                format_error_with_location(&error, &line_map, &filename)
+            );
+            return ExitCode::FAILURE;
         }
     }
 

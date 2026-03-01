@@ -6,7 +6,6 @@ use marlang_core::intern::Interner;
 use marlang_core::span::Span;
 
 use crate::ast::*;
-use crate::builtins::resolve_constraints;
 use crate::checker::{ModuleCacheState, TypeModuleCache, TypeModuleLoader};
 use crate::env::*;
 use crate::errors::TypeError;
@@ -34,7 +33,6 @@ fn strip_marks(name: &str) -> &str {
 pub struct InferResult {
     pub ty: Type,
     pub subst: Substitution,
-    pub constraints: Vec<Constraint>,
     pub effects: EffectRow,
 }
 
@@ -42,16 +40,6 @@ fn pure_result(ty: Type) -> InferResult {
     InferResult {
         ty,
         subst: empty_subst(),
-        constraints: vec![],
-        effects: effect_row_empty(),
-    }
-}
-
-fn pure_result_with(ty: Type, subst: Substitution, constraints: Vec<Constraint>) -> InferResult {
-    InferResult {
-        ty,
-        subst,
-        constraints,
         effects: effect_row_empty(),
     }
 }
@@ -281,55 +269,23 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
     }
 }
 
-fn parse_constraint(
-    expr: &Expr,
-    env: &TypeEnv,
-    interner: &Interner,
-) -> Result<Constraint, TypeError> {
-    let elements = list_to_array(expr);
-    if elements.len() != 2 {
-        return Err(TypeError::InvalidTypeAnnotation {
-            message: "Constraint must be (ClassName typevar)".into(),
-            span: Some(expr.span()),
-        });
-    }
-    let class_name = get_symbol(elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
-        message: "Class name must be a symbol".into(),
-        span: Some(elements[0].span()),
-    })?;
-    let type_arg = parse_type_expr(elements[1], env, interner)?;
-    Ok(Constraint {
-        class: class_name.to_string(),
-        type_arg,
-    })
-}
-
 fn parse_type_annotation(
     expr: &Expr,
     env: &TypeEnv,
     interner: &Interner,
-) -> Result<(Type, Vec<Constraint>), TypeError> {
+) -> Result<Type, TypeError> {
     if let Expr::List { .. } = expr {
         let elements = list_to_array(expr);
         if !elements.is_empty() {
             if let Some("=>") = get_symbol(elements[0], interner) {
-                if elements.len() < 3 {
-                    return Err(TypeError::InvalidTypeAnnotation {
-                        message: "Constrained type needs constraints and a body".into(),
-                        span: Some(expr.span()),
-                    });
-                }
-                let mut constraints = Vec::new();
-                for e in &elements[1..elements.len() - 1] {
-                    constraints.push(parse_constraint(e, env, interner)?);
-                }
-                let ty = parse_type_expr(elements[elements.len() - 1], env, interner)?;
-                return Ok((ty, constraints));
+                return Err(TypeError::InvalidTypeAnnotation {
+                    message: "'=> (constrained types)' declarations are not supported".into(),
+                    span: Some(expr.span()),
+                });
             }
         }
     }
-    let ty = parse_type_expr(expr, env, interner)?;
-    Ok((ty, vec![]))
+    parse_type_expr(expr, env, interner)
 }
 
 // ===== Pattern Parsing =====
@@ -413,7 +369,13 @@ pub fn infer_expr(
                     "cond" => return infer_cond(env, &elements, interner),
                     "match" => return infer_match(env, &elements, interner),
                     "data" => return infer_data_def(env, &elements, interner),
-                    "class" | "instance" | "type" | "foreign" | "foreign-lib" | "defmacro" => {
+                    "class" | "instance" => {
+                        return Err(TypeError::InvalidTypeAnnotation {
+                            message: format!("'{}' declarations are not supported", sym),
+                            span: Some(elements[0].span()),
+                        });
+                    }
+                    "type" | "foreign" | "foreign-lib" | "defmacro" => {
                         return Ok(pure_result(t_unit()));
                     }
                     "quote" | "quasiquote" => {
@@ -466,8 +428,8 @@ fn infer_atom(
                     name: strip_marks(name).to_string(),
                     span: Some(span),
                 })?;
-            let (ty, constraints) = instantiate(&scheme);
-            Ok(pure_result_with(ty, empty_subst(), constraints))
+            let ty = instantiate(&scheme);
+            Ok(pure_result(ty))
         }
     }
 }
@@ -501,8 +463,7 @@ fn infer_define(
                     span: Some(name_elements[0].span()),
                 })?;
 
-            let (annotated_type, annotated_constraints) =
-                parse_type_annotation(name_elements[2], env, interner)?;
+            let annotated_type = parse_type_annotation(name_elements[2], env, interner)?;
             let value_result = infer_expr(env, value_expr, interner)?;
             let unify_subst = unify_with_context(
                 &annotated_type,
@@ -510,13 +471,10 @@ fn infer_define(
                 &format!("definition of {name}"),
             )?;
             let final_subst = compose_subst(&unify_subst, &value_result.subst);
-            let mut all_constraints = annotated_constraints;
-            all_constraints.extend(value_result.constraints);
 
             return Ok(InferResult {
                 ty: t_unit(),
                 subst: final_subst,
-                constraints: resolve_constraints(&all_constraints),
                 effects: value_result.effects,
             });
         }
@@ -533,7 +491,6 @@ fn infer_define(
     Ok(InferResult {
         ty: t_unit(),
         subst: result.subst,
-        constraints: result.constraints,
         effects: result.effects,
     })
 }
@@ -603,10 +560,7 @@ fn infer_lambda(
                     name,
                     TypeScheme {
                         quantified_vars: vec![],
-                        qual_type: QualType {
-                            constraints: vec![],
-                            ty,
-                        },
+                        ty,
                     },
                 );
                 continue;
@@ -624,10 +578,7 @@ fn infer_lambda(
             name,
             TypeScheme {
                 quantified_vars: vec![],
-                qual_type: QualType {
-                    constraints: vec![],
-                    ty: param_type,
-                },
+                ty: param_type,
             },
         );
     }
@@ -667,10 +618,7 @@ fn infer_lambda(
             rest_name,
             TypeScheme {
                 quantified_vars: vec![],
-                qual_type: QualType {
-                    constraints: vec![],
-                    ty: list_type,
-                },
+                ty: list_type,
             },
         );
         rest_param = Some((rest_name.to_string(), elem_type));
@@ -679,7 +627,6 @@ fn infer_lambda(
     // Infer body
     let mut body_subst = empty_subst();
     let mut body_type = t_unit();
-    let mut all_constraints = Vec::new();
     let mut body_effects = effect_row_empty();
 
     for (i, body_expr) in body_exprs.iter().enumerate() {
@@ -687,7 +634,6 @@ fn infer_lambda(
         let result = infer_expr(&env_for_body, body_expr, interner)?;
 
         body_subst = compose_subst(&result.subst, &body_subst);
-        all_constraints.extend(result.constraints);
         body_effects = combine_effect_rows(&body_effects, &result.effects);
 
         if i == body_exprs.len() - 1 {
@@ -715,7 +661,6 @@ fn infer_lambda(
     Ok(InferResult {
         ty: fn_type,
         subst: body_subst,
-        constraints: all_constraints,
         effects: effect_row_empty(),
     })
 }
@@ -758,24 +703,17 @@ fn infer_if(
             &combine_effect_rows(&cond_result.effects, &then_result.effects),
             &else_result.effects,
         );
-        let mut constraints = cond_result.constraints;
-        constraints.extend(then_result.constraints);
-        constraints.extend(else_result.constraints);
 
         Ok(InferResult {
             ty: apply_subst(&final_subst, &then_type),
             subst: final_subst,
-            constraints,
             effects: all_effects,
         })
     } else {
         let all_effects = combine_effect_rows(&cond_result.effects, &then_result.effects);
-        let mut constraints = cond_result.constraints;
-        constraints.extend(then_result.constraints);
         Ok(InferResult {
             ty: t_unit(),
             subst: s2,
-            constraints,
             effects: all_effects,
         })
     }
@@ -803,7 +741,6 @@ fn infer_let(
     let bindings = list_to_array(bindings_expr);
     let mut let_env = child_env(env);
     let mut subst = empty_subst();
-    let mut all_constraints: Vec<Constraint> = Vec::new();
     let mut all_effects = effect_row_empty();
 
     for binding in &bindings {
@@ -850,7 +787,6 @@ fn infer_let(
         let value_result = infer_expr(&env_for_value, value_expr, interner)?;
 
         subst = compose_subst(&value_result.subst, &subst);
-        all_constraints.extend(value_result.constraints);
         all_effects = combine_effect_rows(&all_effects, &value_result.effects);
 
         let mut binding_type = value_result.ty;
@@ -863,11 +799,7 @@ fn infer_let(
         }
 
         let env_for_gen = apply_subst_env(&subst, &let_env);
-        let scheme = generalize(
-            &env_for_gen,
-            &all_constraints,
-            &apply_subst(&subst, &binding_type),
-        );
+        let scheme = generalize(&env_for_gen, &apply_subst(&subst, &binding_type));
         let_env = extend_env(&let_env, &name, scheme);
     }
 
@@ -878,7 +810,6 @@ fn infer_let(
         let result = infer_expr(&env_for_body, body_expr, interner)?;
 
         subst = compose_subst(&result.subst, &subst);
-        all_constraints.extend(result.constraints);
         all_effects = combine_effect_rows(&all_effects, &result.effects);
 
         if i == body_exprs.len() - 1 {
@@ -889,7 +820,6 @@ fn infer_let(
     Ok(InferResult {
         ty: apply_subst(&subst, &body_type),
         subst,
-        constraints: all_constraints,
         effects: all_effects,
     })
 }
@@ -909,14 +839,12 @@ fn infer_begin(
 
     let mut subst = empty_subst();
     let mut last_type = t_unit();
-    let mut all_constraints = Vec::new();
     let mut all_effects = effect_row_empty();
 
     for body_expr in body_exprs {
         let env_for_body = apply_subst_env(&subst, env);
         let result = infer_expr(&env_for_body, body_expr, interner)?;
         subst = compose_subst(&result.subst, &subst);
-        all_constraints.extend(result.constraints);
         all_effects = combine_effect_rows(&all_effects, &result.effects);
         last_type = result.ty;
     }
@@ -924,7 +852,6 @@ fn infer_begin(
     Ok(InferResult {
         ty: apply_subst(&subst, &last_type),
         subst,
-        constraints: all_constraints,
         effects: all_effects,
     })
 }
@@ -943,7 +870,6 @@ fn infer_cond(
 
     let mut subst = empty_subst();
     let mut result_type: Option<Type> = None;
-    let mut all_constraints = Vec::new();
     let mut all_effects = effect_row_empty();
 
     for clause_expr in clauses {
@@ -963,14 +889,12 @@ fn infer_cond(
             let test_result = infer_expr(&test_env, test_expr, interner)?;
             let test_unify = unify_with_context(&test_result.ty, &t_bool(), "cond test")?;
             subst = compose_subst(&test_unify, &compose_subst(&test_result.subst, &subst));
-            all_constraints.extend(test_result.constraints);
             all_effects = combine_effect_rows(&all_effects, &test_result.effects);
         }
 
         let result_env = apply_subst_env(&subst, env);
         let expr_result = infer_expr(&result_env, result_expr, interner)?;
         subst = compose_subst(&expr_result.subst, &subst);
-        all_constraints.extend(expr_result.constraints);
         all_effects = combine_effect_rows(&all_effects, &expr_result.effects);
 
         let clause_type = apply_subst(&subst, &expr_result.ty);
@@ -988,7 +912,6 @@ fn infer_cond(
     Ok(InferResult {
         ty: result_type.unwrap_or_else(t_unit),
         subst,
-        constraints: all_constraints,
         effects: all_effects,
     })
 }
@@ -1075,7 +998,6 @@ fn infer_match(
     let mut subst = scrutinee_result.subst;
     let mut scrutinee_type = scrutinee_result.ty;
     let mut result_type: Option<Type> = None;
-    let mut all_constraints = scrutinee_result.constraints;
     let mut all_effects = scrutinee_result.effects;
     let mut parsed_patterns: Vec<Pattern> = Vec::new();
 
@@ -1117,17 +1039,13 @@ fn infer_match(
                 name,
                 TypeScheme {
                     quantified_vars: vec![],
-                    qual_type: QualType {
-                        constraints: vec![],
-                        ty: apply_subst(&subst, ty),
-                    },
+                    ty: apply_subst(&subst, ty),
                 },
             );
         }
 
         let body_result = infer_expr(&branch_env, body_expr, interner)?;
         subst = compose_subst(&body_result.subst, &subst);
-        all_constraints.extend(body_result.constraints);
         all_effects = combine_effect_rows(&all_effects, &body_result.effects);
 
         let branch_type = apply_subst(&subst, &body_result.ty);
@@ -1153,7 +1071,6 @@ fn infer_match(
     Ok(InferResult {
         ty: result_type.unwrap_or_else(t_unit),
         subst,
-        constraints: all_constraints,
         effects: all_effects,
     })
 }
@@ -1294,7 +1211,6 @@ fn infer_variadic_arith(
     }
 
     let mut subst = empty_subst();
-    let mut all_constraints = Vec::new();
     let mut all_effects = effect_row_empty();
     let mut arg_types = Vec::new();
 
@@ -1302,7 +1218,6 @@ fn infer_variadic_arith(
         let env_for_arg = apply_subst_env(&subst, env);
         let arg_result = infer_expr(&env_for_arg, arg_expr, interner)?;
         subst = compose_subst(&arg_result.subst, &subst);
-        all_constraints.extend(arg_result.constraints);
         all_effects = combine_effect_rows(&all_effects, &arg_result.effects);
         arg_types.push(arg_result.ty);
     }
@@ -1319,15 +1234,9 @@ fn infer_variadic_arith(
         unified_type = apply_subst(&subst, &unified_type);
     }
 
-    all_constraints.push(Constraint {
-        class: "Num".into(),
-        type_arg: unified_type.clone(),
-    });
-
     Ok(InferResult {
         ty: unified_type,
         subst,
-        constraints: all_constraints,
         effects: all_effects,
     })
 }
@@ -1404,21 +1313,18 @@ fn infer_ffi_application(
         }
 
         let mut subst = empty_subst();
-        let mut all_constraints = Vec::new();
         let mut all_effects = effect_row_empty();
 
         // Infer lib arg
         let env_for_lib = apply_subst_env(&subst, env);
         let lib_result = infer_expr(&env_for_lib, arg_exprs[0], interner)?;
         subst = compose_subst(&lib_result.subst, &subst);
-        all_constraints.extend(lib_result.constraints);
         all_effects = combine_effect_rows(&all_effects, &lib_result.effects);
 
         // Infer fn-name arg
         let env_for_fn = apply_subst_env(&subst, env);
         let fn_result = infer_expr(&env_for_fn, arg_exprs[1], interner)?;
         subst = compose_subst(&fn_result.subst, &subst);
-        all_constraints.extend(fn_result.constraints);
         all_effects = combine_effect_rows(&all_effects, &fn_result.effects);
 
         // Infer and unify each call arg with declared param type
@@ -1426,7 +1332,6 @@ fn infer_ffi_application(
             let env_for_arg = apply_subst_env(&subst, env);
             let arg_result = infer_expr(&env_for_arg, arg_expr, interner)?;
             subst = compose_subst(&arg_result.subst, &subst);
-            all_constraints.extend(arg_result.constraints);
             all_effects = combine_effect_rows(&all_effects, &arg_result.effects);
 
             let arg_type = apply_subst(&subst, &arg_result.ty);
@@ -1441,14 +1346,12 @@ fn infer_ffi_application(
         return Ok(InferResult {
             ty: decl_result,
             subst,
-            constraints: all_constraints,
             effects: all_effects,
         });
     }
 
     // Non-ffi-call variadic functions: struct-new, struct-get, struct-set, list
     let mut subst = empty_subst();
-    let mut all_constraints = Vec::new();
     let mut all_effects = effect_row_empty();
     let mut arg_types = Vec::new();
 
@@ -1456,7 +1359,6 @@ fn infer_ffi_application(
         let env_for_arg = apply_subst_env(&subst, env);
         let arg_result = infer_expr(&env_for_arg, arg_expr, interner)?;
         subst = compose_subst(&arg_result.subst, &subst);
-        all_constraints.extend(arg_result.constraints);
         all_effects = combine_effect_rows(&all_effects, &arg_result.effects);
         arg_types.push(arg_result.ty);
     }
@@ -1578,7 +1480,6 @@ fn infer_ffi_application(
     Ok(InferResult {
         ty: result_type,
         subst,
-        constraints: all_constraints,
         effects: all_effects,
     })
 }
@@ -1603,7 +1504,6 @@ fn infer_application(
 
     let fn_result = infer_expr(env, fn_expr, interner)?;
     let mut subst = fn_result.subst;
-    let mut all_constraints = fn_result.constraints;
     let mut all_effects = fn_result.effects;
     let mut arg_types = Vec::new();
 
@@ -1611,7 +1511,6 @@ fn infer_application(
         let env_for_arg = apply_subst_env(&subst, env);
         let arg_result = infer_expr(&env_for_arg, arg_expr, interner)?;
         subst = compose_subst(&arg_result.subst, &subst);
-        all_constraints.extend(arg_result.constraints);
         all_effects = combine_effect_rows(&all_effects, &arg_result.effects);
         arg_types.push(arg_result.ty);
     }
@@ -1650,7 +1549,6 @@ fn infer_application(
     Ok(InferResult {
         ty: apply_subst(&final_subst, &result_type),
         subst: final_subst,
-        constraints: all_constraints,
         effects: all_effects,
     })
 }
@@ -1682,10 +1580,9 @@ fn parse_effect_op(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Ef
     })?;
 
     let type_expr = elements[1];
-    let mut constraints: Vec<Constraint> = Vec::new();
     let mut arrow_expr = type_expr;
 
-    // Check for constrained type: (=> constraints... arrow-type)
+    // Check for constrained type: (=> constraints... arrow-type) — just skip to the arrow type
     if let Expr::List { .. } = type_expr {
         let type_elements = list_to_array(type_expr);
         if !type_elements.is_empty() && is_symbol(type_elements[0], interner, "=>") {
@@ -1694,9 +1591,6 @@ fn parse_effect_op(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Ef
                     message: "Constrained type needs constraints and a body".into(),
                     span: Some(type_expr.span()),
                 });
-            }
-            for e in &type_elements[1..type_elements.len() - 1] {
-                constraints.push(parse_constraint(e, env, interner)?);
             }
             arrow_expr = type_elements[type_elements.len() - 1];
         }
@@ -1716,13 +1610,6 @@ fn parse_effect_op(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Ef
     // Collect type parameters
     let mut type_params = Vec::new();
     let mut seen = HashSet::new();
-    for c in &constraints {
-        for v in free_type_vars(&c.type_arg) {
-            if seen.insert(v.clone()) {
-                type_params.push(v);
-            }
-        }
-    }
     for p in &params {
         for v in free_type_vars(p) {
             if seen.insert(v.clone()) {
@@ -1739,7 +1626,6 @@ fn parse_effect_op(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Ef
     Ok(EffectOp {
         name: op_name.to_string(),
         type_params,
-        constraints,
         params,
         result,
     })
@@ -1779,7 +1665,6 @@ fn infer_perform(
 
     let arg_exprs = &elements[2..];
     let mut subst = empty_subst();
-    let mut all_constraints = Vec::new();
     let mut all_effects = effect_row_empty();
     let mut arg_types = Vec::new();
 
@@ -1787,7 +1672,6 @@ fn infer_perform(
         let env_for_arg = apply_subst_env(&subst, env);
         let arg_result = infer_expr(&env_for_arg, arg_expr, interner)?;
         subst = compose_subst(&arg_result.subst, &subst);
-        all_constraints.extend(arg_result.constraints);
         all_effects = combine_effect_rows(&all_effects, &arg_result.effects);
         arg_types.push(arg_result.ty);
     }
@@ -1817,10 +1701,6 @@ fn infer_perform(
         .collect();
     let instantiated_result = apply_subst(&tp_subst, &op.result);
 
-    for c in &op.constraints {
-        all_constraints.push(apply_subst_constraint(&tp_subst, c));
-    }
-
     for (i, arg_type) in arg_types.iter().enumerate() {
         let at = apply_subst(&subst, arg_type);
         let pt = &instantiated_params[i];
@@ -1835,7 +1715,6 @@ fn infer_perform(
     Ok(InferResult {
         ty: result_type,
         subst,
-        constraints: all_constraints,
         effects: all_effects,
     })
 }
@@ -1858,7 +1737,6 @@ fn infer_handle(
     let body_result = infer_expr(env, body_expr, interner)?;
 
     let mut subst = body_result.subst.clone();
-    let mut all_constraints = body_result.constraints.clone();
     let mut result_type: Option<Type> = None;
     let mut handled_effects: Vec<String> = Vec::new();
 
@@ -1902,10 +1780,7 @@ fn infer_handle(
                                 return_var_name,
                                 TypeScheme {
                                     quantified_vars: vec![],
-                                    qual_type: QualType {
-                                        constraints: vec![],
-                                        ty: return_type,
-                                    },
+                                    ty: return_type,
                                 },
                             );
                         }
@@ -1913,7 +1788,6 @@ fn infer_handle(
 
                     let handler_result = infer_expr(&handler_env, body, interner)?;
                     subst = compose_subst(&handler_result.subst, &subst);
-                    all_constraints.extend(handler_result.constraints);
 
                     let handler_type = apply_subst(&subst, &handler_result.ty);
                     match &result_type {
@@ -1947,10 +1821,7 @@ fn infer_handle(
                                 arg_name,
                                 TypeScheme {
                                     quantified_vars: vec![],
-                                    qual_type: QualType {
-                                        constraints: vec![],
-                                        ty: op_info.1.params[i].clone(),
-                                    },
+                                    ty: op_info.1.params[i].clone(),
                                 },
                             );
                         }
@@ -1969,10 +1840,7 @@ fn infer_handle(
                             k_name,
                             TypeScheme {
                                 quantified_vars: vec![],
-                                qual_type: QualType {
-                                    constraints: vec![],
-                                    ty: k_type,
-                                },
+                                ty: k_type,
                             },
                         );
                     }
@@ -1980,7 +1848,6 @@ fn infer_handle(
 
                 let handler_result = infer_expr(&handler_env, body, interner)?;
                 subst = compose_subst(&handler_result.subst, &subst);
-                all_constraints.extend(handler_result.constraints);
 
                 let handler_type = apply_subst(&subst, &handler_result.ty);
                 match &result_type {
@@ -2015,7 +1882,6 @@ fn infer_handle(
     Ok(InferResult {
         ty: apply_subst(&subst, &final_type),
         subst,
-        constraints: all_constraints,
         effects: remaining_effects,
     })
 }
@@ -2036,13 +1902,11 @@ fn infer_resume(
 
     let cont_result = infer_expr(env, elements[1], interner)?;
     let mut subst = cont_result.subst;
-    let mut all_constraints = cont_result.constraints;
     let mut all_effects = cont_result.effects;
 
     let value_env = apply_subst_env(&subst, env);
     let value_result = infer_expr(&value_env, elements[2], interner)?;
     subst = compose_subst(&value_result.subst, &subst);
-    all_constraints.extend(value_result.constraints);
     all_effects = combine_effect_rows(&all_effects, &value_result.effects);
 
     let return_type = fresh_type_var();
@@ -2056,7 +1920,6 @@ fn infer_resume(
     Ok(InferResult {
         ty: apply_subst(&subst, &return_type),
         subst,
-        constraints: all_constraints,
         effects: all_effects,
     })
 }
@@ -2163,10 +2026,7 @@ fn process_data_def(
 
         let scheme = TypeScheme {
             quantified_vars: type_params.clone(),
-            qual_type: QualType {
-                constraints: vec![],
-                ty: ctor_type,
-            },
+            ty: ctor_type,
         };
 
         new_env = extend_env(&new_env, &ctor.name, scheme);
@@ -2186,7 +2046,6 @@ fn process_define(
 
     let name: String;
     let mut annotated_type: Option<Type> = None;
-    let mut annotated_constraints: Vec<Constraint> = Vec::new();
 
     if let Expr::List { .. } = name_expr {
         let name_elements = list_to_array(name_expr);
@@ -2198,9 +2057,8 @@ fn process_define(
                 })?
                 .to_string();
 
-            let (ty, cs) = parse_type_annotation(name_elements[2], env, interner)?;
+            let ty = parse_type_annotation(name_elements[2], env, interner)?;
             annotated_type = Some(ty);
-            annotated_constraints = cs;
         } else {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "Invalid define syntax".into(),
@@ -2223,10 +2081,7 @@ fn process_define(
         &name,
         TypeScheme {
             quantified_vars: vec![],
-            qual_type: QualType {
-                constraints: annotated_constraints.clone(),
-                ty: placeholder_type,
-            },
+            ty: placeholder_type,
         },
     );
 
@@ -2243,14 +2098,8 @@ fn process_define(
         value_type = apply_subst(&subst, ann_type);
     }
 
-    let mut all_constraints = annotated_constraints;
-    all_constraints.extend(value_result.constraints);
     let gen_env = apply_subst_env(&subst, env);
-    let scheme = generalize(
-        &gen_env,
-        &all_constraints,
-        &apply_subst(&subst, &value_type),
-    );
+    let scheme = generalize(&gen_env, &apply_subst(&subst, &value_type));
 
     let new_env = extend_env(env, &name, scheme);
     Ok((new_env, subst))
@@ -2658,26 +2507,6 @@ fn infer_program_inner(
 
         global_subst = compose_subst(&result.subst, &global_subst);
         types.push(apply_subst(&global_subst, &result.ty));
-
-        // Check constraints
-        let substituted_constraints: Vec<Constraint> = result
-            .constraints
-            .iter()
-            .map(|c| Constraint {
-                class: c.class.clone(),
-                type_arg: apply_subst(&global_subst, &c.type_arg),
-            })
-            .collect();
-
-        let resolved = resolve_constraints(&substituted_constraints);
-        for c in &resolved {
-            if !matches!(c.type_arg, Type::Var(_)) {
-                return Err(TypeError::NoInstance {
-                    constraint: c.clone(),
-                    span: Some(expr.span()),
-                });
-            }
-        }
     }
 
     Ok((current_env, types))

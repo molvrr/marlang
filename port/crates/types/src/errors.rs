@@ -1,4 +1,4 @@
-use crate::ast::{format_constraint, format_pattern, format_type, Constraint, Pattern, Type};
+use crate::ast::{format_pattern, format_type, Pattern, Type};
 use marlang_core::span::{LineMap, Span};
 
 #[derive(Debug, Clone)]
@@ -26,14 +26,6 @@ pub enum TypeError {
         name: String,
         span: Option<Span>,
     },
-    UndefinedClass {
-        name: String,
-        span: Option<Span>,
-    },
-    NoInstance {
-        constraint: Constraint,
-        span: Option<Span>,
-    },
     DuplicateDefinition {
         name: String,
         what: String,
@@ -59,22 +51,12 @@ pub enum TypeError {
         missing: Vec<String>,
         span: Option<Span>,
     },
-    OverlappingInstances {
-        class_name: String,
-        ty: Type,
-        span: Option<Span>,
-    },
     MissingTypeAnnotation {
         name: String,
         span: Option<Span>,
     },
     InvalidTypeAnnotation {
         message: String,
-        span: Option<Span>,
-    },
-    AmbiguousType {
-        var_name: String,
-        constraints: Vec<Constraint>,
         span: Option<Span>,
     },
     CyclicTypeAlias {
@@ -118,12 +100,6 @@ pub fn format_error(err: &TypeError) -> String {
         TypeError::UndefinedConstructor { name, .. } => {
             format!("Undefined constructor: {name}")
         }
-        TypeError::UndefinedClass { name, .. } => {
-            format!("Undefined typeclass: {name}")
-        }
-        TypeError::NoInstance { constraint, .. } => {
-            format!("No instance for {}", format_constraint(constraint))
-        }
         TypeError::DuplicateDefinition { name, what, .. } => {
             format!("Duplicate {what}: {name}")
         }
@@ -154,25 +130,11 @@ pub fn format_error(err: &TypeError) -> String {
         TypeError::NonExhaustivePatterns { missing, .. } => {
             format!("Non-exhaustive patterns. Missing: {}", missing.join(", "))
         }
-        TypeError::OverlappingInstances { class_name, ty, .. } => {
-            format!("Overlapping instances for {class_name} {}", format_type(ty))
-        }
         TypeError::MissingTypeAnnotation { name, .. } => {
             format!("Missing type annotation for top-level definition: {name}")
         }
         TypeError::InvalidTypeAnnotation { message, .. } => {
             format!("Invalid type annotation: {message}")
-        }
-        TypeError::AmbiguousType {
-            var_name,
-            constraints,
-            ..
-        } => {
-            let cs: Vec<_> = constraints.iter().map(format_constraint).collect();
-            format!(
-                "Ambiguous type variable {var_name} with constraints: {}",
-                cs.join(", ")
-            )
         }
         TypeError::CyclicTypeAlias { name, .. } => {
             format!("Cyclic type alias: {name}")
@@ -194,17 +156,13 @@ pub fn error_span(err: &TypeError) -> Option<Span> {
         | TypeError::UndefinedVariable { span, .. }
         | TypeError::UndefinedType { span, .. }
         | TypeError::UndefinedConstructor { span, .. }
-        | TypeError::UndefinedClass { span, .. }
-        | TypeError::NoInstance { span, .. }
         | TypeError::DuplicateDefinition { span, .. }
         | TypeError::ArityMismatch { span, .. }
         | TypeError::NotAFunction { span, .. }
         | TypeError::PatternTypeMismatch { span, .. }
         | TypeError::NonExhaustivePatterns { span, .. }
-        | TypeError::OverlappingInstances { span, .. }
         | TypeError::MissingTypeAnnotation { span, .. }
         | TypeError::InvalidTypeAnnotation { span, .. }
-        | TypeError::AmbiguousType { span, .. }
         | TypeError::CyclicTypeAlias { span, .. }
         | TypeError::KindError { span, .. }
         | TypeError::InternalError { span, .. } => *span,

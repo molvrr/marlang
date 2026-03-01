@@ -25,7 +25,6 @@ impl EffectRow {
 pub struct EffectOp {
     pub name: String,
     pub type_params: Vec<String>,
-    pub constraints: Vec<Constraint>,
     pub params: Vec<Type>,
     pub result: Type,
 }
@@ -90,21 +89,9 @@ pub enum Type {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Constraint {
-    pub class: String,
-    pub type_arg: Type,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct QualType {
-    pub constraints: Vec<Constraint>,
-    pub ty: Type,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct TypeScheme {
     pub quantified_vars: Vec<String>,
-    pub qual_type: QualType,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,20 +106,6 @@ pub struct DataType {
     pub name: String,
     pub type_params: Vec<String>,
     pub constructors: Vec<Constructor>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TypeClass {
-    pub name: String,
-    pub type_param: String,
-    pub superclasses: Vec<String>,
-    pub methods: Vec<(String, Type)>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ClassInstance {
-    pub class_name: String,
-    pub for_type: Type,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -288,27 +261,14 @@ pub fn t_channel() -> Type {
 pub fn monotype(t: Type) -> TypeScheme {
     TypeScheme {
         quantified_vars: vec![],
-        qual_type: QualType {
-            constraints: vec![],
-            ty: t,
-        },
+        ty: t,
     }
 }
 
 pub fn polytype(vars: Vec<&str>, t: Type) -> TypeScheme {
     TypeScheme {
         quantified_vars: vars.into_iter().map(String::from).collect(),
-        qual_type: QualType {
-            constraints: vec![],
-            ty: t,
-        },
-    }
-}
-
-pub fn constrained_type(vars: Vec<&str>, constraints: Vec<Constraint>, t: Type) -> TypeScheme {
-    TypeScheme {
-        quantified_vars: vars.into_iter().map(String::from).collect(),
-        qual_type: QualType { constraints, ty: t },
+        ty: t,
     }
 }
 
@@ -404,16 +364,9 @@ pub fn free_effect_row_vars(row: &EffectRow) -> HashSet<String> {
 }
 
 pub fn free_type_vars_scheme(scheme: &TypeScheme) -> HashSet<String> {
-    let mut s = free_type_vars(&scheme.qual_type.ty);
+    let mut s = free_type_vars(&scheme.ty);
     for v in &scheme.quantified_vars {
         s.remove(v);
-    }
-    for c in &scheme.qual_type.constraints {
-        for v in free_type_vars(&c.type_arg) {
-            if !scheme.quantified_vars.contains(&v) {
-                s.insert(v);
-            }
-        }
     }
     s
 }
@@ -486,28 +439,12 @@ pub fn format_type(t: &Type) -> String {
     }
 }
 
-pub fn format_constraint(c: &Constraint) -> String {
-    format!("({} {})", c.class, format_type(&c.type_arg))
-}
-
 pub fn format_scheme(scheme: &TypeScheme) -> String {
     let mut result = String::new();
     if !scheme.quantified_vars.is_empty() {
         result.push_str(&format!("(forall {} ", scheme.quantified_vars.join(" ")));
     }
-    if !scheme.qual_type.constraints.is_empty() {
-        let cs: Vec<_> = scheme
-            .qual_type
-            .constraints
-            .iter()
-            .map(format_constraint)
-            .collect();
-        result.push_str(&format!("(=> {} ", cs.join(" ")));
-        result.push_str(&format_type(&scheme.qual_type.ty));
-        result.push(')');
-    } else {
-        result.push_str(&format_type(&scheme.qual_type.ty));
-    }
+    result.push_str(&format_type(&scheme.ty));
     if !scheme.quantified_vars.is_empty() {
         result.push(')');
     }

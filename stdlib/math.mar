@@ -18,30 +18,50 @@
 (define (tau : Float) 6.283185307179586)
 
 ; ============================================================
-; Basic Operations (polymorphic via Num/Ord typeclasses)
+; Basic Operations — Int versions
 ; ============================================================
 
-; abs uses the built-in abs function
-; sign uses the built-in sign function
-
-; min-of : (=> (Ord a) (-> a a a))
-; Minimum of two values
-(define (min-of : (=> (Ord a) (-> a a a)))
+; min-of : (-> Int Int Int)
+; Minimum of two integers
+(define (min-of : (-> Int Int Int))
   (lambda (x y)
     (if (< x y) x y)))
 
-; max-of : (=> (Ord a) (-> a a a))
-; Maximum of two values
-(define (max-of : (=> (Ord a) (-> a a a)))
+; max-of : (-> Int Int Int)
+; Maximum of two integers
+(define (max-of : (-> Int Int Int))
   (lambda (x y)
     (if (> x y) x y)))
 
-; clamp : (=> (Ord a) (-> a a a a))
-; Clamp a value between min and max bounds
-(define (clamp : (=> (Ord a) (-> a a a a)))
+; clamp : (-> Int Int Int Int)
+; Clamp an integer between min and max bounds
+(define (clamp : (-> Int Int Int Int))
   (lambda (lo hi x)
     (if (< x lo) lo
       (if (> x hi) hi x))))
+
+; ============================================================
+; Basic Operations — Float versions
+; ============================================================
+
+; min-of. : (-> Float Float Float)
+; Minimum of two floats
+(define (min-of. : (-> Float Float Float))
+  (lambda (x y)
+    (if (<. x y) x y)))
+
+; max-of. : (-> Float Float Float)
+; Maximum of two floats
+(define (max-of. : (-> Float Float Float))
+  (lambda (x y)
+    (if (>. x y) x y)))
+
+; clamp. : (-> Float Float Float Float)
+; Clamp a float between min and max bounds
+(define (clamp. : (-> Float Float Float Float))
+  (lambda (lo hi x)
+    (if (<. x lo) lo
+      (if (>. x hi) hi x))))
 
 ; ============================================================
 ; Rounding (Float -> Int)
@@ -55,30 +75,35 @@
 
 ; Note: pow, sqrt are built-in functions
 
-; square : (=> (Num a) (-> a a))
-; Square a number
-(define (square : (=> (Num a) (-> a a)))
-  (lambda (x) (* x x)))
+; square : (-> Float Float)
+; Square a number (Float only)
+(define (square : (-> Float Float))
+  (lambda (x) (*. x x)))
 
-; cube : (=> (Num a) (-> a a))
-; Cube a number
-(define (cube : (=> (Num a) (-> a a)))
-  (lambda (x) (* x (* x x))))
+; cube : (-> Float Float)
+; Cube a number (Float only)
+(define (cube : (-> Float Float))
+  (lambda (x) (*. x (*. x x))))
 
 ; ============================================================
 ; Integer Division and Modulo
 ; ============================================================
 
-; Note: mod, rem are built-in functions
+; Note: mod, rem are built-in functions (Int)
+; Note: rem. is the Float version
 
-; div : (=> (Num a) (-> a a a))
+; div : (-> Int Int Int)
 ; Integer division (truncated toward zero)
-; Uses rem to compute: a = (a / b) * b + (a rem b)
-; So (a / b) = (a - (a rem b)) / b
-(define (div : (=> (Num a) (-> a a a)))
+(define (div : (-> Int Int Int))
   (lambda (a b)
     (let ((r (rem a b)))
       (/ (- a r) b))))
+
+; div. : (-> Float Float Float)
+; Float division (same as /. but named for consistency)
+(define (div. : (-> Float Float Float))
+  (lambda (a b)
+    (/. a b)))
 
 ; even : (-> Int Bool)
 ; Check if an integer is even
@@ -102,7 +127,7 @@
 ; Logarithm with arbitrary base
 (define (log-base : (-> Float Float Float))
   (lambda (base x)
-    (/ (log x) (log base))))
+    (/. (log x) (log base))))
 
 ; ============================================================
 ; Trigonometric Functions
@@ -124,13 +149,13 @@
 ; Convert radians to degrees
 (define (degrees : (-> Float Float))
   (lambda (radians)
-    (* radians (/ 180.0 pi))))
+    (*. radians (/. 180.0 pi))))
 
 ; radians : (-> Float Float)
 ; Convert degrees to radians
 (define (radians : (-> Float Float))
   (lambda (deg)
-    (* deg (/ pi 180.0))))
+    (*. deg (/. pi 180.0))))
 
 ; ============================================================
 ; Special Value Checks
@@ -139,7 +164,7 @@
 ; Note: is-nan, is-infinite, is-finite are built-in functions
 
 ; ============================================================
-; Number Theory Functions
+; Number Theory Functions (Int only)
 ; ============================================================
 
 ; gcd : (-> Int Int Int)

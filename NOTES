@@ -1,6 +1,7 @@
 - [x] Deprecate typescript version
-- [ ] Rewrite CLAUDE.md with only needed info
-- [ ] Do we actually need typeclasses?
+- [x] Rewrite CLAUDE.md with only needed info
+- [x] Do we actually need typeclasses? — No. Removed in favor of OCaml-style operator split.
 - [ ] Cleanup code
 - [ ] JIT
 - [ ] Can we override builtin effect handlers?
+- [ ] Cross process messaging

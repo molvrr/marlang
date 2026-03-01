@@ -78,14 +78,38 @@
   ((MkPair (Some x) (Some y)) (+ x y))
   (_ 0))  ; => 3
 
-; === Typeclasses ===
-; Arithmetic operators (+, -, *, /) have Num constraint
-; Comparison operators (<, >, <=, >=) have Ord constraint
-; Equality (=) has Eq constraint
+; === OCaml-Style Operator Split ===
+;
+; Arithmetic and comparison operators are split by type:
+;   Int operators:   +  -  *  /  =  <  >  <=  >=  rem  abs  negate
+;   Float operators: +. -. *. /. =. <. >. <=. >=. rem. abs. negate.
+;   String comparison: string= string< string> string<= string>=
+;
+; Polymorphic: equal? (structural equality), show, print, println
 
-(define square (lambda (x) (* x x)))
-(square 5)    ; Works with Int => 25
-(square 2.5)  ; Works with Float => 6.25
+; Int arithmetic
+(define square-int (lambda (x) (* x x)))
+(square-int 5)  ; => 25
+
+; Float arithmetic (dot suffix)
+(define square-float (lambda (x) (*. x x)))
+(square-float 2.5)  ; => 6.25
+
+; Conversion between Int and Float
+(define (n : Int) 42)
+(+. (int->float n) 0.5)  ; => 42.5
+
+; Polymorphic equality
+(equal? (Some 1) (Some 1))  ; => #t
+(equal? (Some 1) (Some 2))  ; => #f
+
+; Polymorphic show
+(show 42)         ; => "42"
+(show (Some 1))   ; => "(Some 1)"
+
+; String comparison
+(string= "hello" "hello")  ; => #t
+(string< "abc" "def")      ; => #t
 
 ; Final result
 "Type system demo complete!"
