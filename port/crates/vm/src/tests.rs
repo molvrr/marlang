@@ -683,6 +683,12 @@ fn assert_formatted(source: &str, expected: &str) {
     assert_eq!(result, expected, "for: {}", source);
 }
 
+fn assert_output(source: &str, expected_output: &str) {
+    let (result, output) = eval_with_output(source);
+    result.expect(&format!("eval failed for: {}", source));
+    assert_eq!(output, expected_output, "output mismatch for: {}", source);
+}
+
 fn assert_error(source: &str, substring: &str) {
     let result = eval(source);
     match result {
@@ -1220,7 +1226,11 @@ fn exec_string_to_number() {
 #[test]
 fn exec_string_to_number_invalid() {
     // string->number now throws on invalid input via (perform throw ...)
-    assert_error("(string->number \"abc\")", "Unhandled effect: throw");
+    // With CPS dispatch, unhandled throw gives "Uncaught exception: ..." instead of "Unhandled effect: throw"
+    assert_error(
+        "(string->number \"abc\")",
+        "Uncaught exception: string->number: invalid number: abc",
+    );
 }
 
 #[test]
@@ -1566,6 +1576,131 @@ fn exec_continuation_one_shot_enforced() {
       (resume saved nil))))
 "#;
     assert_error(source, "one-shot");
+}
+
+// =====================================================================
+// ===== CPS Handler Dispatch Tests ====================================
+// =====================================================================
+
+#[test]
+fn cps_handle_throw_with_println() {
+    // Issue #4 repro: handle/throw where handler clause does (perform println ...)
+    // Previously this failed because the Rust call stack was unwound by the scheduler
+    // when println suspended, losing the handler dispatch context.
+    assert_output(
+        r#"(handle
+             (begin
+               (perform println "before throw")
+               (perform throw "oops")
+               "unreachable")
+             ((throw msg k) ->
+               (begin
+                 (perform println (string-append "caught: " msg))
+                 "handled")))"#,
+        "before throw\ncaught: oops\n",
+    );
+}
+
+#[test]
+fn cps_deep_handler_recatch() {
+    // Deep handler semantics: handler re-catches effects from resumed continuations
+    assert_num(
+        "(handle
+           (+ (perform get) (perform get))
+           ((get k) -> (resume k 10)))",
+        20.0,
+    );
+}
+
+#[test]
+fn cps_throw_unhandled_crashes_with_message() {
+    // Unhandled throw gives "Uncaught exception: ..." not "Unhandled effect: throw"
+    assert_error(
+        r#"(perform throw "something went wrong")"#,
+        "Uncaught exception: something went wrong",
+    );
+}
+
+#[test]
+fn cps_throw_caught_by_user_handler() {
+    // throw can be caught by a user handle block
+    assert_str(
+        r#"(handle
+             (begin (perform throw "err") "unreachable")
+             ((throw msg k) -> (string-append "caught: " msg)))"#,
+        "caught: err",
+    );
+}
+
+#[test]
+fn cps_nested_handlers_inner_catches() {
+    // Nested handlers: inner handler catches its effect, outer is unaffected
+    assert_num(
+        "(handle
+           (handle
+             (+ (perform get) 1)
+             ((get k) -> (resume k 100)))
+           ((get k) -> (resume k 0)))",
+        101.0,
+    );
+}
+
+#[test]
+fn cps_nested_handlers_outer_catches() {
+    // Nested handlers: inner doesn't handle the effect, outer catches it
+    assert_str(
+        r#"(handle
+           (handle
+             (perform ask)
+             ((put v k) -> "inner"))
+           ((ask k) -> (resume k "outer")))"#,
+        "outer",
+    );
+}
+
+#[test]
+fn cps_nested_handlers_propagation() {
+    // Effect not handled by inner handler propagates to outer
+    assert_num(
+        "(handle
+           (handle
+             (perform get)
+             ((put v k) -> (resume k nil)))
+           ((get k) -> (resume k 42)))",
+        42.0,
+    );
+}
+
+#[test]
+fn cps_handler_with_io_in_clause() {
+    // Handler clause that uses IO effects (println) - the core Issue #4 scenario
+    assert_output(
+        r#"(handle
+             (begin
+               (perform throw "test error")
+               "unreachable")
+             ((throw msg k) ->
+               (begin
+                 (perform println (string-append "Error: " msg))
+                 "done")))"#,
+        "Error: test error\n",
+    );
+}
+
+#[test]
+fn cps_stateful_counter() {
+    // Accumulation via handler wrapping (key correctness test for deep semantics)
+    assert_num(
+        "(handle
+           (begin
+             (perform tick)
+             (perform tick)
+             (perform tick)
+             (perform get-count))
+           ((tick k) -> (resume k nil))
+           ((get-count k) -> (resume k 3)))",
+        3.0,
+    );
 }
 
 // =====================================================================

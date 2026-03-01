@@ -292,8 +292,8 @@ const HANDLED_EFFECTS: &[&str] = &[
     "tcp-recv",
     "tcp-close",
     "tcp-close-listener",
-    // Exception effect (default handler crashes the fiber)
-    "throw",
+    // "throw" is NOT here — with CPS dispatch, user handlers catch throw inline.
+    // Unhandled throw uses try_default_handler → "Uncaught exception: ..." error.
 ];
 
 fn make_dummy_closure() -> Closure {
@@ -328,6 +328,7 @@ fn install_handler_frame(vm: &mut VM) {
         capture_frame_start: vm.frame_count,
         capture_stack_start: vm.stack_top,
         id: next_handler_id(),
+        is_scheduler: true,
     };
     vm.handler_stack.push(handler_frame);
 }

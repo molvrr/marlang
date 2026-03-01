@@ -3,16 +3,16 @@
 ; Channels provide synchronous communication between fibers,
 ; inspired by Go channels and Communicating Sequential Processes.
 ;
-; Run with: bun index.ts run examples/channels.mar --vm
+; Run with: cargo run -p marlang-cli -- run examples/channels.mar
 
 ; === Example 1: Unbuffered Channel ===
 ;
 ; Sender blocks until a receiver is ready (and vice versa)
 
 (define consume (lambda (ch)
-  (let ((v (perform chan-recv ch)))
-    (if (= v nil)
-      (perform println "done")
+  (match (perform chan-recv ch)
+    ((None) (perform println "done"))
+    ((Some v)
       (begin
         (perform println v)
         (consume ch))))))
@@ -27,7 +27,7 @@
       (perform chan-send ch 30)
       (perform chan-close ch)))
 
-    ; Consumer: receives until channel is closed (returns nil)
+    ; Consumer: receives until channel is closed (returns None)
     (consume ch))))
 
 ; Output:
@@ -41,20 +41,28 @@
 ;
 ; Multiple workers read from one channel, results collected in another
 
+(define recv! (lambda (ch)
+  (match (perform chan-recv ch)
+    ((Some v) v)
+    ((None) (perform throw "channel closed unexpectedly")))))
+
 (run-fibers (lambda ()
   (let ((jobs (perform chan-new 10))
         (results (perform chan-new 10)))
 
     ; Spawn 3 workers
     (perform fiber-spawn (lambda ()
-      (let ((j (perform chan-recv jobs)))
-        (perform chan-send results (* j j)))))
+      (let ((j (recv! jobs)))
+        (perform chan-send results (* j j))
+        nil)))
     (perform fiber-spawn (lambda ()
-      (let ((j (perform chan-recv jobs)))
-        (perform chan-send results (* j j)))))
+      (let ((j (recv! jobs)))
+        (perform chan-send results (* j j))
+        nil)))
     (perform fiber-spawn (lambda ()
-      (let ((j (perform chan-recv jobs)))
-        (perform chan-send results (* j j)))))
+      (let ((j (recv! jobs)))
+        (perform chan-send results (* j j))
+        nil)))
 
     ; Send 3 jobs
     (perform chan-send jobs 2)
@@ -62,9 +70,9 @@
     (perform chan-send jobs 4)
 
     ; Collect results
-    (let ((a (perform chan-recv results))
-          (b (perform chan-recv results))
-          (c (perform chan-recv results)))
+    (let ((a (recv! results))
+          (b (recv! results))
+          (c (recv! results)))
       (perform print "sum of squares: ")
       (perform println (+ a (+ b c)))))))
 

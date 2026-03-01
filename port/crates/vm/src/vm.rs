@@ -5,7 +5,9 @@ use rustc_hash::FxHashMap;
 
 use crate::bytecode::{Chunk, ConstantValue, FunctionPrototype, Op};
 use crate::errors::{StackTraceEntry, VMError};
-use crate::object::{CallFrame, Closure, HandlerEntry, VMContinuation, VMHandlerFrame, VMObject};
+use crate::object::{
+    CallFrame, Closure, HandlerDispatch, HandlerEntry, VMContinuation, VMHandlerFrame, VMObject,
+};
 use crate::value::{format_value_unquoted, Value};
 
 // --- VMSignal: unified error/effect propagation ---
@@ -25,6 +27,7 @@ pub(crate) struct EffectSignal {
     pub op_name: String,
     pub args: Vec<Value>,
     pub continuation: Value, // wraps VMContinuation
+    #[allow(dead_code)] // Useful metadata, not read by scheduler but may be useful for debugging
     pub target_handler_id: u64,
 }
 
@@ -48,6 +51,8 @@ pub struct VM {
     pub frame_count: usize,
     pub globals: FxHashMap<String, Value>,
     pub handler_stack: Vec<VMHandlerFrame>,
+    /// Handler dispatch markers — tracks active handler clause invocations for CPS dispatch.
+    pub(crate) handler_dispatch_stack: Vec<HandlerDispatch>,
     /// Tracks which continuation IDs have been resumed (one-shot enforcement).
     pub(crate) resumed_continuations: HashSet<u64>,
     /// Captured output for testing (when Some, print/println write here instead of stdout)
@@ -65,6 +70,7 @@ impl VM {
             frame_count: 0,
             globals: FxHashMap::default(),
             handler_stack: Vec::new(),
+            handler_dispatch_stack: Vec::new(),
             resumed_continuations: HashSet::new(),
             captured_output: None,
             dirty_globals: None,
@@ -240,10 +246,10 @@ pub fn call_value(vm: &mut VM, callee: &Value, args: &[Value]) -> Result<Value, 
     }
 }
 
-/// Resume a continuation from Rust (used by scheduler in future).
-/// Unlike the RESUME opcode, this does NOT catch EffectSignal —
-/// effects propagate to the caller.
-#[allow(dead_code)] // Used by future scheduler (Phase 5)
+/// Resume a continuation from Rust (used by scheduler).
+/// With CPS dispatch, user-handler effects are dispatched inline by PERFORM,
+/// so only scheduler effects escape as VMSignal::Effect.
+#[allow(dead_code)]
 pub(crate) fn resume_continuation(
     vm: &mut VM,
     cont: &VMContinuation,
@@ -272,23 +278,25 @@ pub(crate) fn resume_continuation(
     vm.push(value);
 
     let saved_handler_len = vm.handler_stack.len();
+    let saved_dispatch_len = vm.handler_dispatch_stack.len();
     let frame_offset = resume_base as i64 - cont.frame_base as i64;
     let stack_offset = (vm.stack_top as i64 - cont.stack.len() as i64 - 1) - cont.stack_base as i64;
-    let mut restored_handlers = Vec::new();
     for h in &cont.handler_stack {
         let rebased = rebase_handler(h, frame_offset, stack_offset);
-        restored_handlers.push(rebased.clone());
         vm.handler_stack.push(rebased);
     }
+    for d in &cont.handler_dispatch_stack {
+        let rebased = rebase_handler_dispatch(d, frame_offset);
+        vm.handler_dispatch_stack.push(rebased);
+    }
 
-    let result = if restored_handlers.is_empty() {
-        run(vm, resume_base)
-    } else {
-        run_restored_continuation(vm, resume_base, &restored_handlers, saved_handler_len)
-    };
+    // Run — user-handler effects are dispatched inline by PERFORM.
+    // Only scheduler effects escape as VMSignal::Effect.
+    let result = run(vm, resume_base);
 
     vm.frame_count = resume_base;
     vm.handler_stack.truncate(saved_handler_len);
+    vm.handler_dispatch_stack.truncate(saved_dispatch_len);
 
     result
 }
@@ -302,107 +310,18 @@ fn rebase_handler(h: &VMHandlerFrame, frame_offset: i64, stack_offset: i64) -> V
         capture_frame_start: (h.capture_frame_start as i64 + frame_offset) as usize,
         capture_stack_start: (h.capture_stack_start as i64 + stack_offset) as usize,
         id: h.id,
+        is_scheduler: h.is_scheduler,
     }
 }
 
-// --- Effect handler execution ---
+// --- Effect handler helpers ---
 
-fn run_with_handler(
-    vm: &mut VM,
-    handler_entries: &[HandlerEntry],
-    return_handler: &Option<Closure>,
-    closure: &Closure,
-    args: &[Value],
-) -> Result<Value, VMSignal> {
-    let handler_id = next_handler_id();
-    let handler_frame = VMHandlerFrame {
-        handlers: handler_entries.to_vec(),
-        return_handler: return_handler.clone(),
-        unwind_frame_start: vm.frame_count,
-        unwind_stack_start: vm.stack_top,
-        capture_frame_start: vm.frame_count,
-        capture_stack_start: vm.stack_top,
-        id: handler_id,
-    };
-    vm.handler_stack.push(handler_frame);
-
-    match call_closure(vm, closure, args) {
-        Ok(result) => {
-            // Remove our handler if still present
-            if let Some(pos) = vm.handler_stack.iter().position(|h| h.id == handler_id) {
-                vm.handler_stack.remove(pos);
-            }
-            Ok(result)
-        }
-        Err(VMSignal::Effect(signal)) if signal.target_handler_id == handler_id => {
-            // Handler was already removed from stack by PERFORM's unwind.
-            let clause = handler_entries.iter().find(|e| e.op_name == signal.op_name);
-            let clause = match clause {
-                Some(c) => c,
-                None => return Err(VMSignal::Effect(signal)),
-            };
-            let expected_arg_count = (clause.arity as usize).saturating_sub(1);
-            let mut handler_args: Vec<Value> = Vec::new();
-            for i in 0..expected_arg_count.min(signal.args.len()) {
-                handler_args.push(signal.args[i].clone());
-            }
-            handler_args.push(signal.continuation);
-            // Deep handler semantics: recursively run with same handler def
-            run_with_handler(
-                vm,
-                handler_entries,
-                return_handler,
-                &clause.closure,
-                &handler_args,
-            )
-        }
-        Err(e) => {
-            // Not for us — clean up if our handler is still on the stack
-            if let Some(pos) = vm.handler_stack.iter().position(|h| h.id == handler_id) {
-                vm.handler_stack.remove(pos);
-            }
-            Err(e)
-        }
-    }
-}
-
-/// Run a restored continuation, catching effects that target restored handlers.
-fn run_restored_continuation(
-    vm: &mut VM,
-    resume_base: usize,
-    restored_handlers: &[VMHandlerFrame],
-    saved_handler_len: usize,
-) -> Result<Value, VMSignal> {
-    match run(vm, resume_base) {
-        Ok(result) => Ok(result),
-        Err(VMSignal::Effect(signal)) => {
-            for hframe in restored_handlers {
-                if signal.target_handler_id == hframe.id {
-                    let clause = hframe.handlers.iter().find(|e| e.op_name == signal.op_name);
-                    let clause = match clause {
-                        Some(c) => c,
-                        None => return Err(VMSignal::Effect(signal)),
-                    };
-                    let expected_arg_count = (clause.arity as usize).saturating_sub(1);
-                    let mut handler_args = Vec::new();
-                    for i in 0..expected_arg_count.min(signal.args.len()) {
-                        handler_args.push(signal.args[i].clone());
-                    }
-                    handler_args.push(signal.continuation);
-
-                    vm.handler_stack.truncate(saved_handler_len);
-                    return run_with_handler(
-                        vm,
-                        &hframe.handlers,
-                        &hframe.return_handler,
-                        &clause.closure,
-                        &handler_args,
-                    );
-                }
-            }
-            Err(VMSignal::Effect(signal))
-        }
-        Err(e) => Err(e),
+fn rebase_handler_dispatch(d: &HandlerDispatch, frame_offset: i64) -> HandlerDispatch {
+    HandlerDispatch {
+        dispatch_frame: (d.dispatch_frame as i64 + frame_offset) as usize,
+        handler_entries: d.handler_entries.clone(),
+        return_handler: d.return_handler.clone(),
+        handler_id: d.handler_id,
     }
 }
 
@@ -944,6 +863,51 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let result = vm.pop();
                 vm.frame_count -= 1;
 
+                // Check if we're returning from a handler dispatch (body or clause)
+                if let Some(dispatch) = vm.handler_dispatch_stack.last() {
+                    if vm.frame_count <= dispatch.dispatch_frame {
+                        let dispatch = vm.handler_dispatch_stack.pop().unwrap();
+
+                        // Remove the handler frame if still present
+                        if let Some(pos) = vm
+                            .handler_stack
+                            .iter()
+                            .position(|h| h.id == dispatch.handler_id)
+                        {
+                            vm.handler_stack.remove(pos);
+                        }
+
+                        if let Some(ret_closure) = dispatch.return_handler {
+                            // Apply return handler: push its frame and let the run loop execute it.
+                            // When it returns, it will fall through to the normal Return path.
+                            let local_count = ret_closure.proto.chunk.local_count as usize;
+                            let mut ret_locals = vm.take_locals(local_count);
+                            ret_locals[0] = result;
+                            let new_frame = CallFrame {
+                                closure: ret_closure,
+                                ip: 0,
+                                locals: ret_locals,
+                            };
+                            vm.push_frame(new_frame);
+                            frame_idx = vm.frame_count - 1;
+                            ip = 0;
+                            cache_frame!();
+                            continue;
+                        }
+
+                        // No return handler — result is the final value
+                        if vm.frame_count <= base_frame_count {
+                            return Ok(result);
+                        }
+                        frame_idx = vm.frame_count - 1;
+                        ip = vm.frames[frame_idx].ip;
+                        cache_frame!();
+                        vm.push(result);
+                        continue;
+                    }
+                }
+
+                // Normal return path
                 if vm.frame_count <= base_frame_count {
                     return Ok(result);
                 }
@@ -1535,26 +1499,53 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     None
                 };
 
-                // Save current frame before calling handler
+                // Save current frame
                 vm.frames[frame_idx].ip = ip;
 
-                // Run body with handler installed
-                let mut result =
-                    run_with_handler(vm, &handler_entries, &return_closure, &body_closure, &[])?;
+                // CPS dispatch: install handler frame and call body thunk inline.
+                // No Rust-level recursion — the handler dispatch is entirely in VM state.
+                let handler_id = next_handler_id();
+                let handler_frame = VMHandlerFrame {
+                    handlers: handler_entries.clone(),
+                    return_handler: return_closure.clone(),
+                    unwind_frame_start: vm.frame_count,
+                    unwind_stack_start: vm.stack_top,
+                    capture_frame_start: vm.frame_count,
+                    capture_stack_start: vm.stack_top,
+                    id: handler_id,
+                    is_scheduler: false,
+                };
+                vm.handler_stack.push(handler_frame);
 
-                // Apply return handler to the final result
-                if let Some(ref ret_closure) = return_closure {
-                    result = call_closure(vm, ret_closure, &[result])?;
-                }
+                // Push handler dispatch marker — tells Op::Return when the body/clause returns
+                vm.handler_dispatch_stack.push(HandlerDispatch {
+                    dispatch_frame: vm.frame_count,
+                    handler_entries,
+                    return_handler: return_closure,
+                    handler_id,
+                });
 
-                // Restore frame (it may have been clobbered by handler execution)
-                ip = vm.frames[frame_idx].ip;
+                // Call body thunk inline (same as Op::Call for a 0-arity closure)
+                let local_count = body_closure.proto.chunk.local_count as usize;
+                let locals = vm.take_locals(local_count);
+                let new_frame = CallFrame {
+                    closure: body_closure,
+                    ip: 0,
+                    locals,
+                };
+                vm.push_frame(new_frame);
+                frame_idx = vm.frame_count - 1;
+                ip = 0;
                 cache_frame!();
-                vm.push(result);
             }
 
             Op::PopHandler => {
-                // Currently unused — handler cleanup managed by run_with_handler
+                // Remove the topmost user handler frame from the handler stack.
+                // This is emitted after the body thunk of a `handle` expression completes
+                // without performing any handled effects.
+                if let Some(pos) = vm.handler_stack.iter().rposition(|h| !h.is_scheduler) {
+                    vm.handler_stack.remove(pos);
+                }
             }
 
             Op::Perform => {
@@ -1589,16 +1580,21 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 }
 
                 if let Some(handler_idx) = found {
-                    // Extract handler data before borrowing vm mutably
+                    let is_scheduler = vm.handler_stack[handler_idx].is_scheduler;
                     let handler_id = vm.handler_stack[handler_idx].id;
                     let capture_frame_start = vm.handler_stack[handler_idx].capture_frame_start;
                     let capture_stack_start = vm.handler_stack[handler_idx].capture_stack_start;
                     let unwind_fc = vm.handler_stack[handler_idx].unwind_frame_start;
                     let unwind_st = vm.handler_stack[handler_idx].unwind_stack_start;
 
-                    // Capture continuation
-                    // Save current frame first
+                    // Extract handler data BEFORE unwinding (needed for user handler dispatch)
+                    let handler_entries = vm.handler_stack[handler_idx].handlers.clone();
+                    let return_handler = vm.handler_stack[handler_idx].return_handler.clone();
+
+                    // Save current frame
                     vm.frames[frame_idx].ip = ip;
+
+                    // Capture continuation
                     let mut captured_frames = Vec::new();
                     for f_idx in capture_frame_start..vm.frame_count {
                         let f = &vm.frames[f_idx];
@@ -1613,36 +1609,129 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         .map(|v| v.clone())
                         .collect();
 
-                    // Capture nested handler frames
+                    // Capture nested handler frames (above the matched handler)
                     let captured_handlers: Vec<VMHandlerFrame> =
                         vm.handler_stack[handler_idx + 1..].to_vec();
+
+                    // Capture handler dispatch markers that belong to the captured frames,
+                    // but exclude the dispatch marker for the handler being dispatched itself
+                    // (it belongs to this handler's lifecycle, not the continuation's).
+                    let captured_dispatches: Vec<HandlerDispatch> = vm
+                        .handler_dispatch_stack
+                        .iter()
+                        .filter(|d| {
+                            d.dispatch_frame >= capture_frame_start && d.handler_id != handler_id
+                        })
+                        .cloned()
+                        .collect();
 
                     let continuation = VMContinuation {
                         frames: captured_frames,
                         stack: captured_stack,
                         handler_stack: captured_handlers,
+                        handler_dispatch_stack: captured_dispatches,
                         id: next_continuation_id(),
                         frame_base: capture_frame_start,
                         stack_base: capture_stack_start,
                     };
 
-                    // Unwind VM state — clear stack slots to release Arc references
+                    let cont_value = Value::object(VMObject::Continuation(Box::new(continuation)));
+
+                    // Unwind VM state
                     vm.clear_stack_slots(unwind_st);
                     vm.frame_count = unwind_fc;
                     vm.stack_top = unwind_st;
                     vm.handler_stack.truncate(handler_idx); // remove this handler and everything above
 
-                    return Err(VMSignal::Effect(EffectSignal {
-                        op_name,
-                        args,
-                        continuation: Value::object(VMObject::Continuation(Box::new(continuation))),
-                        target_handler_id: handler_id,
-                    }));
+                    // Remove handler dispatch markers that belonged to captured frames
+                    vm.handler_dispatch_stack
+                        .retain(|d| d.dispatch_frame < capture_frame_start);
+
+                    if is_scheduler {
+                        // Scheduler handler: propagate via EffectSignal (existing path)
+                        return Err(VMSignal::Effect(EffectSignal {
+                            op_name,
+                            args,
+                            continuation: cont_value,
+                            target_handler_id: handler_id,
+                        }));
+                    }
+
+                    // ── User handler: CPS inline dispatch ──
+                    // Find the matching handler clause
+                    let clause = handler_entries
+                        .iter()
+                        .find(|e| e.op_name == op_name)
+                        .cloned();
+                    let clause = match clause {
+                        Some(c) => c,
+                        None => {
+                            // Should not happen — we found the handler by name
+                            return Err(VMSignal::Error(VMError::runtime(format!(
+                                "Handler clause not found for effect: {}",
+                                op_name
+                            ))));
+                        }
+                    };
+
+                    // Deep handler semantics: re-install the handler frame with a NEW id
+                    let new_handler_id = next_handler_id();
+                    let new_handler_frame = VMHandlerFrame {
+                        handlers: handler_entries.clone(),
+                        return_handler: return_handler.clone(),
+                        unwind_frame_start: vm.frame_count,
+                        unwind_stack_start: vm.stack_top,
+                        capture_frame_start: vm.frame_count,
+                        capture_stack_start: vm.stack_top,
+                        id: new_handler_id,
+                        is_scheduler: false,
+                    };
+                    vm.handler_stack.push(new_handler_frame);
+
+                    // Push handler dispatch marker for the clause invocation
+                    vm.handler_dispatch_stack.push(HandlerDispatch {
+                        dispatch_frame: vm.frame_count,
+                        handler_entries,
+                        return_handler,
+                        handler_id: new_handler_id,
+                    });
+
+                    // Build handler clause arguments: [effect_args..., continuation]
+                    let expected_arg_count = (clause.arity as usize).saturating_sub(1);
+                    let local_count = clause.closure.proto.chunk.local_count as usize;
+                    let mut clause_locals = vm.take_locals(local_count);
+                    for i in 0..expected_arg_count.min(args.len()) {
+                        clause_locals[i] = args[i].clone();
+                    }
+                    clause_locals[expected_arg_count] = cont_value;
+
+                    // Call handler clause inline
+                    let new_frame = CallFrame {
+                        closure: clause.closure,
+                        ip: 0,
+                        locals: clause_locals,
+                    };
+                    vm.push_frame(new_frame);
+                    frame_idx = vm.frame_count - 1;
+                    ip = 0;
+                    cache_frame!();
+                    continue;
                 }
 
                 // No user handler found — try default handlers
                 if let Some(result) = try_default_handler(vm, &op_name, &args) {
                     vm.push(result);
+                } else if op_name == "throw" {
+                    // Better error message for unhandled throw
+                    let msg = args
+                        .first()
+                        .and_then(|v| v.as_string().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "(no message)".to_string());
+                    vm.frames[frame_idx].ip = ip;
+                    return Err(VMSignal::Error(vm.vm_error(
+                        format!("Uncaught exception: {}", msg),
+                        &vm.frames[frame_idx],
+                    )));
                 } else {
                     vm.frames[frame_idx].ip = ip;
                     return Err(VMSignal::Error(vm.vm_error(
@@ -1678,6 +1767,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let cont_data = (**cont).clone();
 
                 // Update the current (top) handler frame's capture/unwind points
+                // so future PERFORMs capture from the right place.
                 vm.frames[frame_idx].ip = ip;
                 if let Some(top_handler) = vm.handler_stack.last_mut() {
                     top_handler.capture_frame_start = vm.frame_count;
@@ -1686,7 +1776,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     top_handler.unwind_stack_start = vm.stack_top;
                 }
 
-                // Restore continuation frames
+                // Restore continuation frames on top of current frames
                 let resume_base = vm.frame_count;
                 for f in &cont_data.frames {
                     vm.push_frame(CallFrame {
@@ -1696,97 +1786,38 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     });
                 }
 
-                // Restore continuation stack
+                // Restore continuation stack + push resume value
                 for v in &cont_data.stack {
                     vm.push(v.clone());
                 }
-
-                // Push resume value
                 vm.push(value);
 
                 // Restore nested handlers, rebasing indices
-                let saved_handler_len = vm.handler_stack.len();
                 let frame_offset = resume_base as i64 - cont_data.frame_base as i64;
                 let stack_offset = (vm.stack_top as i64 - cont_data.stack.len() as i64 - 1)
                     - cont_data.stack_base as i64;
 
-                let mut restored_handlers = Vec::new();
                 for h in &cont_data.handler_stack {
                     let rebased = rebase_handler(h, frame_offset, stack_offset);
-                    restored_handlers.push(rebased.clone());
                     vm.handler_stack.push(rebased);
                 }
 
-                // Save top handler data before running (PERFORM may unwind the stack)
-                let top_handler_data = if saved_handler_len > 0 {
-                    let th = &vm.handler_stack[saved_handler_len - 1];
-                    Some((th.id, th.handlers.clone(), th.return_handler.clone()))
-                } else {
-                    None
-                };
+                // Restore handler dispatch markers, rebasing frame offsets
+                for d in &cont_data.handler_dispatch_stack {
+                    let rebased = rebase_handler_dispatch(d, frame_offset);
+                    vm.handler_dispatch_stack.push(rebased);
+                }
 
-                // Run restored continuation
-                let result = if restored_handlers.is_empty() {
-                    run(vm, resume_base)
-                } else {
-                    run_restored_continuation(
-                        vm,
-                        resume_base,
-                        &restored_handlers,
-                        saved_handler_len,
-                    )
-                };
-
-                // Handle the result
-                let result = match result {
-                    Ok(v) => v,
-                    Err(VMSignal::Effect(signal)) => {
-                        // Check if body re-performed an effect handled by the enclosing handler
-                        if let Some((top_id, ref entries, ref ret_handler)) = top_handler_data {
-                            if signal.target_handler_id == top_id {
-                                let clause = entries
-                                    .iter()
-                                    .find(|e| e.op_name == signal.op_name)
-                                    .cloned();
-
-                                if let Some(clause) = clause {
-                                    let expected_arg_count =
-                                        (clause.arity as usize).saturating_sub(1);
-                                    let mut handler_args = Vec::new();
-                                    for i in 0..expected_arg_count.min(signal.args.len()) {
-                                        handler_args.push(signal.args[i].clone());
-                                    }
-                                    handler_args.push(signal.continuation);
-
-                                    run_with_handler(
-                                        vm,
-                                        entries,
-                                        ret_handler,
-                                        &clause.closure,
-                                        &handler_args,
-                                    )?
-                                } else {
-                                    return Err(VMSignal::Effect(signal));
-                                }
-                            } else {
-                                return Err(VMSignal::Effect(signal));
-                            }
-                        } else {
-                            return Err(VMSignal::Effect(signal));
-                        }
-                    }
-                    Err(e) => return Err(e),
-                };
-
-                // Restore VM state
-                vm.frame_count = resume_base;
-                vm.handler_stack.truncate(saved_handler_len);
-
-                // Restore frame
+                // CPS dispatch: the resumed continuation runs inline.
+                // When the deepest continuation frame returns via Op::Return,
+                // it falls through back to the caller of (resume k v).
+                // Any re-performed effects are caught by the re-installed handler
+                // (which is on the VM handler stack via the continuation's captured handlers).
+                // No need for run() or run_restored_continuation() — just set up the
+                // top continuation frame and continue the run loop.
                 frame_idx = vm.frame_count - 1;
                 ip = vm.frames[frame_idx].ip;
                 cache_frame!();
-                vm.push(result);
             }
 
             Op::Halt => {

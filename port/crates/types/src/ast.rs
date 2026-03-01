@@ -84,6 +84,9 @@ pub enum Type {
         var: String,
         body: Box<Type>,
     },
+    /// Internal-only: wraps an EffectRow so it can be stored in a Substitution.
+    /// Never appears in user-visible types or formatted output.
+    EffectRowRef(EffectRow),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -385,6 +388,7 @@ pub fn free_type_vars(t: &Type) -> HashSet<String> {
             s.remove(var);
             s
         }
+        Type::EffectRowRef(row) => free_effect_row_vars(row),
     }
 }
 
@@ -474,6 +478,10 @@ pub fn format_type(t: &Type) -> String {
         }
         Type::Rec { var, body } => {
             format!("(mu {var} {})", format_type(body))
+        }
+        Type::EffectRowRef(row) => {
+            // Should not appear in user-facing output, but format for debugging
+            format_effect_row(row)
         }
     }
 }

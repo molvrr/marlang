@@ -3,20 +3,20 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
 
 use marlang_core::ast::Expr;
 use marlang_core::intern::Interner;
 use marlang_core::lexer::lex;
-use marlang_core::parser::parse;
+use marlang_core::parser::parse_with_interner;
 use marlang_types::ast::format_type;
-use marlang_types::checker::{TypeCheckResult, TypeModuleLoader, type_check_with_modules};
-use marlang_types::errors::{TypeError, format_error};
+use marlang_types::checker::{type_check_with_modules, TypeCheckResult, TypeModuleLoader};
+use marlang_types::errors::{format_error, TypeError};
 use marlang_vm::builtins::register_builtins;
 use marlang_vm::compiler::compile_program;
 use marlang_vm::debug::disassemble;
-use marlang_vm::modules::{ModuleLoader, expand_macros, run_program, run_program_from_exprs};
+use marlang_vm::modules::{expand_macros, run_program, run_program_from_exprs, ModuleLoader};
 use marlang_vm::value::format_value;
 use marlang_vm::vm::VM;
 
@@ -136,10 +136,11 @@ impl TypeModuleLoader for CliModuleLoader {
             span: None,
         })?;
 
-        let exprs = parse(&tokens).map_err(|e| TypeError::InternalError {
-            message: format!("Parse error in module {}: {}", resolved.display(), e),
-            span: None,
-        })?;
+        let exprs =
+            parse_with_interner(&tokens, interner).map_err(|e| TypeError::InternalError {
+                message: format!("Parse error in module {}: {}", resolved.display(), e),
+                span: None,
+            })?;
 
         // Macro expansion (using VM's ModuleLoader)
         let vm_loader = match &self.stdlib_dir {
@@ -198,7 +199,7 @@ fn cmd_run(file: &PathBuf, no_typecheck: bool) -> ExitCode {
         }
     };
 
-    let exprs = match parse(&tokens) {
+    let exprs = match parse_with_interner(&tokens, &interner) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("Parse error: {}", e);
@@ -276,7 +277,7 @@ fn cmd_typecheck(file: &PathBuf, verbose: bool) -> ExitCode {
         }
     };
 
-    let exprs = match parse(&tokens) {
+    let exprs = match parse_with_interner(&tokens, &interner) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("Parse error: {}", e);
@@ -336,7 +337,7 @@ fn cmd_disasm(file: &PathBuf) -> ExitCode {
         }
     };
 
-    let exprs = match parse(&tokens) {
+    let exprs = match parse_with_interner(&tokens, &interner) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("Parse error: {}", e);

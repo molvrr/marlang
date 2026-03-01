@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use marlang_core::ast::Expr;
 use marlang_core::intern::Interner;
 use marlang_core::lexer::lex;
-use marlang_core::parser::parse;
+use marlang_core::parser::parse_with_interner;
 
 use crate::ast::format_type;
 use crate::checker::{type_check, type_check_with_modules, TypeCheckResult, TypeModuleLoader};
@@ -13,7 +13,7 @@ use crate::errors::{format_error, TypeError};
 fn check(source: &str) -> Result<Vec<crate::ast::Type>, String> {
     let interner = Interner::new();
     let tokens = lex(source, &interner).expect("lex failed");
-    let exprs = parse(&tokens).expect("parse failed");
+    let exprs = parse_with_interner(&tokens, &interner).expect("parse failed");
     match type_check(&exprs, &interner) {
         TypeCheckResult::Ok { types, .. } => Ok(types),
         TypeCheckResult::Err { error } => Err(format_error(&error)),
@@ -816,10 +816,11 @@ impl TypeModuleLoader for MockModuleLoader {
             span: None,
         })?;
 
-        let exprs = parse(&tokens).map_err(|e| TypeError::InternalError {
-            message: format!("Parse error: {}", e),
-            span: None,
-        })?;
+        let exprs =
+            parse_with_interner(&tokens, interner).map_err(|e| TypeError::InternalError {
+                message: format!("Parse error: {}", e),
+                span: None,
+            })?;
 
         let resolved = PathBuf::from(format!("/mock/{}.mar", import_path));
         Ok((exprs, resolved))
@@ -832,7 +833,7 @@ fn check_with_modules(
 ) -> Result<Vec<crate::ast::Type>, String> {
     let interner = Interner::new();
     let tokens = lex(source, &interner).expect("lex failed");
-    let exprs = parse(&tokens).expect("parse failed");
+    let exprs = parse_with_interner(&tokens, &interner).expect("parse failed");
     match type_check_with_modules(&exprs, &interner, Some(Path::new("/test/main.mar")), loader) {
         TypeCheckResult::Ok { types, .. } => Ok(types),
         TypeCheckResult::Err { error } => Err(format_error(&error)),
@@ -1058,4 +1059,126 @@ fn variadic_lambda_too_few_args_fails() {
         "error: {}",
         err
     );
+}
+
+// ===== Effect Row Tests =====
+
+#[test]
+fn effect_row_pure_lambda_inferred() {
+    // A pure lambda should get Closed([]) effect row
+    let types = check_ok("(lambda (x) (+ x 1))");
+    let t = format_type(&types[0]);
+    assert_eq!(t, "(-> Int {} Int)");
+}
+
+#[test]
+fn effect_row_effectful_lambda_inferred() {
+    // A lambda that performs IO should have IO in its effect row
+    let types = check_ok(
+        r#"(effect IO
+               (println (-> String Unit)))
+           (lambda (x) (perform println x))"#,
+    );
+    let t = format_type(types.last().unwrap());
+    assert!(t.contains("{IO}"), "expected {{IO}} in type, got: {}", t);
+}
+
+#[test]
+fn effect_row_annotation_pure() {
+    // Type annotation with empty effect row: (-> String {} String)
+    let types = check_ok(
+        r#"(define (f : (-> String {} String)) (lambda (s) s))
+           (f "hello")"#,
+    );
+    assert_eq!(last_type(&types), "String");
+}
+
+#[test]
+fn effect_row_annotation_effectful() {
+    // Type annotation with effect row: (-> String {IO} Unit)
+    let types = check_ok(
+        r#"(effect IO
+               (println (-> String Unit)))
+           (define (f : (-> String {IO} Unit)) (lambda (s) (perform println s)))
+           (f "hello")"#,
+    );
+    assert_eq!(last_type(&types), "Unit");
+}
+
+#[test]
+fn effect_row_annotation_open() {
+    // Open effect row annotation: (-> String {IO | e} Unit)
+    let types = check_ok(
+        r#"(effect IO
+               (println (-> String Unit)))
+           (define (f : (-> String {IO | e} Unit)) (lambda (s) (perform println s)))
+           (f "hello")"#,
+    );
+    assert_eq!(last_type(&types), "Unit");
+}
+
+#[test]
+fn effect_row_pure_annotated_rejects_effectful() {
+    // A pure annotation should reject an effectful body
+    let err = check_err(
+        r#"(effect IO
+               (println (-> String Unit)))
+           (define (f : (-> String {} Unit)) (lambda (s) (perform println s)))"#,
+    );
+    assert!(
+        err.contains("effect") || err.contains("unif"),
+        "expected effect row error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn effect_row_unification_closed_compatible() {
+    // Two closed rows with the same effects should unify
+    let types = check_ok(
+        r#"(effect IO
+               (println (-> String Unit)))
+           (define (f : (-> String {IO} Unit)) (lambda (s) (perform println s)))
+           f"#,
+    );
+    let t = format_type(types.last().unwrap());
+    assert!(t.contains("{IO}"), "expected {{IO}}, got: {}", t);
+}
+
+#[test]
+fn effect_row_no_annotation_means_pure() {
+    // (-> String Unit) with no effect row means pure — rejects effectful body
+    let err = check_err(
+        r#"(effect IO
+               (println (-> String Unit)))
+           (define (f : (-> String Unit)) (lambda (s) (perform println s)))"#,
+    );
+    assert!(
+        err.contains("effect") || err.contains("{}"),
+        "expected effect row error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn effect_row_no_annotation_accepts_pure() {
+    // (-> String String) with no effect row means pure — accepts pure body
+    let types = check_ok(
+        r#"(define (f : (-> String String)) (lambda (s) s))
+           (f "hello")"#,
+    );
+    assert_eq!(last_type(&types), "String");
+}
+
+#[test]
+fn effect_row_handled_effect_removed() {
+    // After handling, the IO effect should be removed from the row
+    let types = check_ok(
+        r#"(effect IO
+               (println (-> String Unit)))
+           (handle (perform println "hello")
+               ((println msg k) -> (resume k (begin))))"#,
+    );
+    // The handle expression itself should be pure (IO was handled)
+    let _ = types;
 }

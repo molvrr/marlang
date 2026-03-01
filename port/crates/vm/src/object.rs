@@ -159,6 +159,24 @@ pub struct VMHandlerFrame {
     pub capture_stack_start: usize,
     /// Unique ID for identity-based handler matching (replaces reference equality from TypeScript).
     pub id: u64,
+    /// True for scheduler-installed dummy handlers. These use the EffectSignal path.
+    /// False for user `handle` blocks, which are dispatched inline via CPS.
+    pub is_scheduler: bool,
+}
+
+/// A handler dispatch marker — tracks that we're inside a handler clause invocation.
+/// When Op::Return drops frame_count to `dispatch_frame`, we know the handler clause
+/// has returned and we should clean up the handler + apply the return handler.
+#[derive(Debug, Clone)]
+pub struct HandlerDispatch {
+    /// Frame count threshold — when Op::Return drops frame_count to this, we're done
+    pub dispatch_frame: usize,
+    /// Handler entries for deep re-installation on resume
+    pub handler_entries: Vec<HandlerEntry>,
+    /// Return handler closure
+    pub return_handler: Option<Closure>,
+    /// Handler ID for the re-installed handler frame
+    pub handler_id: u64,
 }
 
 /// A captured one-shot continuation for effect handling.
@@ -167,6 +185,7 @@ pub struct VMContinuation {
     pub frames: Vec<CallFrame>,
     pub stack: Vec<Value>,
     pub handler_stack: Vec<VMHandlerFrame>,
+    pub handler_dispatch_stack: Vec<HandlerDispatch>,
     /// Unique ID used to enforce one-shot semantics via VM::resumed_continuations.
     pub id: u64,
     pub frame_base: usize,

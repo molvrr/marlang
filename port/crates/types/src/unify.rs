@@ -109,19 +109,31 @@ fn unify_internal(
         return Ok(subst);
     }
 
+    // EffectRowRef: unify effect rows stored as types
+    if let (Type::EffectRowRef(r1), Type::EffectRowRef(r2)) = (t1, t2) {
+        return unify_effect_rows_into_subst(r1, r2);
+    }
+    // EffectRowRef vs Var: bind the var to the effect row ref
+    if let (Type::EffectRowRef(_), Type::Var(name)) = (t1, t2) {
+        return Ok(single_subst(name, t1.clone()));
+    }
+    if let (Type::Var(name), Type::EffectRowRef(_)) = (t1, t2) {
+        return Ok(single_subst(name, t2.clone()));
+    }
+
     // Arrow type case
     if let (
         Type::Arrow {
             params: p1,
             rest: rest1,
+            effects: eff1,
             result: r1,
-            ..
         },
         Type::Arrow {
             params: p2,
             rest: rest2,
+            effects: eff2,
             result: r2,
-            ..
         },
     ) = (t1, t2)
     {
@@ -224,7 +236,20 @@ fn unify_internal(
         let ra = apply_subst(&subst, r1);
         let rb = apply_subst(&subst, r2);
         let s = unify_internal(&ra, &rb, seen)?;
-        return Ok(compose_subst(&s, &subst));
+        subst = compose_subst(&s, &subst);
+
+        // Unify effect rows — None is treated as pure (Closed([]))
+        {
+            let default_pure = effect_row_empty();
+            let e1 = eff1.as_ref().unwrap_or(&default_pure);
+            let e2 = eff2.as_ref().unwrap_or(&default_pure);
+            let e1_applied = apply_effect_row_subst_via_type_subst(&subst, e1);
+            let e2_applied = apply_effect_row_subst_via_type_subst(&subst, e2);
+            let s = unify_effect_rows_into_subst(&e1_applied, &e2_applied)?;
+            subst = compose_subst(&s, &subst);
+        }
+
+        return Ok(subst);
     }
 
     // Mismatched type kinds
@@ -458,6 +483,119 @@ pub fn match_types(pattern: &Type, target: &Type) -> Result<Substitution, TypeEr
 
 // ===== Effect Row Unification =====
 
+/// Unify two effect rows, producing a regular Substitution.
+/// Effect row variable bindings are stored as ε_var → Type::EffectRowRef(row).
+pub fn unify_effect_rows_into_subst(
+    row1: &EffectRow,
+    row2: &EffectRow,
+) -> Result<Substitution, TypeError> {
+    match (row1, row2) {
+        (EffectRow::Closed(e1), EffectRow::Closed(e2)) => {
+            let set1: HashSet<_> = e1.iter().collect();
+            let set2: HashSet<_> = e2.iter().collect();
+            if set1 == set2 {
+                Ok(empty_subst())
+            } else {
+                Err(TypeError::UnificationError {
+                    t1: Type::Const(format_effect_row(row1)),
+                    t2: Type::Const(format_effect_row(row2)),
+                    context: Some("effect rows".to_string()),
+                    span: None,
+                })
+            }
+        }
+        (EffectRow::Open { effects, row_var }, EffectRow::Closed(e2)) => {
+            for e in effects {
+                if !e2.contains(e) {
+                    return Err(TypeError::UnificationError {
+                        t1: Type::Const(format_effect_row(row1)),
+                        t2: Type::Const(format_effect_row(row2)),
+                        context: Some("effect rows".to_string()),
+                        span: None,
+                    });
+                }
+            }
+            let remaining: Vec<String> = e2
+                .iter()
+                .filter(|e| !effects.contains(e))
+                .cloned()
+                .collect();
+            Ok(single_subst(
+                row_var,
+                Type::EffectRowRef(effect_row_closed(remaining)),
+            ))
+        }
+        (EffectRow::Closed(e1), EffectRow::Open { effects, row_var }) => {
+            for e in effects {
+                if !e1.contains(e) {
+                    return Err(TypeError::UnificationError {
+                        t1: Type::Const(format_effect_row(row1)),
+                        t2: Type::Const(format_effect_row(row2)),
+                        context: Some("effect rows".to_string()),
+                        span: None,
+                    });
+                }
+            }
+            let remaining: Vec<String> = e1
+                .iter()
+                .filter(|e| !effects.contains(e))
+                .cloned()
+                .collect();
+            Ok(single_subst(
+                row_var,
+                Type::EffectRowRef(effect_row_closed(remaining)),
+            ))
+        }
+        (
+            EffectRow::Open {
+                effects: e1,
+                row_var: rv1,
+            },
+            EffectRow::Open {
+                effects: e2,
+                row_var: rv2,
+            },
+        ) => {
+            if rv1 == rv2 {
+                // Same row var — just check that explicitly listed effects are compatible
+                let set1: HashSet<_> = e1.iter().collect();
+                let set2: HashSet<_> = e2.iter().collect();
+                if set1 == set2 {
+                    return Ok(empty_subst());
+                }
+                // Different explicit effects but same row var — unify via fresh var
+                let fresh_rv = fresh_effect_row_var();
+                let only_in_2: Vec<String> =
+                    e2.iter().filter(|e| !e1.contains(e)).cloned().collect();
+                let only_in_1: Vec<String> =
+                    e1.iter().filter(|e| !e2.contains(e)).cloned().collect();
+                if only_in_1.is_empty() && only_in_2.is_empty() {
+                    return Ok(empty_subst());
+                }
+                // Can't have different effects with same row var — this shouldn't happen normally
+                // Fall through to open-open unification with fresh var
+                let mut combined: Vec<String> = e1.clone();
+                for e in e2 {
+                    if !combined.contains(e) {
+                        combined.push(e.clone());
+                    }
+                }
+                return Ok(single_subst(
+                    rv1,
+                    Type::EffectRowRef(effect_row_open(combined, fresh_rv)),
+                ));
+            }
+            // Different row vars: rv1 gets bound to {effects_only_in_2 | rv2}
+            let only_in_2: Vec<String> = e2.iter().filter(|e| !e1.contains(e)).cloned().collect();
+            Ok(single_subst(
+                rv1,
+                Type::EffectRowRef(effect_row_open(only_in_2, rv2.clone())),
+            ))
+        }
+    }
+}
+
+/// Legacy function — kept for backward compatibility
 pub fn unify_effect_rows(
     r1: Option<&EffectRow>,
     r2: Option<&EffectRow>,

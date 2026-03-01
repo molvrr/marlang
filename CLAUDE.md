@@ -45,9 +45,9 @@ cargo run -p marlang-cli -- repl                   # Interactive REPL
 
 ```bash
 cargo test --workspace                # Run all Rust tests
-cargo test -p marlang-core            # Core: lexer + parser (75 tests)
-cargo test -p marlang-types           # Type system (100 tests)
-cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI + scheduler + macros + TCP + Exception + Variadic (331 tests)
+cargo test -p marlang-core            # Core: lexer + parser
+cargo test -p marlang-types           # Type system
+cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI + scheduler + macros + TCP + Exception + Variadic + CPS handler dispatch
 ```
 
 ### Running .mar Programs
@@ -139,6 +139,27 @@ Effect operations use arrow type syntax:
   (write-file (-> String String Unit)))  ; Multi-argument
 ```
 
+### Effect Row Annotations (Rust Port)
+The type checker supports row-polymorphic effect annotations on arrow types using `{...}` syntax:
+```lisp
+;; Pure function (no effects)
+(define (f : (-> String {} String)) (lambda (s) s))
+
+;; Function with IO effect
+(define (g : (-> String {IO} Unit)) (lambda (s) (perform println s)))
+
+;; Open effect row (row-polymorphic): IO + any other effects
+(define (h : (-> String {IO | e} Unit)) (lambda (s) (perform println s)))
+```
+
+Effect rows are enforced during type checking:
+- Pure lambdas get `{}` (closed empty row)
+- Effectful lambdas get their effects collected: `{IO}`, `{Exception}`, etc.
+- `handle` subtracts handled effects from the row
+- Omitting the effect row in a type annotation (e.g. `(-> String String)`) means pure — same as `{}`
+- A `{}` annotation rejects effectful bodies
+- Open rows `{IO | e}` allow additional effects via the row variable `e`
+
 ### Built-in Functions
 Defined in `interpreter.ts` builtins array (tree-walker) and `builtins.ts` (VM):
 - Arithmetic: `+`, `-`, `*`, `/`, `negate`
@@ -161,7 +182,7 @@ Note: In the Rust port, ADT constructors (None, Some, Nil, Cons, MkPair, Ok, Err
 
 3. **~~Type checker rejects `net.mar` / `tcp.mar`~~:** FIXED. Two issues resolved: (a) `string-append` was typed as binary but runtime was variadic — fixed via full variadic function support with rest types `(-> (... T) R)` and dot notation `(lambda (a . rest) ...)`; (b) `tcp-accept`/`tcp-recv` returned raw `nil` but were typed as returning `TcpSocket`/`String` — fixed by making runtime return `Option`-wrapped values (`Some`/`None` ADT), updating effect signatures, and adding `tcp-close-listener` for type-safe listener close. Both `net.mar` and `tcp.mar` type check successfully.
 
-4. **`handle`/`throw` unreliable across scheduler effects:** User `handle` blocks don't work correctly when the body performs scheduler-suspending effects (TCP, etc.). Workaround: use `try-` wrappers and match on Result directly.
+4. **~~`handle`/`throw` unreliable across scheduler effects~~:** FIXED via CPS handler dispatch. Handler dispatch is now entirely in VM state (no Rust stack involvement), so user handlers survive scheduler suspension. `throw` is also removed from the scheduler's `HANDLED_EFFECTS` — unhandled `throw` now gives "Uncaught exception: ..." instead of going through the scheduler.
 
 5. **`match` branches require single expressions:** Multi-expression match bodies need explicit `(begin ...)` wrapping. The compiler enforces `(pattern body)` with exactly 2 elements per branch.
 

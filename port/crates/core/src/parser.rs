@@ -19,11 +19,24 @@ impl std::error::Error for ParseError {}
 pub struct Parser<'t> {
     tokens: &'t [Token],
     pos: usize,
+    interner: Option<&'t crate::intern::Interner>,
 }
 
 impl<'t> Parser<'t> {
     pub fn new(tokens: &'t [Token]) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser {
+            tokens,
+            pos: 0,
+            interner: None,
+        }
+    }
+
+    pub fn with_interner(tokens: &'t [Token], interner: &'t crate::intern::Interner) -> Self {
+        Parser {
+            tokens,
+            pos: 0,
+            interner: Some(interner),
+        }
     }
 
     pub fn parse_all(&mut self) -> Result<Vec<Expr>, ParseError> {
@@ -57,6 +70,11 @@ impl<'t> Parser<'t> {
             Token::LParen(_) => self.parse_list(),
             Token::RParen(span) => Err(ParseError {
                 message: "Unexpected ')'".to_string(),
+                span: *span,
+            }),
+            Token::LBrace(_) => self.parse_effect_row(),
+            Token::RBrace(span) => Err(ParseError {
+                message: "Unexpected '}'".to_string(),
                 span: *span,
             }),
             Token::Quote(sym, span)
@@ -104,6 +122,84 @@ impl<'t> Parser<'t> {
         }
     }
 
+    /// Parse `{IO Exception}` or `{IO | e}` into `(__effect_row IO Exception)` or
+    /// `(__effect_row IO __row_var:e)`. Effect names are space-separated.
+    /// Use `|` before the row variable for open rows: `{IO Exception | e}`.
+    /// `{}` produces `(__effect_row)` — a pure/empty effect row.
+    fn parse_effect_row(&mut self) -> Result<Expr, ParseError> {
+        let lbrace = self.advance(); // consume '{'
+        let start_span = lbrace.span();
+
+        let interner = self.interner.ok_or(ParseError {
+            message: "Effect row syntax {..} requires parser with interner".to_string(),
+            span: start_span,
+        })?;
+
+        let mut elements: Vec<Expr> = Vec::new();
+        // Add __effect_row as head
+        let head_sym = interner.intern("__effect_row");
+        elements.push(Expr::Atom(LispValue::Symbol(head_sym), start_span));
+
+        loop {
+            if self.at_eof() {
+                return Err(ParseError {
+                    message: "Unexpected end of input, expected }".to_string(),
+                    span: start_span,
+                });
+            }
+            if matches!(self.peek(), Some(Token::RBrace(_))) {
+                break;
+            }
+            if let Some(Token::Identifier(sym, span)) = self.peek() {
+                let sym_name = interner.resolve(*sym);
+                // Check for `|` separator for row variable: {IO | e}
+                if sym_name == "|" {
+                    self.advance(); // skip |
+                                    // Next should be the row variable
+                    if let Some(Token::Identifier(rv_sym, rv_span)) = self.peek() {
+                        let rv_sym = *rv_sym;
+                        let rv_span = *rv_span;
+                        self.advance();
+                        // Mark it as a row variable by prefixing with __row_var:
+                        let rv_name = interner.resolve(rv_sym);
+                        let prefixed = interner.intern(&format!("__row_var:{}", rv_name));
+                        elements.push(Expr::Atom(LispValue::Symbol(prefixed), rv_span));
+                    }
+                    continue;
+                }
+                let sym = *sym;
+                let span = *span;
+                self.advance();
+                elements.push(Expr::Atom(LispValue::Symbol(sym), span));
+            } else {
+                // Unexpected token
+                let tok = self.advance();
+                return Err(ParseError {
+                    message: format!("Unexpected token in effect row: {:?}", tok),
+                    span: tok.span(),
+                });
+            }
+        }
+
+        let rbrace = self.advance(); // consume '}'
+        let end_span = rbrace.span();
+        let list_span = Span::new(start_span.start, end_span.end);
+
+        // Build cons list from elements
+        if elements.is_empty() {
+            return Ok(Expr::Nil(list_span));
+        }
+        let mut result = Expr::Nil(list_span);
+        for elem in elements.into_iter().rev() {
+            result = Expr::List {
+                head: Box::new(elem),
+                tail: Box::new(result),
+                span: list_span,
+            };
+        }
+        Ok(result)
+    }
+
     fn parse_list(&mut self) -> Result<Expr, ParseError> {
         let lparen = self.advance(); // consume '('
         let start_span = lparen.span();
@@ -147,6 +243,14 @@ impl<'t> Parser<'t> {
 /// Convenience: parse tokens into a list of top-level expressions.
 pub fn parse(tokens: &[Token]) -> Result<Vec<Expr>, ParseError> {
     Parser::new(tokens).parse_all()
+}
+
+/// Parse tokens with interner, enabling `{effect row}` syntax.
+pub fn parse_with_interner(
+    tokens: &[Token],
+    interner: &crate::intern::Interner,
+) -> Result<Vec<Expr>, ParseError> {
+    Parser::with_interner(tokens, interner).parse_all()
 }
 
 #[cfg(test)]

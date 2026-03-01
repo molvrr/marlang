@@ -39,7 +39,9 @@ pub fn apply_subst(subst: &Substitution, t: &Type) -> Type {
         } => Type::Arrow {
             params: params.iter().map(|p| apply_subst(subst, p)).collect(),
             rest: rest.as_ref().map(|r| Box::new(apply_subst(subst, r))),
-            effects: effects.clone(),
+            effects: effects
+                .as_ref()
+                .map(|row| apply_effect_row_subst_via_type_subst(subst, row)),
             result: Box::new(apply_subst(subst, result)),
         },
         Type::Rec { var, body } => {
@@ -50,7 +52,73 @@ pub fn apply_subst(subst: &Substitution, t: &Type) -> Type {
                 body: Box::new(apply_subst(&filtered, body)),
             }
         }
+        Type::EffectRowRef(row) => {
+            Type::EffectRowRef(apply_effect_row_subst_via_type_subst(subst, row))
+        }
     }
+}
+
+/// Apply a type substitution to an effect row.
+/// Effect row variables (ε0, ε1, ...) are looked up in the type substitution.
+/// If the substitution maps a row var to Type::EffectRowRef(row), that row is
+/// spliced in (combining any existing effects). If it maps to Type::Var(new_var),
+/// the row var is renamed.
+pub fn apply_effect_row_subst_via_type_subst(subst: &Substitution, row: &EffectRow) -> EffectRow {
+    match row {
+        EffectRow::Closed(_) => row.clone(),
+        EffectRow::Open { effects, row_var } => match subst.get(row_var) {
+            None => row.clone(),
+            Some(replacement) => {
+                // Chase substitution chains
+                let resolved = chase_subst(subst, replacement);
+                match resolved {
+                    Type::Var(new_var) => EffectRow::Open {
+                        effects: effects.clone(),
+                        row_var: new_var.clone(),
+                    },
+                    Type::EffectRowRef(inner_row) => {
+                        // Combine: prepend our effects to the inner row
+                        let mut combined = effects.clone();
+                        match &inner_row {
+                            EffectRow::Closed(r_effects) => {
+                                for e in r_effects {
+                                    if !combined.contains(e) {
+                                        combined.push(e.clone());
+                                    }
+                                }
+                                EffectRow::Closed(combined)
+                            }
+                            EffectRow::Open {
+                                effects: r_effects,
+                                row_var: r_var,
+                            } => {
+                                for e in r_effects {
+                                    if !combined.contains(e) {
+                                        combined.push(e.clone());
+                                    }
+                                }
+                                EffectRow::Open {
+                                    effects: combined,
+                                    row_var: r_var.clone(),
+                                }
+                            }
+                        }
+                    }
+                    _ => row.clone(), // Shouldn't happen, leave unchanged
+                }
+            }
+        },
+    }
+}
+
+/// Chase a substitution chain: if subst[x] = Var(y) and subst[y] = ..., follow.
+fn chase_subst<'a>(subst: &'a Substitution, t: &'a Type) -> &'a Type {
+    if let Type::Var(name) = t {
+        if let Some(next) = subst.get(name) {
+            return chase_subst(subst, next);
+        }
+    }
+    t
 }
 
 pub fn apply_subst_constraint(subst: &Substitution, c: &Constraint) -> Constraint {
@@ -408,6 +476,7 @@ fn rewrite_type(t: &Type, name_map: &HashMap<String, String>) -> Type {
             var: var.clone(),
             body: Box::new(rewrite_type(body, name_map)),
         },
+        Type::EffectRowRef(row) => Type::EffectRowRef(rewrite_effect_row(row, name_map)),
     }
 }
 
@@ -682,7 +751,19 @@ pub fn generalize(env: &TypeEnv, constraints: &[Constraint], t: &Type) -> TypeSc
 pub fn instantiate(scheme: &TypeScheme) -> (Type, Vec<Constraint>) {
     let mut subst = HashMap::new();
     for v in &scheme.quantified_vars {
-        subst.insert(v.clone(), fresh_type_var());
+        if v.starts_with('ε') {
+            // Effect row variable: replace with a fresh open effect row
+            let fresh_rv = fresh_effect_row_var();
+            subst.insert(
+                v.clone(),
+                Type::EffectRowRef(EffectRow::Open {
+                    effects: vec![],
+                    row_var: fresh_rv,
+                }),
+            );
+        } else {
+            subst.insert(v.clone(), fresh_type_var());
+        }
     }
     let ty = apply_subst(&subst, &scheme.qual_type.ty);
     let constraints = scheme

@@ -439,17 +439,31 @@ pub fn create_builtin_env() -> TypeEnv {
         &env,
         "run-fibers",
         polytype(
-            vec!["a"],
-            type_arrow(vec![type_arrow(vec![], type_var("a"))], type_var("a")),
+            vec!["a", "__rf_eff"],
+            type_arrow(
+                vec![type_arrow_with_effects(
+                    vec![],
+                    Some(effect_row_open(vec![], "__rf_eff".into())),
+                    type_var("a"),
+                )],
+                type_var("a"),
+            ),
         ),
     );
     env = extend_env(
         &env,
         "run-fibers-parallel",
         polytype(
-            vec!["a"],
+            vec!["a", "__rfp_eff"],
             type_arrow(
-                vec![type_arrow(vec![], type_var("a")), t_int()],
+                vec![
+                    type_arrow_with_effects(
+                        vec![],
+                        Some(effect_row_open(vec![], "__rfp_eff".into())),
+                        type_var("a"),
+                    ),
+                    t_int(),
+                ],
                 type_var("a"),
             ),
         ),
@@ -467,9 +481,13 @@ pub fn create_builtin_env() -> TypeEnv {
         operations: vec![
             EffectOp {
                 name: "fiber-spawn".into(),
-                type_params: vec![],
+                type_params: vec!["__fiber_eff".into()],
                 constraints: vec![],
-                params: vec![type_arrow(vec![], t_unit())],
+                params: vec![type_arrow_with_effects(
+                    vec![],
+                    Some(effect_row_open(vec![], "__fiber_eff".into())),
+                    t_unit(),
+                )],
                 result: t_pid(),
             },
             EffectOp {
@@ -633,14 +651,18 @@ pub fn create_builtin_env() -> TypeEnv {
     env = define_effect(&env, io_effect);
 
     // Profiling builtins
-    // time-it : (Unit -> a) -> Pair a Float
+    // time-it : ((-> {} a) | e) -> Pair a Float  — accepts effectful callbacks
     env = extend_env(
         &env,
         "time-it",
         polytype(
-            vec!["a"],
+            vec!["a", "__ti_eff"],
             type_arrow(
-                vec![type_arrow(vec![], type_var("a"))],
+                vec![type_arrow_with_effects(
+                    vec![],
+                    Some(effect_row_open(vec![], "__ti_eff".into())),
+                    type_var("a"),
+                )],
                 type_app(type_const("Pair"), vec![type_var("a"), t_float()]),
             ),
         ),

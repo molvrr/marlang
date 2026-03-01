@@ -86,6 +86,53 @@ fn variadic_arith_ops() -> HashMap<&'static str, VariadicArithInfo> {
 
 const FFI_VARIADIC_FUNCTIONS: &[&str] = &["ffi-call", "struct-new", "struct-get", "struct-set"];
 
+// ===== Effect Row Parsing =====
+
+/// Check if an expression is an `__effect_row` form (produced by the parser for `{...}`).
+fn is_effect_row_expr(expr: &Expr, interner: &Interner) -> bool {
+    if let Expr::List { .. } = expr {
+        let elements = list_to_array(expr);
+        if !elements.is_empty() {
+            if let Some("__effect_row") = get_symbol(elements[0], interner) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Parse an `__effect_row` expression into an EffectRow.
+/// `(__effect_row)` → Closed([])
+/// `(__effect_row IO Exception)` → Closed(["IO", "Exception"])
+/// `(__effect_row IO __row_var:e)` → Open { effects: ["IO"], row_var: "e" }
+/// `(__effect_row __row_var:e)` → Open { effects: [], row_var: "e" }
+fn parse_effect_row_expr(expr: &Expr, interner: &Interner) -> Result<EffectRow, TypeError> {
+    let elements = list_to_array(expr);
+    // elements[0] is "__effect_row"
+    let mut effects = Vec::new();
+    let mut row_var: Option<String> = None;
+
+    for e in &elements[1..] {
+        if let Some(name) = get_symbol(e, interner) {
+            if let Some(stripped) = name.strip_prefix("__row_var:") {
+                row_var = Some(stripped.to_string());
+            } else {
+                effects.push(name.to_string());
+            }
+        } else {
+            return Err(TypeError::InvalidTypeAnnotation {
+                message: "Effect row elements must be symbols".into(),
+                span: None,
+            });
+        }
+    }
+
+    match row_var {
+        Some(rv) => Ok(effect_row_open(effects, rv)),
+        None => Ok(effect_row_closed(effects)),
+    }
+}
+
 // ===== Type Expression Parsing =====
 
 pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Type, TypeError> {
@@ -124,7 +171,7 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
 
             let first_sym = get_symbol(elements[0], interner);
 
-            // Arrow type: (-> a b c) or (-> a (... b) c) for variadic
+            // Arrow type: (-> a b c) or (-> a (... b) c) or (-> a {IO} b) for variadic/effectful
             if first_sym == Some("->") {
                 if elements.len() < 2 {
                     return Err(TypeError::InvalidTypeAnnotation {
@@ -134,7 +181,20 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                 }
                 let mut types = Vec::new();
                 let mut rest_type: Option<Type> = None;
+                let mut effect_row: Option<EffectRow> = None;
                 for e in &elements[1..] {
+                    // Check for {effects} effect row syntax
+                    if is_effect_row_expr(e, interner) {
+                        if effect_row.is_some() {
+                            return Err(TypeError::InvalidTypeAnnotation {
+                                message: "Arrow type can have at most one effect row annotation"
+                                    .into(),
+                                span: None,
+                            });
+                        }
+                        effect_row = Some(parse_effect_row_expr(e, interner)?);
+                        continue;
+                    }
                     // Check for (... T) rest type syntax
                     if let Expr::List { .. } = e {
                         let sub_elems = list_to_array(e);
@@ -156,21 +216,25 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                     types.push(parse_type_expr(e, env, interner)?);
                 }
                 if types.is_empty() && rest_type.is_some() {
-                    // (-> (... T) R) — variadic with no required params, result is from rest_type? No.
-                    // Actually this means: no required params, no result parsed yet. That's malformed.
                     return Err(TypeError::InvalidTypeAnnotation {
                         message: "Arrow type needs at least a result type".into(),
                         span: None,
                     });
                 }
                 if types.len() == 1 && rest_type.is_none() {
-                    return Ok(type_arrow(vec![], types.pop().unwrap()));
+                    return Ok(type_arrow_with_effects(
+                        vec![],
+                        effect_row,
+                        types.pop().unwrap(),
+                    ));
                 }
                 let result = types.pop().unwrap();
                 if let Some(rest_ty) = rest_type {
-                    return Ok(type_arrow_variadic(types, rest_ty, result));
+                    return Ok(type_arrow_variadic_with_effects(
+                        types, rest_ty, effect_row, result,
+                    ));
                 }
-                return Ok(type_arrow(types, result));
+                return Ok(type_arrow_with_effects(types, effect_row, result));
             }
 
             // Constrained type: (=> constraints type)
@@ -636,12 +700,7 @@ fn infer_lambda(
         .collect();
     let rest_type = rest_param.map(|(_, t)| apply_subst(&body_subst, &t));
     let result_type = apply_subst(&body_subst, &body_type);
-    let fn_effects =
-        if !body_effects.effects().is_empty() || matches!(body_effects, EffectRow::Open { .. }) {
-            Some(body_effects)
-        } else {
-            None
-        };
+    let fn_effects = Some(body_effects);
     let fn_type = if let Some(rest_ty) = rest_type {
         type_arrow_variadic_with_effects(param_types, rest_ty, fn_effects, result_type)
     } else {
@@ -1536,8 +1595,10 @@ fn infer_application(
     }
 
     let result_type = fresh_type_var();
-    let expected_fn_type = type_arrow(
+    let fresh_eff_var = fresh_effect_row_var();
+    let expected_fn_type = type_arrow_with_effects(
         arg_types.iter().map(|t| apply_subst(&subst, t)).collect(),
+        Some(effect_row_open(vec![], fresh_eff_var)),
         result_type.clone(),
     );
 

@@ -7,6 +7,8 @@ use crate::span::Span;
 pub enum Token {
     LParen(Span),
     RParen(Span),
+    LBrace(Span),
+    RBrace(Span),
     Identifier(Symbol, Span),
     Number(f64, bool, Span), // (value, is_float, span)
     String(Arc<str>, Span),
@@ -22,6 +24,8 @@ impl Token {
         match self {
             Token::LParen(s)
             | Token::RParen(s)
+            | Token::LBrace(s)
+            | Token::RBrace(s)
             | Token::Identifier(_, s)
             | Token::Number(_, _, s)
             | Token::String(_, s)
@@ -125,6 +129,16 @@ impl<'a> Lexer<'a> {
                 let start = self.pos;
                 self.advance();
                 Ok(Token::RParen(self.span_from(start)))
+            }
+            b'{' => {
+                let start = self.pos;
+                self.advance();
+                Ok(Token::LBrace(self.span_from(start)))
+            }
+            b'}' => {
+                let start = self.pos;
+                self.advance();
+                Ok(Token::RBrace(self.span_from(start)))
             }
             b'\'' => {
                 let start = self.pos;
@@ -308,7 +322,7 @@ impl<'a> Lexer<'a> {
 
 fn is_symbol_char(b: u8) -> bool {
     matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
-        | b'+' | b'-' | b'*' | b'/' | b'<' | b'>' | b'=' | b'!' | b'?' | b'_' | b'#' | b':' | b'.')
+        | b'+' | b'-' | b'*' | b'/' | b'<' | b'>' | b'=' | b'!' | b'?' | b'_' | b'#' | b':' | b'.' | b'|')
 }
 
 /// Convenience: lex source into tokens, filtering nothing.
@@ -332,6 +346,8 @@ mod tests {
             .map(|t| match t {
                 Token::LParen(_) => "lparen",
                 Token::RParen(_) => "rparen",
+                Token::LBrace(_) => "lbrace",
+                Token::RBrace(_) => "rbrace",
                 Token::Identifier(_, _) => "identifier",
                 Token::Number(_, _, _) => "number",
                 Token::String(_, _) => "string",
@@ -444,12 +460,10 @@ mod tests {
         let interner = Interner::new();
         let result = lex("\"hello", &interner);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .message
-                .contains("Unterminated string literal")
-        );
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("Unterminated string literal"));
     }
 
     // === Identifiers ===
