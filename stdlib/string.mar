@@ -1,5 +1,11 @@
 ; String utilities module
-; Provides convenient wrappers around built-in string operations
+;
+; Provides clean wrappers around built-in string operations.
+;
+; Usage:
+;   (import "std:string" as str)
+;   (str/append "hello" " " "world")
+;   (str/split "," "a,b,c")
 
 ; ============================================================
 ; Basic Operations
@@ -215,7 +221,51 @@
                         s (string-repeat " " right)))))))
 
 ; ============================================================
-; Character Codes
+; Comparison
+; ============================================================
+
+; eq : (-> String String Bool)
+; Check if two strings are equal
+(define (eq : (-> String String Bool))
+  (lambda (a b)
+    (string= a b)))
+
+; lt : (-> String String Bool)
+; Check if first string is less than second
+(define (lt : (-> String String Bool))
+  (lambda (a b)
+    (string< a b)))
+
+; gt : (-> String String Bool)
+; Check if first string is greater than second
+(define (gt : (-> String String Bool))
+  (lambda (a b)
+    (string> a b)))
+
+; le : (-> String String Bool)
+; Check if first string is less than or equal to second
+(define (le : (-> String String Bool))
+  (lambda (a b)
+    (string<= a b)))
+
+; ge : (-> String String Bool)
+; Check if first string is greater than or equal to second
+(define (ge : (-> String String Bool))
+  (lambda (a b)
+    (string>= a b)))
+
+; ============================================================
+; Conversion
+; ============================================================
+
+; from-number : (-> Float String)
+; Convert a number to its string representation
+(define (from-number : (-> Float String))
+  (lambda (n)
+    (number->string n)))
+
+; ============================================================
+; Character Operations
 ; ============================================================
 
 ; to-char-code : (-> Char Int)

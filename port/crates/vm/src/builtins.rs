@@ -3,6 +3,38 @@ use crate::object::VMObject;
 use crate::value::{Value, format_value};
 use crate::vm::VM;
 
+/// Collect any list representation (VMObject::List or Cons/Nil ADT) into a Vec<Value>.
+/// Returns Err if the value is not a list of either kind.
+fn collect_list(val: &Value, context: &str) -> Result<Vec<Value>, VMError> {
+    // VMObject::List(Vec<Value>) — produced by (list ...) builtin
+    if let Some(VMObject::List(items)) = val.as_object() {
+        return Ok(items.clone());
+    }
+    // Cons/Nil ADT chain
+    let mut result = Vec::new();
+    let mut cur = val.clone();
+    loop {
+        if cur.is_nil() {
+            return Ok(result);
+        }
+        match cur.as_object() {
+            Some(VMObject::AdtValue { tag, fields }) if tag == "Nil" => {
+                return Ok(result);
+            }
+            Some(VMObject::AdtValue { tag, fields }) if tag == "Cons" && fields.len() == 2 => {
+                result.push(fields[0].clone());
+                cur = fields[1].clone();
+            }
+            _ => {
+                return Err(VMError::runtime(format!(
+                    "{}: expected a list (List or Cons/Nil)",
+                    context
+                )));
+            }
+        }
+    }
+}
+
 /// Register all built-in globals into the VM.
 pub fn register_builtins(vm: &mut VM) {
     // --- Built-in values ---
@@ -980,27 +1012,13 @@ pub fn register_builtins(vm: &mut VM) {
             .as_string()
             .ok_or_else(|| VMError::runtime("string-join: first arg must be a string"))?
             .to_string();
-        // Walk the Cons-list
+        let items = collect_list(&args[1], "string-join")?;
         let mut parts: Vec<String> = Vec::new();
-        let mut current = &args[1];
-        loop {
-            match current.as_object() {
-                Some(VMObject::AdtValue { tag, fields }) if tag == "Cons" && fields.len() == 2 => {
-                    let s = fields[0].as_string().ok_or_else(|| {
-                        VMError::runtime("string-join: list elements must be strings")
-                    })?;
-                    parts.push(s.to_string());
-                    current = &fields[1];
-                }
-                Some(VMObject::AdtValue { tag, fields }) if tag == "Nil" && fields.is_empty() => {
-                    break;
-                }
-                _ => {
-                    return Err(VMError::runtime(
-                        "string-join: second arg must be a list of strings",
-                    ));
-                }
-            }
+        for item in &items {
+            let s = item
+                .as_string()
+                .ok_or_else(|| VMError::runtime("string-join: list elements must be strings"))?;
+            parts.push(s.to_string());
         }
         Ok(Value::string(parts.join(&sep).as_str()))
     });
@@ -1142,27 +1160,13 @@ pub fn register_builtins(vm: &mut VM) {
         if args.len() != 1 {
             return Err(VMError::runtime("chars->string expects 1 argument"));
         }
-        // Walk the Cons-list of chars
+        let items = collect_list(&args[0], "chars->string")?;
         let mut result = String::new();
-        let mut current = &args[0];
-        loop {
-            match current.as_object() {
-                Some(VMObject::AdtValue { tag, fields }) if tag == "Cons" && fields.len() == 2 => {
-                    let c = fields[0].as_char().ok_or_else(|| {
-                        VMError::runtime("chars->string: list elements must be chars")
-                    })?;
-                    result.push(c);
-                    current = &fields[1];
-                }
-                Some(VMObject::AdtValue { tag, fields }) if tag == "Nil" && fields.is_empty() => {
-                    break;
-                }
-                _ => {
-                    return Err(VMError::runtime(
-                        "chars->string: argument must be a list of chars",
-                    ));
-                }
-            }
+        for item in &items {
+            let c = item
+                .as_char()
+                .ok_or_else(|| VMError::runtime("chars->string: list elements must be chars"))?;
+            result.push(c);
         }
         Ok(Value::string(result.as_str()))
     });
@@ -1287,6 +1291,7 @@ pub fn register_builtins(vm: &mut VM) {
             return Err(VMError::runtime("list? expects 1 argument"));
         }
         let is_list = args[0].is_nil()
+            || matches!(args[0].as_object(), Some(VMObject::List(_)))
             || matches!(args[0].as_object(), Some(VMObject::AdtValue { tag, .. }) if tag == "Nil" || tag == "Cons");
         Ok(Value::boolean(is_list))
     });
@@ -1415,22 +1420,11 @@ fn register_ffi_builtins(
             .ok_or_else(|| VMError::runtime("ffi-open: first arg must be string"))?;
 
         // Parse signatures from the list
-        let sig_list_val = &args[1];
-        let sig_entries = match sig_list_val.as_object() {
-            Some(VMObject::List(items)) => items,
-            _ => {
-                return Err(VMError::runtime(
-                    "ffi-open: second arg must be a list of signature specs",
-                ));
-            }
-        };
+        let sig_entries = collect_list(&args[1], "ffi-open: second arg")?;
 
         let mut sigs = Vec::new();
-        for entry in sig_entries {
-            let parts = match entry.as_object() {
-                Some(VMObject::List(p)) => p,
-                _ => return Err(VMError::runtime("ffi-open: each signature must be a list")),
-            };
+        for entry in &sig_entries {
+            let parts = collect_list(entry, "ffi-open: each signature")?;
             if parts.len() != 3 {
                 return Err(VMError::runtime(
                     "ffi-open: signature must be (name args-list ret-type)",
@@ -1439,12 +1433,9 @@ fn register_ffi_builtins(
             let fn_name = parts[0]
                 .as_string()
                 .ok_or_else(|| VMError::runtime("ffi-open: fn name must be string"))?;
-            let arg_types_val = match parts[1].as_object() {
-                Some(VMObject::List(a)) => a,
-                _ => return Err(VMError::runtime("ffi-open: arg types must be a list")),
-            };
+            let arg_types_val = collect_list(&parts[1], "ffi-open: arg types")?;
             let mut arg_types = Vec::new();
-            for at in arg_types_val {
+            for at in &arg_types_val {
                 let type_str = at
                     .as_string()
                     .ok_or_else(|| VMError::runtime("ffi-open: arg type must be string"))?;
@@ -1514,17 +1505,11 @@ fn register_ffi_builtins(
         let name = args[0]
             .as_string()
             .ok_or_else(|| VMError::runtime("ffi-struct: first arg must be string"))?;
-        let fields_val = match args[1].as_object() {
-            Some(VMObject::List(items)) => items,
-            _ => return Err(VMError::runtime("ffi-struct: second arg must be a list")),
-        };
+        let fields_val = collect_list(&args[1], "ffi-struct: second arg")?;
 
         let mut fields = Vec::new();
-        for f in fields_val {
-            let parts = match f.as_object() {
-                Some(VMObject::List(p)) => p,
-                _ => return Err(VMError::runtime("ffi-struct: each field must be a list")),
-            };
+        for f in &fields_val {
+            let parts = collect_list(f, "ffi-struct: each field")?;
             if parts.len() != 2 {
                 return Err(VMError::runtime("ffi-struct: field must be (name type)"));
             }

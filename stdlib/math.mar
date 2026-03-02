@@ -1,5 +1,12 @@
 ; Math utilities module
-; Provides mathematical functions and constants
+;
+; Provides mathematical functions, constants, and clean wrappers
+; around built-in math operations.
+;
+; Usage:
+;   (import "std:math" as math)
+;   (math/sqrt 2.0)
+;   (math/sin math/pi)
 
 ; ============================================================
 ; Constants
@@ -64,16 +71,8 @@
       (if (>. x hi) hi x))))
 
 ; ============================================================
-; Rounding (Float -> Int)
+; Powers and Roots (wrappers around builtins)
 ; ============================================================
-
-; Note: floor, ceil, round, truncate are built-in functions
-
-; ============================================================
-; Powers and Roots
-; ============================================================
-
-; Note: pow, sqrt are built-in functions
 
 ; square : (-> Float Float)
 ; Square a number (Float only)
@@ -88,9 +87,6 @@
 ; ============================================================
 ; Integer Division and Modulo
 ; ============================================================
-
-; Note: mod, rem are built-in functions (Int)
-; Note: rem. is the Float version
 
 ; div : (-> Int Int Int)
 ; Integer division (truncated toward zero)
@@ -118,28 +114,14 @@
     (if (even n) #f #t)))
 
 ; ============================================================
-; Exponentials and Logarithms
+; Logarithms (wrapper + utility)
 ; ============================================================
-
-; Note: exp, log, log10, log2 are built-in functions
 
 ; log-base : (-> Float Float Float)
 ; Logarithm with arbitrary base
 (define (log-base : (-> Float Float Float))
   (lambda (base x)
     (/. (log x) (log base))))
-
-; ============================================================
-; Trigonometric Functions
-; ============================================================
-
-; Note: sin, cos, tan, asin, acos, atan, atan2 are built-in functions
-
-; ============================================================
-; Hyperbolic Functions
-; ============================================================
-
-; Note: sinh, cosh, tanh are built-in functions
 
 ; ============================================================
 ; Angle Conversion
@@ -156,12 +138,6 @@
 (define (radians : (-> Float Float))
   (lambda (deg)
     (*. deg (/. pi 180.0))))
-
-; ============================================================
-; Special Value Checks
-; ============================================================
-
-; Note: is-nan, is-infinite, is-finite are built-in functions
 
 ; ============================================================
 ; Number Theory Functions (Int only)

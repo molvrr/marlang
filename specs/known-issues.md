@@ -194,7 +194,7 @@ Full-stack variadic function support was implemented, going well beyond the mini
 
 3. **Type inference** (`infer.rs`): Parses `(... T)` syntax in arrow type annotations. Detects `.` dot notation in lambda param lists to build variadic arrow types. Rest param gets type `(List T)` in the function body. Removed `list` from `FFI_VARIADIC_FUNCTIONS` — it now uses the general variadic type mechanism.
 
-4. **Builtins** (`builtins.rs`): `string-append`, `string-concat`, and `list` registered with proper variadic types: `(-> (... String) String)` and `(-> (... a) (List a))`.
+4. **Builtins** (`builtins.rs`): `string-append` and `list` registered with proper variadic types: `(-> (... String) String)` and `(-> (... a) (List a))`. (`string-concat` was later removed as a redundant alias for `string-append`.)
 
 5. **Compiler** (`compiler.rs`): `compile_lambda` detects `.` in parameter list, sets `is_variadic: true` on `FunctionPrototype`, and gives the rest param a local slot.
 

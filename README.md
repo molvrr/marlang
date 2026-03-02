@@ -5,7 +5,7 @@ A Lisp-like language written in Rust. Features include a bytecode VM with NaN-bo
 ## Features
 
 - **Bytecode VM**: Stack-based bytecode compiler and virtual machine with NaN-boxed values
-- **Type System**: Static type checking with local inference, parametric polymorphism, row-polymorphic effects, and OCaml-style operator split (Int/Float)
+- **Type System**: Static type checking with local inference, parametric polymorphism, row-polymorphic effects, and OCaml-style operator split (Int/Float). Primitive types: `Int`, `Float`, `Bool`, `String`, `Char`, `Unit`
 - **Algebraic Data Types**: Define sum types with constructors
 - **Pattern Matching**: Destructure values with `match` expressions, exhaustiveness checking
 - **Algebraic Effects**: Delimited continuations with `effect`, `perform`, and `handle`
@@ -90,6 +90,17 @@ cargo test --workspace
 "tab\there"
 ```
 
+**Characters** - Unicode codepoints, created via `char-from-code`:
+
+```lisp
+(char-from-code 65)      ; => 'A'
+(char-code (char-from-code 65))  ; => 65
+(string->chars "hi")     ; => (Cons 'h' (Cons 'i' Nil))
+(char->string (char-from-code 65))  ; => "A"
+```
+
+Characters are NaN-boxed inline (no heap allocation). Type: `Char`.
+
 **Booleans** - `#t` for true, `#f` for false (returned by comparison operators)
 
 **Lists** - created with the `list` function:
@@ -173,7 +184,7 @@ Arithmetic and comparison operators are split by type — Int operators are plai
 |-----|-------|-------------|
 | `+` `-` `*` `/` | `+.` `-.` `*.` `/.` | Arithmetic |
 | `=` `<` `>` `<=` `>=` | `=.` `<.` `>.` `<=.` `>=.` | Comparison |
-| `rem` `abs` `negate` | `rem.` `abs.` `negate.` | Other numeric |
+| `rem` `abs` `negate` `sign` | `rem.` `abs.` `negate.` `sign.` | Other numeric |
 
 String comparison uses named functions: `string=`, `string<`, `string>`, `string<=`, `string>=`.
 
@@ -606,6 +617,7 @@ Use the `std:` prefix to import from the standard library:
 
 Every Marlang program automatically has access to the prelude (`stdlib/prelude.mar`), which defines:
 - **Data types**: `Option` (None, Some), `List` (Nil, Cons), `Pair` (MkPair), `Result` (Ok, Err)
+- **Effects**: `Exception` (throw)
 - **Macros**: `when`
 - **Functions**: `not`, `cons`, `car`, `cdr`, `append`, `string->number`
 
@@ -619,10 +631,11 @@ No import is needed for these -- they are available everywhere.
 | `std:result` | Utilities for the `Result` type: `map`, `map-err`, `flat-map`, `unwrap-or`, `unwrap-or-else`, `is-ok`, `is-err`, `ok`, `err`, `and-then`, `or-else` |
 | `std:list` | List utilities: `foldl`, `foldr`, `length`, `reverse`, `concat`, `map`, `filter`, `any`, `all`, `find`, `take`, `drop`, `zip`, `zip-with` |
 | `std:io` | IO effect with **built-in handlers**: `print`, `println`, `read-line`, `read-file`, `write-file`. Handlers work automatically without explicit `handle` blocks. |
-| `std:string` | String utilities: `length`, `concat`, `reverse`, `to-upper`, `to-lower`, `trim`, `split`, `join`, `replace`, `substring`, `char-at` |
-| `std:math` | Math utilities: `pi`, `e`, `min-of`/`min-of.`, `max-of`/`max-of.`, `clamp`/`clamp.`, `square`, `cube`, `div`/`div.`, `even`, `odd`, `gcd`, `lcm`, `factorial`, `log-base`, `degrees`, `radians` |
+| `std:string` | String utilities: basic ops (`concat`, `length`, `is-empty`, `reverse`, `repeat`), case (`to-upper`, `to-lower`), trim (`trim`, `trim-start`, `trim-end`), search (`starts-with`, `ends-with`, `contains`, `index-of`), substrings (`substring`, `char-at`, `take`, `drop`), split/join (`split`, `join`, `lines`, `unlines`, `words`, `unwords`), replace (`replace`, `replace-all`), padding (`pad-start`, `pad-end`, `center`), comparison (`eq`, `lt`, `gt`, `le`, `ge`), conversion (`from-number`), char ops (`to-char-code`, `from-char-code`, `to-chars`, `from-chars`, `char-to-string`) |
+| `std:math` | Math utilities: constants (`pi`, `e`, `tau`), basic ops (`min-of`/`min-of.`, `max-of`/`max-of.`, `clamp`/`clamp.`), powers (`square`, `cube`), int division (`div`, `div.`, `even`, `odd`), logarithms (`log-base`), angles (`degrees`, `radians`), number theory (`gcd`, `lcm`, `factorial`). Trig/exp/log builtins (`sqrt`, `pow`, `sin`, `cos`, etc.) are available globally without import. |
 | `std:concurrent` | Concurrency wrappers: `spawn`, `yield`, `self`, `chan-new`, `chan-send`, `chan-recv`, `chan-close`, `run` |
 | `std:actor` | Actor model: `send`, `receive`, `receive-match`, `monitor`, `link`, `unlink`, `trap-exit` |
+| `std:net` | TCP networking: `listen`, `accept`, `connect`, `send`, `recv`, `close`, `close-listener` |
 
 ## Architecture
 
@@ -635,15 +648,16 @@ marlang/
 │       ├── vm/           # marlang-vm: compiler, NaN-boxed VM, modules, FFI, schedulers, macros, TCP
 │       └── cli/          # marlang-cli: clap-based CLI (run, repl, typecheck, disasm)
 ├── stdlib/               # Standard library (.mar files)
-│   ├── prelude.mar       # Auto-loaded: data types, macros, core functions
+│   ├── prelude.mar       # Auto-loaded: data types, Exception effect, macros, core functions
 │   ├── option.mar        # Option type utilities
 │   ├── result.mar        # Result type and utilities
 │   ├── list.mar          # List utilities
 │   ├── io.mar            # IO effect and operations
-│   ├── string.mar        # String utilities
-│   ├── math.mar          # Math utilities
+│   ├── string.mar        # String utilities (40+ functions including char ops)
+│   ├── math.mar          # Math utilities (constants, number theory, angle conversion)
 │   ├── concurrent.mar    # Concurrency wrappers
-│   └── actor.mar         # Actor model
+│   ├── actor.mar         # Actor model
+│   └── net.mar           # TCP networking wrappers
 ├── examples/             # Example programs
 ├── bench/                # Benchmark .mar programs
 ├── web/                  # Web playground (needs WASM port — see web/TODO.md)

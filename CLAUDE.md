@@ -42,19 +42,24 @@ ts-archive/   - Archived TypeScript implementation (historical reference)
 
 ### Standard Library
 Located in `stdlib/`:
-- `prelude.mar` - Auto-loaded prelude: data types (Option, List, Pair, Result), `when` macro, utility functions (not, cons, car, cdr, append, string->number)
+- `prelude.mar` - Auto-loaded prelude: data types (Option, List, Pair, Result), Exception effect, `when` macro, utility functions (not, cons, car, cdr, append, string->number). No `(declare ...)` forms — builtin type declarations live in `types/src/builtins.rs`.
 - `option.mar` - Option type utilities (map, flat-map, unwrap-or, etc.)
 - `result.mar` - Result type and utilities (Ok, Err, map, flat-map, etc.)
 - `io.mar` - IO effect and operations (print, println, read-line, read-file, write-file)
 - `list.mar` - List utilities (foldl, foldr, map, filter, zip, etc.)
-- `string.mar` - String utilities
-- `math.mar` - Math utilities
+- `string.mar` - String utilities: basic ops (concat, length, is-empty, reverse, repeat), case (to-upper, to-lower), trim, search (starts-with, ends-with, contains, index-of), substrings (substring, char-at, take, drop), split/join (split, join, lines, unlines, words, unwords), replace, padding (pad-start, pad-end, center), comparison (eq, lt, gt, le, ge), conversion (from-number), char ops (to-char-code, from-char-code, to-chars, from-chars, char-to-string)
+- `math.mar` - Math utilities: constants (pi, e, tau), basic ops (min-of, max-of, clamp — Int and Float versions), powers (square, cube), int division (div, div., even, odd), logarithms (log-base), angles (degrees, radians), number theory (gcd, lcm, factorial). Trig/exp/log builtins (sqrt, pow, sin, cos, etc.) are available globally without import.
 - `concurrent.mar` - Concurrency wrappers (fibers, channels)
 - `actor.mar` - Actor model (mailboxes, supervision)
+- `net.mar` - TCP networking wrappers (listen, accept, connect, send, recv, close)
+- `http.mar` - HTTP client/server (UNIMPLEMENTED — no runtime handlers)
 
 Note: ADT constructors (None, Some, Nil, Cons, MkPair, Ok, Err) and utility functions (not, cons, car, cdr, append, string->number) are defined in `stdlib/prelude.mar`, not as Rust builtins. The prelude is auto-loaded before every program.
 
 ## Language Conventions
+
+### Primitive Types
+The language has these primitive types: `Int`, `Float`, `Bool`, `String`, `Char`, `Unit`. `Char` is a Unicode codepoint stored inline via NaN-boxing (no heap allocation). Character literals are displayed as `'A'` by `show`. Use `char-from-code` to create chars and `char-code` to extract the codepoint.
 
 ### Function Type Convention
 Every function takes at least one argument. Zero-argument thunks (`(lambda () body)`) are typed as taking an implicit `Unit` parameter:
@@ -95,7 +100,7 @@ Effect row rules:
 The VM handles IO effects (`print`, `println`, `read-line`, `read-file`, `write-file`) without needing explicit `handle` blocks.
 
 ### Built-in Functions
-Defined in `vm/builtins.rs`. Categories: Int arithmetic (`+`, `-`, `*`, `/`, `rem`, `abs`, `negate`), Float arithmetic (`+.`, `-.`, `*.`, `/.`, `rem.`, `abs.`, `negate.`), Int comparison (`<`, `>`, `=`, `<=`, `>=`), Float comparison (`<.`, `>.`, `=.`, `<=.`, `>=.`), string comparison (`string=`, `string<`, `string>`, `string<=`, `string>=`), polymorphic (`equal?`, `show`, `int->float`), math (`sqrt`, `pow`, `floor`, `ceil`, `round`, `truncate`, `exp`, `log`, `sin`, `cos`, `tan`, etc.), lists (`list`), strings (`string-length`, `string-append`, `string-split`, `string-join`, etc.), FFI (`ffi-open`, `ffi-call`, `ffi-close`), structs (`struct-new`, `struct-get`, `struct-set`), macros (`gensym`, `symbol->string`, `string->symbol`), type predicates (`symbol?`, `pair?`, `nil?`, `number?`, `string?`, `list?`). See `vm/builtins.rs` for the full list.
+Defined in `vm/builtins.rs`. Categories: Int arithmetic (`+`, `-`, `*`, `/`, `rem`, `abs`, `negate`, `sign`), Float arithmetic (`+.`, `-.`, `*.`, `/.`, `rem.`, `abs.`, `negate.`, `sign.`), Int comparison (`<`, `>`, `=`, `<=`, `>=`), Float comparison (`<.`, `>.`, `=.`, `<=.`, `>=.`), string comparison (`string=`, `string<`, `string>`, `string<=`, `string>=`), polymorphic (`equal?`, `show`, `int->float`), math (`sqrt`, `pow`, `exp`, `log`, `log10`, `log2`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`), conversions (`floor`, `ceil`, `round`, `truncate`), float checks (`is-nan`, `is-infinite`, `is-finite`), lists (`list`), strings (`string-length`, `string-append`, `string-is-empty`, `string-reverse`, `string-repeat`, `string-to-upper`, `string-to-lower`, `string-trim`, `string-trim-start`, `string-trim-end`, `string-starts-with`, `string-ends-with`, `string-contains`, `string-index-of`, `string-substring`, `string-char-at`, `string-split`, `string-join`, `string-replace`, `string-replace-all`, `string-pad-start`, `string-pad-end`, `number->string`), chars (`char-code`, `char-from-code`, `char->string`, `chars->string`, `string->chars`), FFI (`ffi-open`, `ffi-call`, `ffi-close`), structs (`struct-new`, `struct-get`, `struct-set`), macros (`gensym`, `symbol->string`, `string->symbol`), type predicates (`symbol?`, `pair?`, `nil?`, `number?`, `string?`, `list?`). See `vm/builtins.rs` for the full list.
 
 ### Failable Operations Convention
 Operations that can fail follow a consistent pattern:
