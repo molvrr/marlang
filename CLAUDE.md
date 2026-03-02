@@ -121,11 +121,9 @@ Without a handler, `throw` crashes the fiber. Note: `string->number` (defined in
 
 ## Known Issues
 
-1. **Module globals workaround:** Qualified imports (`import "mod" as m`) install both prefixed (`m/foo`) and unqualified (`foo`) names into parent globals. First-imported module wins for name collisions. Long-term fix: module-scoped globals.
+1. **Recursive `define` + TCP effects hangs:** Using `(define f (lambda () ... (f)))` inside `fiber-spawn` where the body does TCP effects causes hangs. Workaround: unroll recursion or avoid combining recursive `define` with scheduler-suspending effects.
 
-2. **Recursive `define` + TCP effects hangs:** Using `(define f (lambda () ... (f)))` inside `fiber-spawn` where the body does TCP effects causes hangs. Workaround: unroll recursion or avoid combining recursive `define` with scheduler-suspending effects.
-
-3. **`match` branches require single expressions:** Multi-expression match bodies need explicit `(begin ...)` wrapping.
+2. **`match` branches require single expressions:** Multi-expression match bodies need explicit `(begin ...)` wrapping.
 
 ## Adding Features
 

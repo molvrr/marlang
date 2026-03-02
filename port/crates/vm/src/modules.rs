@@ -6,7 +6,7 @@ use marlang_core::intern::{Interner, Symbol};
 use marlang_core::lexer::lex;
 use marlang_core::parser::parse_with_interner;
 
-use crate::builtins::register_builtins;
+use crate::bytecode::ModuleId;
 use crate::compiler::compile_expr_with_context;
 use crate::errors::VMError;
 use crate::expand::MacroExpander;
@@ -18,7 +18,10 @@ use crate::vm::{VM, interpret};
 #[derive(Clone)]
 enum ModuleState {
     Loading,
-    Loaded { globals: HashMap<String, Value> },
+    Loaded {
+        globals: HashMap<String, Value>,
+        module_id: ModuleId,
+    },
 }
 
 // --- Import form ---
@@ -251,9 +254,14 @@ pub fn run_program_from_exprs(
             )?;
             last_value = Value::nil();
         } else {
-            let result =
-                compile_expr_with_context(expr, interner, &known_constructors, &known_effect_ops)
-                    .map_err(|e| VMError::runtime(format!("Compile error: {}", e)))?;
+            let result = compile_expr_with_context(
+                expr,
+                interner,
+                &known_constructors,
+                &known_effect_ops,
+                vm.current_module,
+            )
+            .map_err(|e| VMError::runtime(format!("Compile error: {}", e)))?;
 
             // Update knowledge from this expression
             known_constructors = result.known_constructors;
@@ -368,9 +376,18 @@ fn handle_import(
                     resolved.display()
                 )));
             }
-            ModuleState::Loaded { globals } => {
+            ModuleState::Loaded { globals, module_id } => {
                 let globals = globals.clone();
-                merge_exports(vm, &globals, &form, interner, known_constructors, &path_str)?;
+                let cached_module_id = *module_id;
+                merge_exports(
+                    vm,
+                    &globals,
+                    &form,
+                    interner,
+                    known_constructors,
+                    &path_str,
+                    cached_module_id,
+                )?;
                 return Ok(());
             }
         }
@@ -382,32 +399,33 @@ fn handle_import(
     // Load source
     let source = loader.load_source(&resolved)?;
 
-    // Save parent globals and set up module globals (start with builtins)
-    // Use std::mem::take to move globals instead of cloning (O(1) vs O(n))
-    let parent_globals = std::mem::take(&mut vm.globals);
+    // Allocate a new module for this import
+    let module_id = vm.allocate_module();
+
+    // Save parent state
+    let parent_module = vm.current_module;
     let parent_handler_stack = std::mem::take(&mut vm.handler_stack);
     let parent_resumed = std::mem::take(&mut vm.resumed_continuations);
     let parent_dirty = vm.dirty_globals.take();
 
-    // Globals is now empty, register builtins for the module
-    register_builtins(vm);
+    // Switch to the new module
+    vm.current_module = module_id;
     // Enable dirty-globals tracking for the module
     vm.dirty_globals = Some(HashSet::new());
 
-    // Run the module
+    // Run the module (builtins + prelude live in root module, accessible via fallback)
     let module_result = run_program(vm, &source, Some(&resolved), loader, interner);
 
     // Collect exports = globals that were explicitly written by module code
     let dirty = vm.dirty_globals.take().unwrap_or_default();
-    let module_globals: HashMap<String, Value> = vm
-        .globals
+    let module_globals: HashMap<String, Value> = vm.module_globals[module_id as usize]
         .iter()
         .filter(|(name, _)| dirty.contains(name.as_str()))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
     // Restore parent state
-    vm.globals = parent_globals;
+    vm.current_module = parent_module;
     vm.handler_stack = parent_handler_stack;
     vm.resumed_continuations = parent_resumed;
     vm.dirty_globals = parent_dirty;
@@ -420,6 +438,7 @@ fn handle_import(
         resolved,
         ModuleState::Loaded {
             globals: module_globals.clone(),
+            module_id,
         },
     );
 
@@ -431,6 +450,7 @@ fn handle_import(
         interner,
         known_constructors,
         &path_str,
+        module_id,
     )?;
 
     Ok(())
@@ -443,11 +463,13 @@ fn merge_exports(
     interner: &Interner,
     known_constructors: &mut HashSet<Symbol>,
     _path_str: &str,
+    _source_module_id: ModuleId,
 ) -> Result<(), VMError> {
+    let target_module = vm.current_module;
     match form {
         ImportForm::All => {
             for (name, value) in exports {
-                vm.globals.insert(name.clone(), value.clone());
+                vm.module_globals[target_module as usize].insert(name.clone(), value.clone());
                 // Register constructors
                 if is_constructor_value(value) {
                     known_constructors.insert(interner.intern(name));
@@ -458,7 +480,8 @@ fn merge_exports(
             for name in names {
                 match exports.get(name) {
                     Some(value) => {
-                        vm.globals.insert(name.clone(), value.clone());
+                        vm.module_globals[target_module as usize]
+                            .insert(name.clone(), value.clone());
                         if is_constructor_value(value) {
                             known_constructors.insert(interner.intern(name));
                         }
@@ -473,19 +496,16 @@ fn merge_exports(
             }
         }
         ImportForm::Qualified(qualifier) => {
+            // Only install qualified names (e.g. "m/foo") in the importing module.
+            // No unqualified fallback needed — closures from the source module
+            // carry their module_id and resolve their own globals via
+            // PushGlobal's module-scoped lookup.
             for (name, value) in exports {
                 let qualified_name = format!("{}/{}", qualifier, name);
-                vm.globals.insert(qualified_name.clone(), value.clone());
+                vm.module_globals[target_module as usize]
+                    .insert(qualified_name.clone(), value.clone());
                 if is_constructor_value(value) {
                     known_constructors.insert(interner.intern(&qualified_name));
-                }
-                // Also install unqualified name so that closures from the
-                // module can resolve their own globals via PUSH_GLOBAL.
-                // Module closures reference globals by their original
-                // (unqualified) names since they were compiled in the
-                // module's own scope.
-                if !vm.globals.contains_key(name) {
-                    vm.globals.insert(name.clone(), value.clone());
                 }
             }
         }

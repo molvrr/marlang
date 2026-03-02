@@ -128,6 +128,10 @@ pub type BuiltinFn = fn(&mut crate::vm::VM, &[Value]) -> Result<Value, crate::er
 pub struct Closure {
     pub proto: Arc<FunctionPrototype>,
     pub upvalues: Vec<Value>,
+    /// The module this closure belongs to. Copied from `proto.module_id` at creation,
+    /// stored here for fast access during PushGlobal resolution without indirecting
+    /// through the Arc<FunctionPrototype>.
+    pub module_id: crate::bytecode::ModuleId,
 }
 
 /// A call frame on the VM's call stack.

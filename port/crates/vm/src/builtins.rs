@@ -35,17 +35,19 @@ fn collect_list(val: &Value, context: &str) -> Result<Vec<Value>, VMError> {
     }
 }
 
-/// Register all built-in globals into the VM.
+/// Register all built-in globals into the VM's root module.
 pub fn register_builtins(vm: &mut VM) {
     // --- Built-in values ---
-    vm.globals.insert("nil".to_string(), Value::nil());
-    vm.globals.insert("#t".to_string(), Value::boolean(true));
-    vm.globals.insert("#f".to_string(), Value::boolean(false));
+    vm.globals_mut().insert("nil".to_string(), Value::nil());
+    vm.globals_mut()
+        .insert("#t".to_string(), Value::boolean(true));
+    vm.globals_mut()
+        .insert("#f".to_string(), Value::boolean(false));
 
     // --- Built-in functions ---
 
     fn builtin(vm: &mut VM, name: &str, func: fn(&mut VM, &[Value]) -> Result<Value, VMError>) {
-        vm.globals.insert(
+        vm.globals_mut().insert(
             name.to_string(),
             Value::object(VMObject::Builtin {
                 name: name.to_string(),

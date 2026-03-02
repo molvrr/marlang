@@ -297,6 +297,7 @@ const HANDLED_EFFECTS: &[&str] = &[
 ];
 
 fn make_dummy_closure() -> Closure {
+    use crate::bytecode::ROOT_MODULE;
     Closure {
         proto: Arc::new(FunctionPrototype {
             name: "<scheduler>".to_string(),
@@ -304,8 +305,10 @@ fn make_dummy_closure() -> Closure {
             is_variadic: false,
             upvalues: Vec::new(),
             chunk: Chunk::new(),
+            module_id: ROOT_MODULE,
         }),
         upvalues: Vec::new(),
+        module_id: ROOT_MODULE,
     }
 }
 

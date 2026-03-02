@@ -287,6 +287,7 @@ fn make_none() -> Value {
 }
 
 fn make_dummy_closure() -> Closure {
+    use crate::bytecode::ROOT_MODULE;
     Closure {
         proto: Arc::new(FunctionPrototype {
             name: "<scheduler>".to_string(),
@@ -294,8 +295,10 @@ fn make_dummy_closure() -> Closure {
             is_variadic: false,
             upvalues: Vec::new(),
             chunk: Chunk::new(),
+            module_id: ROOT_MODULE,
         }),
         upvalues: Vec::new(),
+        module_id: ROOT_MODULE,
     }
 }
 
@@ -2479,8 +2482,8 @@ pub fn run_fibers_parallel(
         active_listeners: AtomicUsize::new(0),
     });
 
-    // Clone globals for each thread
-    let globals = vm.globals.clone();
+    // Clone module globals for each thread
+    let module_globals = vm.module_globals.clone();
     let body_clone = body.clone();
 
     // Use thread::scope for safe borrowing
@@ -2489,7 +2492,7 @@ pub fn run_fibers_parallel(
 
         for i in 0..num_threads {
             let shared = Arc::clone(&shared);
-            let globals = globals.clone();
+            let module_globals = module_globals.clone();
             let body_clone = body_clone.clone();
             let receiver = receivers.remove(0);
             let worker = workers.remove(0);
@@ -2507,7 +2510,7 @@ pub fn run_fibers_parallel(
             };
 
             let handle = scope.spawn(move || {
-                let mut thread_vm = VM::new_with_globals(globals);
+                let mut thread_vm = VM::new_with_module_globals(module_globals);
 
                 let mut sched = PerScheduler {
                     id: i,

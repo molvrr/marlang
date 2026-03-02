@@ -1960,6 +1960,69 @@ fn module_import_qualified_multiple() {
     );
 }
 
+// ===== Qualified Import — Namespace Isolation =====
+
+#[test]
+fn module_qualified_no_namespace_collision() {
+    // Two modules defining the same name should be independently accessible
+    // via qualified names. This was the Known Issue #2 bug: first-imported wins.
+    let val = eval_with_virtual_modules(
+        r#"(import "./a.mar" as a)
+           (import "./b.mar" as b)
+           (+ (a/compute 3) (b/compute 3))"#,
+        "test.mar",
+        vec![
+            ("a.mar", "(define compute (lambda (x) (* x x)))"), // square: 9
+            ("b.mar", "(define compute (lambda (x) (* x 2)))"), // double: 6
+        ],
+    )
+    .expect("namespace collision test failed");
+    let n = val.as_number().expect("expected number");
+    assert!((n - 15.0).abs() < 1e-10, "expected 15 (9 + 6), got {}", n);
+}
+
+#[test]
+fn module_qualified_internal_cross_reference() {
+    // Module functions calling other functions from the same module should still work
+    // since PushGlobal resolves against the closure's home module.
+    let val = eval_with_virtual_modules(
+        r#"(import "./mod.mar" as m)
+           (m/cube 3)"#,
+        "test.mar",
+        vec![(
+            "mod.mar",
+            r#"(define square (lambda (x) (* x x)))
+                           (define cube (lambda (x) (* x (square x))))"#,
+        )],
+    )
+    .expect("cross-reference test failed");
+    let n = val.as_number().expect("expected number");
+    assert!((n - 27.0).abs() < 1e-10, "expected 27, got {}", n);
+}
+
+#[test]
+fn module_qualified_no_unqualified_leak() {
+    // After a qualified import, the unqualified name should NOT be available
+    // in the importing module (the old workaround installed them).
+    let result = eval_with_virtual_modules(
+        r#"(import "./mod.mar" as m)
+           (compute 3)"#,
+        "test.mar",
+        vec![("mod.mar", "(define compute (lambda (x) (* x x)))")],
+    );
+    match result {
+        Err(e) => assert!(
+            e.message.contains("Undefined variable"),
+            "expected 'Undefined variable' error, got: {}",
+            e.message
+        ),
+        Ok(v) => panic!(
+            "expected error (unqualified 'compute' should not be visible), got: {:?}",
+            format_value(&v)
+        ),
+    }
+}
+
 // ===== Path Resolution =====
 
 #[test]

@@ -1,15 +1,15 @@
 # Known Issues — Rust Port
 
-**Last updated:** 2026-03-01
+**Last updated:** 2026-03-02
 
-Comprehensive catalog of known bugs, limitations, workarounds, and architectural debt in the Rust port (`port/`). Issues are ordered by severity. Issues #3 and #4 are fixed. Issue #2 includes detailed root cause analysis and fix plan.
+Comprehensive catalog of known bugs, limitations, workarounds, and architectural debt in the Rust port (`port/`). Issues are ordered by severity. Issues #2, #3, and #4 are fixed.
 
 ---
 
 ## Table of Contents
 
 1. [Runtime Performance Regression](#1-runtime-performance-regression)
-2. [Module Globals Workaround — Flat Namespace Collisions](#2-module-globals-workaround--flat-namespace-collisions) **[PRIORITY]**
+2. [~~Module Globals Workaround — Flat Namespace Collisions~~](#2-module-globals-workaround--flat-namespace-collisions) **[FIXED]**
 3. [~~Type Checker Rejects `net.mar`~~](#3-type-checker-rejects-netmar) **[FIXED]**
 4. [~~`handle`/`throw` Unreliable Across Scheduler Effects~~](#4-handlethrow-unreliable-across-scheduler-effects) **[FIXED]**
 5. [Recursive `define` + TCP Effects Hangs](#5-recursive-define--tcp-effects-hangs)
@@ -36,7 +36,7 @@ Comprehensive catalog of known bugs, limitations, workarounds, and architectural
 
 **Severity:** Critical
 **Status:** Open
-**Locations:** `vm.rs:639` (run loop), `vm.rs:675` (PushConst), `vm.rs:986` (Call)
+**Locations:** `vm.rs:612` (run loop), `vm.rs:646` (PushConst), `vm.rs:982` (Call)
 
 The Rust port is currently ~5x **slower** than the TypeScript VM, the opposite of the spec's 5x improvement target.
 
@@ -46,98 +46,46 @@ The Rust port is currently ~5x **slower** than the TypeScript VM, the opposite o
 
 **Likely causes:**
 
-1. **Per-instruction constant allocation** — The `PushConst` opcode (`vm.rs:675`) calls `ConstantValue::as_value()` on every execution, which allocates a new `Arc<VMObject>` for string constants. A `preconvert_constants()` function exists in `value.rs:327` that pre-converts an entire constant pool to NaN-boxed `Value`s, but it is only used in tests (`value.rs:420`). Constants should be pre-converted per-chunk and cached so `PushConst` becomes a simple array index.
+1. **Per-instruction constant allocation** — The `PushConst` opcode (`vm.rs:646`) calls `ConstantValue::as_value()` on every execution, which allocates a new `Arc<VMObject>` for string constants. A `preconvert_constants()` function exists in `value.rs:327` that pre-converts an entire constant pool to NaN-boxed `Value`s, but it is only used in tests (`value.rs:420`). Constants should be pre-converted per-chunk and cached so `PushConst` becomes a simple array index.
 
-2. **Closure clone on every `Op::Call`** — At `vm.rs:986`, every function call does `(**closure).clone()`, which copies the upvalue `Vec<Value>` (each element is a NaN-boxed `Value` — cheap for primitives, but triggers `Arc` refcount bumps for object values). For closures with many captured variables in hot loops, this is a per-call allocation. See also Issue #16.
+2. **Closure clone on every `Op::Call`** — At `vm.rs:1010`, every function call does `(**closure).clone()`, which copies the upvalue `Vec<Value>` (each element is a NaN-boxed `Value` — cheap for primitives, but triggers `Arc` refcount bumps for object values). For closures with many captured variables in hot loops, this is a per-call allocation. See also Issue #16.
 
 3. **`Arc` refcounting overhead** — Every `Value::clone()` for object values increments/decrements an atomic refcount. Hot loops with closures pay this cost on every call.
 
-**Note on frame access:** The run loop previously used a clone-and-save pattern for `CallFrame` access. This has been replaced with unsafe raw pointers cached via the `cache_frame!` macro (`vm.rs:656-663`), which reads `code`, `constants`, and `locals` pointers directly from `vm.frames[frame_idx]`. This eliminated the per-instruction frame copy overhead, but the constant allocation and closure clone issues remain.
+**Note on frame access:** The run loop previously used a clone-and-save pattern for `CallFrame` access. This has been replaced with unsafe raw pointers cached via the `cache_frame!` macro (`vm.rs:629-636`), which reads `code`, `constants`, and `locals` pointers directly from `vm.frames[frame_idx]`. This eliminated the per-instruction frame copy overhead, but the constant allocation and closure clone issues remain.
 
 **Workaround:** None. Programs run correctly, just slowly.
 
 ---
 
-### 2. Module Globals Workaround — Flat Namespace Collisions
+### 2. ~~Module Globals Workaround — Flat Namespace Collisions~~ [FIXED]
 
-**Severity:** Critical
-**Status:** Open — needs module-scoped globals
-**Locations:**
-- `modules.rs:438-489` — `merge_exports` function
-- `compiler.rs:350-364` — `emit_variable` (global fallthrough)
-- `compiler.rs:577-585` — `compile_define` (always emits `SetGlobal` with unqualified name)
-- `vm.rs:696-723` — `PushGlobal` runtime resolution
+**Severity:** ~~Critical~~ Resolved
+**Status:** **FIXED** — module-scoped globals implemented
 
-**Symptom:** When two modules define the same name and are imported with qualifiers, the first-imported module silently wins for unqualified name collisions. Only the qualified names (`m/foo`, `n/foo`) are distinct.
+The VM previously had a single flat global namespace. When two modules defined the same name and were imported with qualifiers, the first-imported module silently won for unqualified name collisions.
 
-#### Root Cause
+#### Resolution
 
-The VM has a **single flat global namespace** (`vm.globals: FxHashMap<String, Value>`). When a module is compiled, all top-level `define` forms emit `SetGlobal` with the **bare unqualified name**. When that module's closures are later exported, they still contain `PUSH_GLOBAL "foo"` bytecode — not `PUSH_GLOBAL "m/foo"`.
+Replaced the flat `vm.globals` with per-module globals tables:
 
-To make module-internal cross-function calls work, `merge_exports` installs **both** qualified and unqualified names:
+1. **`ModuleId` type** (`bytecode.rs`): `u32` index into the VM's `module_globals` table. `ROOT_MODULE = 0` for builtins + prelude + main program.
 
-```rust
-// modules.rs:474-488 (Qualified import branch)
-ImportForm::Qualified(qualifier) => {
-    for (name, value) in exports {
-        let qualified_name = format!("{}/{}", qualifier, name);
-        vm.globals.insert(qualified_name.clone(), value.clone());
-        // Workaround: also install unqualified name
-        if !vm.globals.contains_key(name) {   // <-- first-imported wins
-            vm.globals.insert(name.clone(), value.clone());
-        }
-    }
-}
-```
+2. **Per-module globals** (`vm.rs`): `vm.module_globals: Vec<FxHashMap<String, Value>>` indexed by `ModuleId`. `vm.current_module` tracks which module is being executed.
 
-The `contains_key` guard (line 486) means whichever module is imported first "wins" for unqualified names. Two modules defining `foo` would collide silently.
+3. **`module_id` on `FunctionPrototype` and `Closure`** (`bytecode.rs`, `object.rs`): Every compiled function carries its home module ID. Closures copy it from the prototype at creation for fast access.
 
-#### Why Closures Need Unqualified Names
+4. **`PushGlobal` resolution** (`vm.rs`): Looks up `module_globals[closure.module_id]` first, then falls back to `module_globals[ROOT_MODULE]`. Module closures always resolve their own globals even when called from a different module.
 
-The compiler's variable resolution (`emit_variable` at `compiler.rs:350-364`) follows: local → upvalue → global. Top-level `define` bindings are always globals (never captured as upvalues). So when module A defines:
+5. **`SetGlobal`** (`vm.rs`): Writes to `module_globals[vm.current_module]`.
 
-```lisp
-(define square (lambda (x) (* x x)))
-(define cube (lambda (x) (* x (square x))))
-```
+6. **`merge_exports` simplified** (`modules.rs`): Qualified import branch only installs `"qualifier/name"` in the importing module's table. The old unqualified fallback (first-imported-wins) is removed.
 
-The reference to `square` inside `cube` compiles to `PUSH_GLOBAL "square"`, not `PUSH_GLOBAL "m/square"`. This bytecode is baked into the closure's prototype. When the closure is exported and called from the parent program, `PUSH_GLOBAL "square"` must resolve — hence the unqualified fallback.
+7. **`handle_import` refactored** (`modules.rs`): Allocates a new `ModuleId` for each module, switches `vm.current_module` during module execution, and restores it after. No more `std::mem::take` of globals.
 
-#### Fix Plan: Module-Scoped Globals
+8. **Compiler propagation** (`compiler.rs`): All `Compiler::new` and `FunctionPrototype` constructors accept and propagate `module_id`.
 
-The proper fix is for closures to carry a `home_module` reference so `PUSH_GLOBAL` resolves against the module's own globals table.
-
-**Changes required:**
-
-1. **Add `ModuleId` type** — `Option<PathBuf>` or `u32` index. `None`/0 = root module.
-
-2. **Replace flat globals with per-module tables:**
-   ```rust
-   // VM struct
-   pub module_globals: HashMap<ModuleId, FxHashMap<String, Value>>,
-   pub current_module: ModuleId,
-   ```
-
-3. **Add `home_module: ModuleId` to `Closure`:**
-   ```rust
-   pub struct Closure {
-       pub proto: Arc<FunctionPrototype>,
-       pub upvalues: Vec<Value>,
-       pub home_module: ModuleId,  // NEW
-   }
-   ```
-
-4. **Change `PUSH_GLOBAL` resolution** — look up `module_globals[closure.home_module]` first, then fall back to root/builtins.
-
-5. **Change `SetGlobal`** — write to `module_globals[current_module]`.
-
-6. **Simplify `merge_exports`** — `Qualified` branch only installs `"m/foo"` in parent's module globals. No more unqualified fallback.
-
-7. **Builtins/prelude** — go into a "root" module that all modules inherit from (fallback chain: closure's module → root).
-
-**Impact:** `VM` struct, `Closure` struct, `vm.rs` run loop, `modules.rs`, `compiler.rs` all change. All module tests need updates.
-
-**Estimated effort:** 2-3 days
+**Tests added:** `module_qualified_no_namespace_collision` (two modules with same name, independently accessible), `module_qualified_internal_cross_reference` (module functions calling each other), `module_qualified_no_unqualified_leak` (unqualified names not visible after qualified import).
 
 ---
 
@@ -249,11 +197,11 @@ Additionally, `throw` was removed from the scheduler's `HANDLED_EFFECTS` — unh
 
 **Severity:** High
 **Status:** Open
-**Locations:** `vm.rs:696` (`PushGlobal`), `runtime.rs` (fiber resume after TCP suspend)
+**Locations:** `vm.rs:669` (`PushGlobal`), `runtime.rs` (fiber resume after TCP suspend)
 
 Using `(define f (lambda () ... (f)))` inside `fiber-spawn` where the recursive body performs TCP effects (accept, recv, send, close) causes the program to hang. The `define` sets a global on the scheduler thread's VM, but after a TCP effect suspends/resumes the fiber, `PUSH_GLOBAL "f"` may not resolve correctly.
 
-**Related to:** Issue #2 (flat globals — global may be on a different scheduler's thread-local VM after work stealing) and Issue #4 (handler state lost across scheduler suspension).
+**Related to:** Issue #2's flat globals root cause is now fixed (module-scoped globals), but this hang may persist due to globals being cloned per-thread — a `define` on one scheduler thread is invisible to others after work stealing. Issue #4 (handler state lost across scheduler suspension) is also fixed, so the remaining cause is likely the per-thread globals snapshot divergence.
 
 **Workaround:** Unroll the recursion, or avoid combining recursive `define` with scheduler-suspending effects.
 
@@ -307,7 +255,7 @@ Match branches must be `(pattern body)` where body is a single expression. Multi
 **Severity:** Medium
 **Status:** Open — suggests incomplete hygiene propagation
 **Locations:**
-- `vm.rs:703-704` — `PUSH_GLOBAL`: strip marks and retry
+- `vm.rs:679-680` — `PUSH_GLOBAL`: strip marks and retry
 - `expand.rs:218-226` — Macro name lookup: strip marks and retry
 - `compiler.rs:407-417` — Constructor lookup (`is_known_constructor`): strip marks and retry
 - `compiler.rs:421-428` — Constructor name resolution (`resolve_constructor_name`): strip marks
@@ -406,12 +354,12 @@ Several items are declared but not actively used:
 
 | File | Line | Item | Note |
 |------|------|------|------|
-| `vm.rs` | 246 | `resume_continuation()` | "Used by future scheduler (Phase 5)" |
+| `vm.rs` | 304 | `resume_continuation()` | "Used by future scheduler (Phase 5)" |
 | `runtime.rs` | 53 | `SchedulerMessage` enum | Some variants unused in all paths |
 | `runtime.rs` | 135 | `TcpOp` enum | Cross-scheduler TCP ops (unsupported) |
 | `runtime.rs` | 219 | `steal_worker` field | Work stealing worker not actively used |
 | `expand.rs` | 52 | `quasiquote_sym` field | Stored but not used in expand logic |
-| `compiler.rs` | 173 | `function_name` field | Stored but not read back |
+| `compiler.rs` | 180 | `function_name` field | Stored but not read back |
 | `tests.rs` | 1617 | `eval_modules_with_output()` | Test helper not called |
 
 ---
@@ -420,7 +368,7 @@ Several items are declared but not actively used:
 
 **Severity:** Low (performance, related to Issue #1)
 **Status:** Open
-**Location:** `vm.rs:675`
+**Location:** `vm.rs:646`
 
 The `PushConst` opcode calls `ConstantValue::as_value()` on every execution. For string constants, this allocates a new `Arc<VMObject::String>` each time. Numeric and boolean constants are cheap (NaN-boxed inline), but string-heavy code pays an allocation per string push.
 
@@ -432,9 +380,9 @@ A `preconvert_constants()` function exists in `value.rs:327` that batch-converts
 
 **Severity:** Low (performance, related to Issue #1)
 **Status:** Open
-**Locations:** `vm.rs:986` (`Op::Call`), `vm.rs:1183` (`Op::TailCall`)
+**Locations:** `vm.rs:982` (`Op::Call`), `vm.rs:1154` (`Op::TailCall`)
 
-Every `Op::Call` does `(**closure).clone()` at `vm.rs:986`, which copies the `Closure` struct including its `Vec<Value>` of upvalues. For closures with no upvalues, the Vec clone is trivial (empty Vec). For closures with captured variables, each `Value` element is cloned — primitives are cheap (NaN-boxed), but object values increment an `Arc` refcount.
+Every `Op::Call` does `(**closure).clone()` at `vm.rs:1010`, which copies the `Closure` struct including its `Vec<Value>` of upvalues. For closures with no upvalues, the Vec clone is trivial (empty Vec). For closures with captured variables, each `Value` element is cloned — primitives are cheap (NaN-boxed), but object values increment an `Arc` refcount.
 
 `Op::TailCall` (`vm.rs:1183`) similarly clones the closure but reuses the existing frame, avoiding a new `CallFrame` allocation.
 

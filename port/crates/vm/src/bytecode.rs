@@ -244,6 +244,13 @@ impl Default for Chunk {
     }
 }
 
+/// Module identifier — index into the VM's `module_globals` table.
+/// `0` is the root module (builtins + prelude + main program).
+pub type ModuleId = u32;
+
+/// The root module ID (builtins, prelude, and the main program).
+pub const ROOT_MODULE: ModuleId = 0;
+
 /// A compiled function template (not yet a closure — no captured upvalues).
 #[derive(Debug, Clone)]
 pub struct FunctionPrototype {
@@ -255,6 +262,8 @@ pub struct FunctionPrototype {
     pub is_variadic: bool,
     pub upvalues: Vec<UpvalueDescriptor>,
     pub chunk: Chunk,
+    /// The module this function was compiled in. Used for module-scoped global resolution.
+    pub module_id: ModuleId,
 }
 
 /// Describes how an upvalue is captured: from an enclosing local or from an

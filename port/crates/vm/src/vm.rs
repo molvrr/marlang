@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::bytecode::{Chunk, ConstantValue, FunctionPrototype, Op};
+use crate::bytecode::{Chunk, ConstantValue, FunctionPrototype, ModuleId, Op, ROOT_MODULE};
 use crate::errors::{StackTraceEntry, VMError};
 use crate::object::{
     CallFrame, Closure, HandlerDispatch, HandlerEntry, VMContinuation, VMHandlerFrame, VMObject,
@@ -49,7 +49,12 @@ pub struct VM {
     pub stack_top: usize,
     pub frames: Vec<CallFrame>,
     pub frame_count: usize,
-    pub globals: FxHashMap<String, Value>,
+    /// Per-module globals tables. Index 0 is the root module (builtins + prelude + main).
+    /// Each module gets its own table. PushGlobal resolves against the closure's module
+    /// first, then falls back to the root module.
+    pub module_globals: Vec<FxHashMap<String, Value>>,
+    /// The currently active module (for SetGlobal writes).
+    pub current_module: ModuleId,
     pub handler_stack: Vec<VMHandlerFrame>,
     /// Handler dispatch markers — tracks active handler clause invocations for CPS dispatch.
     pub(crate) handler_dispatch_stack: Vec<HandlerDispatch>,
@@ -68,13 +73,57 @@ impl VM {
             stack_top: 0,
             frames: Vec::with_capacity(64),
             frame_count: 0,
-            globals: FxHashMap::default(),
+            module_globals: vec![FxHashMap::default()], // index 0 = root module
+            current_module: ROOT_MODULE,
             handler_stack: Vec::new(),
             handler_dispatch_stack: Vec::new(),
             resumed_continuations: HashSet::new(),
             captured_output: None,
             dirty_globals: None,
         }
+    }
+
+    /// Convenience accessor for the root module globals table.
+    /// Most code that used `vm.globals` should use this instead.
+    #[inline]
+    pub fn globals(&self) -> &FxHashMap<String, Value> {
+        &self.module_globals[ROOT_MODULE as usize]
+    }
+
+    /// Mutable accessor for the root module globals table.
+    #[inline]
+    pub fn globals_mut(&mut self) -> &mut FxHashMap<String, Value> {
+        &mut self.module_globals[ROOT_MODULE as usize]
+    }
+
+    /// Get the globals table for a given module.
+    #[inline]
+    pub fn module_globals_for(&self, module_id: ModuleId) -> &FxHashMap<String, Value> {
+        &self.module_globals[module_id as usize]
+    }
+
+    /// Get a mutable reference to the globals table for a given module.
+    #[inline]
+    pub fn module_globals_for_mut(&mut self, module_id: ModuleId) -> &mut FxHashMap<String, Value> {
+        &mut self.module_globals[module_id as usize]
+    }
+
+    /// Allocate a new module and return its ID.
+    pub fn allocate_module(&mut self) -> ModuleId {
+        let id = self.module_globals.len() as ModuleId;
+        self.module_globals.push(FxHashMap::default());
+        id
+    }
+
+    /// Look up a global by name, checking the given module first, then falling back to root.
+    #[inline]
+    pub fn resolve_global(&self, name: &str, module_id: ModuleId) -> Option<&Value> {
+        if module_id != ROOT_MODULE {
+            if let Some(v) = self.module_globals[module_id as usize].get(name) {
+                return Some(v);
+            }
+        }
+        self.module_globals[ROOT_MODULE as usize].get(name)
     }
 
     #[inline]
@@ -162,11 +211,11 @@ impl VM {
 }
 
 impl VM {
-    /// Create a new VM pre-populated with globals cloned from a source VM.
+    /// Create a new VM pre-populated with module globals cloned from a source VM.
     /// Used by the multi-threaded scheduler to give each thread its own VM.
-    pub fn new_with_globals(globals: FxHashMap<String, Value>) -> Self {
+    pub fn new_with_module_globals(module_globals: Vec<FxHashMap<String, Value>>) -> Self {
         VM {
-            globals,
+            module_globals,
             ..VM::new()
         }
     }
@@ -189,9 +238,11 @@ fn create_closure_from_proto(frame: &CallFrame, proto: &FunctionPrototype) -> Cl
             upvalues.push(frame.closure.upvalues[desc.index as usize].clone());
         }
     }
+    let module_id = proto.module_id;
     Closure {
         proto: Arc::new(proto.clone()),
         upvalues,
+        module_id,
     }
 }
 
@@ -328,17 +379,20 @@ fn rebase_handler_dispatch(d: &HandlerDispatch, frame_offset: i64) -> HandlerDis
 // --- Interpret ---
 
 pub fn interpret(vm: &mut VM, chunk: &Chunk) -> Result<Value, VMError> {
+    let current_module = vm.current_module;
     let script_proto = FunctionPrototype {
         name: "<script>".to_string(),
         arity: 0,
         is_variadic: false,
         upvalues: Vec::new(),
         chunk: chunk.clone(),
+        module_id: current_module,
     };
 
     let script_closure = Closure {
         proto: Arc::new(script_proto),
         upvalues: Vec::new(),
+        module_id: current_module,
     };
 
     let locals = vec![Value::nil(); chunk.local_count as usize];
@@ -616,30 +670,34 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 // SAFETY: operand is a valid constant index
                 let cval = unsafe { &*constants.add(inst.operand as usize) };
                 match cval {
-                    ConstantValue::String(s) => match vm.globals.get(s.as_str()) {
-                        Some(v) => vm.push(v.clone()),
-                        None => {
-                            // Fallback: strip hygiene marks and retry
-                            let stripped = crate::expand::strip_all_marks(s);
-                            if stripped != s.as_str() {
-                                if let Some(v) = vm.globals.get(stripped) {
-                                    vm.push(v.clone());
+                    ConstantValue::String(s) => {
+                        // Resolve against closure's home module first, then root
+                        let closure_module = vm.frames[frame_idx].closure.module_id;
+                        match vm.resolve_global(s.as_str(), closure_module) {
+                            Some(v) => vm.push(v.clone()),
+                            None => {
+                                // Fallback: strip hygiene marks and retry
+                                let stripped = crate::expand::strip_all_marks(s);
+                                if stripped != s.as_str() {
+                                    if let Some(v) = vm.resolve_global(stripped, closure_module) {
+                                        vm.push(v.clone());
+                                    } else {
+                                        vm.frames[frame_idx].ip = ip;
+                                        return Err(VMSignal::Error(vm.vm_error(
+                                            format!("Undefined variable: {}", stripped),
+                                            &vm.frames[frame_idx],
+                                        )));
+                                    }
                                 } else {
                                     vm.frames[frame_idx].ip = ip;
                                     return Err(VMSignal::Error(vm.vm_error(
-                                        format!("Undefined variable: {}", stripped),
+                                        format!("Undefined variable: {}", s),
                                         &vm.frames[frame_idx],
                                     )));
                                 }
-                            } else {
-                                vm.frames[frame_idx].ip = ip;
-                                return Err(VMSignal::Error(vm.vm_error(
-                                    format!("Undefined variable: {}", s),
-                                    &vm.frames[frame_idx],
-                                )));
                             }
                         }
-                    },
+                    }
                     _ => {
                         vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
@@ -667,6 +725,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     dirty.insert(name.clone());
                 }
 
+                let target_module = vm.current_module;
+
                 // Check for N-ary constructor encoding: "\0ctor:Name:arity"
                 if let Some(s) = value.as_string() {
                     if s.starts_with("\0ctor:") {
@@ -674,7 +734,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         if let Some(colon_pos) = rest.rfind(':') {
                             let ctor_name = &rest[..colon_pos];
                             if let Ok(arity) = rest[colon_pos + 1..].parse::<u8>() {
-                                vm.globals.insert(
+                                vm.module_globals[target_module as usize].insert(
                                     name,
                                     Value::object(VMObject::AdtConstructor {
                                         name: ctor_name.to_string(),
@@ -686,7 +746,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         }
                     }
                 }
-                vm.globals.insert(name, value);
+                vm.module_globals[target_module as usize].insert(name, value);
             }
 
             Op::Pop => {
@@ -1045,19 +1105,19 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             vm.pop(); // pop callee
                             vm.frames[frame_idx].ip = ip;
 
-                            let lib_val =
-                                vm.globals
-                                    .get(lib_global.as_ref())
-                                    .cloned()
-                                    .ok_or_else(|| {
-                                        VMSignal::Error(vm.vm_error(
-                                            format!(
-                                                "FFI library '{}' not found in globals",
-                                                lib_global
-                                            ),
-                                            &vm.frames[frame_idx],
-                                        ))
-                                    })?;
+                            let closure_mod = vm.frames[frame_idx].closure.module_id;
+                            let lib_val = vm
+                                .resolve_global(lib_global.as_ref(), closure_mod)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    VMSignal::Error(vm.vm_error(
+                                        format!(
+                                            "FFI library '{}' not found in globals",
+                                            lib_global
+                                        ),
+                                        &vm.frames[frame_idx],
+                                    ))
+                                })?;
                             let lib = match lib_val.as_object() {
                                 Some(VMObject::FfiLibrary(l)) => l.clone(),
                                 _ => {
@@ -1221,19 +1281,19 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             vm.pop(); // pop callee
                             vm.frames[frame_idx].ip = ip;
 
-                            let lib_val =
-                                vm.globals
-                                    .get(lib_global.as_ref())
-                                    .cloned()
-                                    .ok_or_else(|| {
-                                        VMSignal::Error(vm.vm_error(
-                                            format!(
-                                                "FFI library '{}' not found in globals",
-                                                lib_global
-                                            ),
-                                            &vm.frames[frame_idx],
-                                        ))
-                                    })?;
+                            let closure_mod = vm.frames[frame_idx].closure.module_id;
+                            let lib_val = vm
+                                .resolve_global(lib_global.as_ref(), closure_mod)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    VMSignal::Error(vm.vm_error(
+                                        format!(
+                                            "FFI library '{}' not found in globals",
+                                            lib_global
+                                        ),
+                                        &vm.frames[frame_idx],
+                                    ))
+                                })?;
                             let lib = match lib_val.as_object() {
                                 Some(VMObject::FfiLibrary(l)) => l.clone(),
                                 _ => {

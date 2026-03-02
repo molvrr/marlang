@@ -260,8 +260,8 @@ impl<'a> MacroExpander<'a> {
         interpret(&mut self.vm, &chunk)
             .map_err(|e| MacroError::new(format!("defmacro execution error: {}", e)))?;
 
-        // Retrieve the transformer closure from globals
-        let transformer = self.vm.globals.get(name_str).cloned().ok_or_else(|| {
+        // Retrieve the transformer closure from globals (root module)
+        let transformer = self.vm.globals().get(name_str).cloned().ok_or_else(|| {
             MacroError::new(format!(
                 "defmacro: transformer '{}' not found after definition",
                 name_str

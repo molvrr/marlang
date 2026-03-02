@@ -4,7 +4,8 @@ use marlang_core::ast::{self, Expr, LispValue};
 use marlang_core::intern::{Interner, Symbol};
 
 use crate::bytecode::{
-    Chunk, ConstantValue, FfiSigEntry, FunctionPrototype, Instruction, Op, UpvalueDescriptor,
+    Chunk, ConstantValue, FfiSigEntry, FunctionPrototype, Instruction, ModuleId, Op, ROOT_MODULE,
+    UpvalueDescriptor,
 };
 use crate::errors::CompileError;
 
@@ -181,6 +182,8 @@ struct Compiler<'a> {
     known_symbols: &'a KnownSymbols,
     known_constructors: HashSet<Symbol>,
     known_effect_ops: HashMap<Symbol, Symbol>, // opName → effectName
+    /// Module ID for the code being compiled. Propagated to all FunctionPrototypes.
+    module_id: ModuleId,
 }
 
 impl<'a> Compiler<'a> {
@@ -191,6 +194,7 @@ impl<'a> Compiler<'a> {
         enclosing: Option<Box<ParentScope>>,
         known_constructors: HashSet<Symbol>,
         known_effect_ops: HashMap<Symbol, Symbol>,
+        module_id: ModuleId,
     ) -> Self {
         Compiler {
             chunk: Chunk::new(),
@@ -204,6 +208,7 @@ impl<'a> Compiler<'a> {
             known_symbols,
             known_constructors,
             known_effect_ops,
+            module_id,
         }
     }
 
@@ -656,6 +661,7 @@ impl<'a> Compiler<'a> {
             Some(parent_scope),
             self.known_constructors.clone(),
             self.known_effect_ops.clone(),
+            self.module_id,
         );
 
         // Add required parameters as locals
@@ -679,6 +685,7 @@ impl<'a> Compiler<'a> {
             is_variadic,
             upvalues: fn_compiler.upvalues,
             chunk: fn_compiler.chunk,
+            module_id: self.module_id,
         };
 
         // Emit CLOSURE in this (enclosing) context
@@ -1201,6 +1208,7 @@ impl<'a> Compiler<'a> {
                     Some(parent_scope),
                     self.known_constructors.clone(),
                     self.known_effect_ops.clone(),
+                    self.module_id,
                 );
                 fn_compiler.add_local(param);
                 fn_compiler.compile_expr(handler_body, true)?;
@@ -1213,6 +1221,7 @@ impl<'a> Compiler<'a> {
                     is_variadic: false,
                     upvalues: fn_compiler.upvalues,
                     chunk: fn_compiler.chunk,
+                    module_id: self.module_id,
                 };
                 return_proto_idx = Some(self.add_constant(ConstantValue::Prototype(proto)));
             } else {
@@ -1237,6 +1246,7 @@ impl<'a> Compiler<'a> {
                     Some(parent_scope),
                     self.known_constructors.clone(),
                     self.known_effect_ops.clone(),
+                    self.module_id,
                 );
                 for &p in &params {
                     fn_compiler.add_local(p);
@@ -1253,6 +1263,7 @@ impl<'a> Compiler<'a> {
                     is_variadic: false,
                     upvalues: fn_compiler.upvalues,
                     chunk: fn_compiler.chunk,
+                    module_id: self.module_id,
                 };
 
                 let op_name_idx = self.add_constant(ConstantValue::String(op_name_str));
@@ -1274,6 +1285,7 @@ impl<'a> Compiler<'a> {
             Some(parent_scope),
             self.known_constructors.clone(),
             self.known_effect_ops.clone(),
+            self.module_id,
         );
         body_compiler.compile_expr(body_expr, true)?;
         body_compiler.emit(Op::Return, line);
@@ -1285,6 +1297,7 @@ impl<'a> Compiler<'a> {
             is_variadic: false,
             upvalues: body_compiler.upvalues,
             chunk: body_compiler.chunk,
+            module_id: self.module_id,
         };
         let body_proto_idx = self.add_constant(ConstantValue::Prototype(body_proto));
 
@@ -1626,6 +1639,7 @@ pub fn compile_expr_with_context(
     interner: &Interner,
     known_constructors: &HashSet<Symbol>,
     known_effect_ops: &HashMap<Symbol, Symbol>,
+    module_id: ModuleId,
 ) -> Result<CompileResult, CompileError> {
     let ks = KnownSymbols::new(interner);
     let mut compiler = Compiler::new(
@@ -1635,6 +1649,7 @@ pub fn compile_expr_with_context(
         None,
         known_constructors.clone(),
         known_effect_ops.clone(),
+        module_id,
     );
     compiler.compile_expr(expr, false)?;
     compiler.emit(Op::Return, Compiler::get_line(expr));
@@ -1658,6 +1673,7 @@ pub fn compile(expr: &Expr, interner: &Interner) -> Result<Chunk, CompileError> 
         None,
         default_ctors,
         HashMap::new(),
+        ROOT_MODULE,
     );
     compiler.compile_expr(expr, false)?;
     compiler.emit(Op::Return, Compiler::get_line(expr));
@@ -1677,6 +1693,7 @@ pub fn compile_program(exprs: &[Expr], interner: &Interner) -> Result<Chunk, Com
         None,
         default_ctors,
         HashMap::new(),
+        ROOT_MODULE,
     );
 
     if exprs.is_empty() {
