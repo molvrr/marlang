@@ -8,7 +8,7 @@ use crate::errors::{StackTraceEntry, VMError};
 use crate::object::{
     CallFrame, Closure, HandlerDispatch, HandlerEntry, VMContinuation, VMHandlerFrame, VMObject,
 };
-use crate::value::{Value, format_value_unquoted};
+use crate::value::{format_value_unquoted, Value};
 
 // --- VMSignal: unified error/effect propagation ---
 
@@ -229,12 +229,38 @@ impl Default for VM {
 
 // --- Closure helpers ---
 
-fn create_closure_from_proto(frame: &CallFrame, proto: &FunctionPrototype) -> Closure {
-    let mut upvalues = Vec::with_capacity(proto.upvalues.len());
+fn create_closure_from_proto(frame: &mut CallFrame, proto: &FunctionPrototype) -> Closure {
+    use crate::object::{Upvalue, UpvalueCell};
+    let mut upvalues: Vec<Upvalue> = Vec::with_capacity(proto.upvalues.len());
     for desc in &proto.upvalues {
         if desc.is_local {
-            upvalues.push(frame.locals[desc.index as usize].clone());
+            let idx = desc.index as usize;
+            if desc.is_mutable {
+                // Mutable capture: create or reuse a shared cell.
+                // This is the letrec path — the local's value may change after capture.
+                let cell = if idx < frame.open_upvalues.len() {
+                    if let Some(ref cell) = frame.open_upvalues[idx] {
+                        cell.clone()
+                    } else {
+                        let cell: UpvalueCell =
+                            Arc::new(std::sync::Mutex::new(frame.locals[idx].clone()));
+                        frame.open_upvalues[idx] = Some(cell.clone());
+                        cell
+                    }
+                } else {
+                    frame.open_upvalues.resize(idx + 1, None);
+                    let cell: UpvalueCell =
+                        Arc::new(std::sync::Mutex::new(frame.locals[idx].clone()));
+                    frame.open_upvalues[idx] = Some(cell.clone());
+                    cell
+                };
+                upvalues.push(Upvalue::Cell(cell));
+            } else {
+                // Immutable capture: cheap value copy (the common case).
+                upvalues.push(Upvalue::Value(frame.locals[idx].clone()));
+            }
         } else {
+            // Capture from enclosing closure's upvalue — clone the Upvalue variant
             upvalues.push(frame.closure.upvalues[desc.index as usize].clone());
         }
     }
@@ -260,6 +286,7 @@ pub(crate) fn call_closure(
         closure: closure.clone(),
         ip: 0,
         locals,
+        open_upvalues: Vec::new(),
     };
     let base_frame_count = vm.frame_count;
     vm.push_frame(new_frame);
@@ -319,6 +346,7 @@ pub(crate) fn resume_continuation(
             closure: f.closure.clone(),
             ip: f.ip,
             locals: f.locals.clone(),
+            open_upvalues: f.open_upvalues.clone(),
         };
         vm.push_frame(frame);
     }
@@ -395,11 +423,13 @@ pub fn interpret(vm: &mut VM, chunk: &Chunk) -> Result<Value, VMError> {
         module_id: current_module,
     };
 
-    let locals = vec![Value::nil(); chunk.local_count as usize];
+    let local_count = chunk.local_count as usize;
+    let locals = vec![Value::nil(); local_count];
     let frame = CallFrame {
         closure: script_closure,
         ip: 0,
         locals,
+        open_upvalues: Vec::new(),
     };
 
     vm.frame_count = 0;
@@ -650,20 +680,46 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
             }
 
             Op::PushLocal => {
+                let slot = inst.operand as usize;
+                // Fast path: most frames have no open upvalues (empty vec).
+                // Only check the cell if open_upvalues is non-empty and this slot has one.
+                let open_upvalues = &vm.frames[frame_idx].open_upvalues;
+                if !open_upvalues.is_empty() {
+                    if let Some(Some(cell)) = open_upvalues.get(slot) {
+                        let val = cell.lock().unwrap().clone();
+                        vm.push(val);
+                        continue;
+                    }
+                }
                 // SAFETY: operand is a valid local index (from compiler)
-                let val = unsafe { (*locals.add(inst.operand as usize)).clone() };
+                let val = unsafe { (*locals.add(slot)).clone() };
                 vm.push(val);
             }
 
             Op::SetLocal => {
                 let val = vm.pop();
+                let slot = inst.operand as usize;
+                // Sync to upvalue cell if this local has been captured mutably.
+                let open_upvalues = &vm.frames[frame_idx].open_upvalues;
+                if !open_upvalues.is_empty() {
+                    if let Some(Some(cell)) = open_upvalues.get(slot) {
+                        *cell.lock().unwrap() = val.clone();
+                    }
+                }
                 // SAFETY: operand is a valid local index, pointer is valid
-                unsafe { *locals.add(inst.operand as usize) = val };
+                unsafe { *locals.add(slot) = val };
             }
 
             Op::PushUpvalue => {
-                let val = vm.frames[frame_idx].closure.upvalues[inst.operand as usize].clone();
+                let upvalue = &vm.frames[frame_idx].closure.upvalues[inst.operand as usize];
+                let val = upvalue.get();
                 vm.push(val);
+            }
+
+            Op::SetUpvalue => {
+                let val = vm.pop();
+                let upvalue = &vm.frames[frame_idx].closure.upvalues[inst.operand as usize];
+                upvalue.set(val);
             }
 
             Op::PushGlobal => {
@@ -947,6 +1003,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 closure: ret_closure,
                                 ip: 0,
                                 locals: ret_locals,
+                                open_upvalues: Vec::new(),
                             };
                             vm.push_frame(new_frame);
                             frame_idx = vm.frame_count - 1;
@@ -1038,6 +1095,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             let new_frame = CallFrame {
                                 closure: cloned_closure,
                                 ip: 0,
+                                open_upvalues: Vec::new(),
                                 locals,
                             };
 
@@ -1206,6 +1264,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             // Reuse current frame
                             vm.frames[frame_idx].closure = (**closure).clone();
                             ip = 0;
+                            vm.frames[frame_idx].open_upvalues.clear();
                             vm.frames[frame_idx].locals = locals;
                             cache_frame!();
                         }
@@ -1347,7 +1406,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     }
                 };
 
-                let closure = create_closure_from_proto(&vm.frames[frame_idx], proto);
+                let closure = create_closure_from_proto(&mut vm.frames[frame_idx], proto);
                 vm.push(Value::object(VMObject::Closure(Box::new(closure))));
             }
 
@@ -1511,7 +1570,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             ));
                         }
                     };
-                let body_closure = create_closure_from_proto(&vm.frames[frame_idx], body_proto);
+                let body_closure = create_closure_from_proto(&mut vm.frames[frame_idx], body_proto);
 
                 // Create handler clause closures
                 let mut handler_entries = Vec::new();
@@ -1536,7 +1595,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     };
                     handler_entries.push(HandlerEntry {
                         op_name,
-                        closure: create_closure_from_proto(&vm.frames[frame_idx], proto),
+                        closure: create_closure_from_proto(&mut vm.frames[frame_idx], proto),
                         arity: h.arity,
                     });
                 }
@@ -1545,7 +1604,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let return_closure = if descriptor.return_proto_idx >= 0 {
                     match unsafe { &*constants.add(descriptor.return_proto_idx as usize) } {
                         ConstantValue::Prototype(p) => {
-                            Some(create_closure_from_proto(&vm.frames[frame_idx], p))
+                            Some(create_closure_from_proto(&mut vm.frames[frame_idx], p))
                         }
                         _ => {
                             vm.frames[frame_idx].ip = ip;
@@ -1592,6 +1651,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     closure: body_closure,
                     ip: 0,
                     locals,
+                    open_upvalues: Vec::new(),
                 };
                 vm.push_frame(new_frame);
                 frame_idx = vm.frame_count - 1;
@@ -1662,6 +1722,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             closure: f.closure.clone(),
                             ip: f.ip,
                             locals: f.locals.clone(),
+                            open_upvalues: f.open_upvalues.clone(),
                         });
                     }
                     let captured_stack: Vec<Value> = vm.stack[capture_stack_start..vm.stack_top]
@@ -1769,6 +1830,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     let new_frame = CallFrame {
                         closure: clause.closure,
                         ip: 0,
+                        open_upvalues: Vec::new(),
                         locals: clause_locals,
                     };
                     vm.push_frame(new_frame);
@@ -1843,6 +1905,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         closure: f.closure.clone(),
                         ip: f.ip,
                         locals: f.locals.clone(),
+                        open_upvalues: f.open_upvalues.clone(),
                     });
                 }
 

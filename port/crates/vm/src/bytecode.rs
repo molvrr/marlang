@@ -13,6 +13,7 @@ pub enum Op {
     SetGlobal = 5,
     Pop = 6,
     Dup = 7,
+    SetUpvalue = 8,
 
     // Arithmetic (binary: pop 2, push 1)
     Add = 10,
@@ -60,6 +61,7 @@ impl Op {
             Op::PushLocal => "PUSH_LOCAL",
             Op::SetLocal => "SET_LOCAL",
             Op::PushUpvalue => "PUSH_UPVALUE",
+            Op::SetUpvalue => "SET_UPVALUE",
             Op::PushGlobal => "PUSH_GLOBAL",
             Op::SetGlobal => "SET_GLOBAL",
             Op::Pop => "POP",
@@ -272,4 +274,7 @@ pub struct FunctionPrototype {
 pub struct UpvalueDescriptor {
     pub is_local: bool,
     pub index: u16,
+    /// If true, this upvalue captures a mutable cell (for letrec-style local defines).
+    /// If false, it captures a plain value copy (the common, efficient case).
+    pub is_mutable: bool,
 }

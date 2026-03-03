@@ -10,9 +10,9 @@ use crate::compiler::{compile, compile_program};
 use crate::debug::disassemble;
 use crate::errors::VMError;
 use crate::expand::MacroExpander;
-use crate::modules::{ModuleLoader, expand_macros, run_program, run_program_from_exprs};
+use crate::modules::{expand_macros, run_program, run_program_from_exprs, ModuleLoader};
 use crate::object::VMObject;
-use crate::value::{Value, format_value};
+use crate::value::{format_value, Value};
 use crate::vm::VM;
 
 // --- Test Helpers ---
@@ -77,34 +77,28 @@ fn literal_string() {
 #[test]
 fn literal_boolean_true() {
     let (chunk, _) = compile_source("#t");
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Boolean(true)))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Boolean(true))));
 }
 
 #[test]
 fn literal_boolean_false() {
     let (chunk, _) = compile_source("#f");
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Boolean(false)))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Boolean(false))));
 }
 
 #[test]
 fn literal_nil() {
     let (chunk, _) = compile_source("nil");
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Nil))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Nil)));
 }
 
 #[test]
@@ -210,12 +204,10 @@ fn if_no_else() {
     let (chunk, _) = compile_source("(if #t 1)");
     assert!(find_op(&chunk, Op::JumpIfFalse));
     // Should have nil for the else branch
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Nil))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Nil)));
 }
 
 #[test]
@@ -292,12 +284,10 @@ fn lambda_basic() {
     let (chunk, _) = compile_source("(lambda (x) x)");
     assert!(find_op(&chunk, Op::Closure));
     // Should have a prototype in constants
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Prototype(_)))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Prototype(_))));
 }
 
 #[test]
@@ -382,12 +372,10 @@ fn data_nullary_constructor() {
 fn data_nary_constructor() {
     let (chunk, _) = compile_source("(data Option (Some a) None)");
     // Some is N-ary (arity 1), encoded as special string
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| { matches!(c, ConstantValue::String(s) if s == "\0ctor:Some:1") })
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| { matches!(c, ConstantValue::String(s) if s == "\0ctor:Some:1") }));
     // None is nullary
     assert!(find_op(&chunk, Op::Construct));
 }
@@ -447,12 +435,10 @@ fn match_no_match_halt() {
 fn effect_declaration_emits_nil() {
     let (chunk, _) = compile_source("(effect IO (print (-> String Unit)))");
     // effect declarations just produce nil
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Nil))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Nil)));
 }
 
 #[test]
@@ -474,12 +460,10 @@ fn handle_produces_push_handler() {
     let (chunk, _) = compile_source(source);
     assert!(find_op(&chunk, Op::PushHandler));
     // Should have handler descriptor
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| { matches!(c, ConstantValue::String(s) if s.starts_with("\0handler:")) })
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| { matches!(c, ConstantValue::String(s) if s.starts_with("\0handler:")) }));
 }
 
 #[test]
@@ -530,12 +514,10 @@ fn class_compile_error() {
 fn type_emits_nil() {
     let (chunk, _) = compile_source("(type Pair (a b) (MkPair a b))");
     // type declarations emit nil
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Nil))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Nil)));
 }
 
 // ===== Disassembler =====
@@ -1071,6 +1053,160 @@ fn exec_begin_in_function_body() {
     assert_num(
         "(define test (lambda () (begin (define a 1) (define b 2) (+ a b)))) (test)",
         3.0,
+    );
+}
+
+// ===== Execution: Lexically-Scoped Internal Defines =====
+
+#[test]
+fn exec_recursive_local_define() {
+    // Recursive define inside a lambda body (the motivating example)
+    assert_num(
+        "(define outer (lambda ()
+           (define count-down (lambda (n)
+             (if (= n 0) 0 (count-down (- n 1)))))
+           (count-down 5)))
+         (outer)",
+        0.0,
+    );
+}
+
+#[test]
+fn exec_mutually_recursive_local_defines() {
+    // Mutually recursive defines inside a lambda body
+    assert_bool(
+        "(define test (lambda ()
+           (define is-even (lambda (n)
+             (if (= n 0) #t (is-odd (- n 1)))))
+           (define is-odd (lambda (n)
+             (if (= n 0) #f (is-even (- n 1)))))
+           (is-even 10)))
+         (test)",
+        true,
+    );
+}
+
+#[test]
+fn exec_mutually_recursive_local_defines_odd() {
+    assert_bool(
+        "(define test (lambda ()
+           (define is-even (lambda (n)
+             (if (= n 0) #t (is-odd (- n 1)))))
+           (define is-odd (lambda (n)
+             (if (= n 0) #f (is-even (- n 1)))))
+           (is-odd 7)))
+         (test)",
+        true,
+    );
+}
+
+#[test]
+fn exec_simple_local_defines() {
+    // Non-recursive defines inside a lambda body
+    assert_num(
+        "(define f (lambda ()
+           (define x 10)
+           (define y 20)
+           (+ x y)))
+         (f)",
+        30.0,
+    );
+}
+
+#[test]
+fn exec_local_defines_dont_pollute_globals() {
+    // Two functions with same-named local defines should be independent
+    assert_num(
+        "(define f (lambda ()
+           (define local-x 42)
+           local-x))
+         (define g (lambda ()
+           (define local-x 99)
+           local-x))
+         (+ (f) (g))",
+        141.0,
+    );
+}
+
+#[test]
+fn exec_nested_lambda_local_defines() {
+    // Nested lambdas each with their own local defines
+    assert_num(
+        "(define outer (lambda ()
+           (define x 10)
+           (define inner (lambda ()
+             (define y 20)
+             (+ x y)))
+           (inner)))
+         (outer)",
+        30.0,
+    );
+}
+
+#[test]
+fn exec_recursive_local_define_in_begin() {
+    // Recursive define inside begin inside lambda
+    assert_num(
+        "(define test (lambda ()
+           (begin
+             (define count-down (lambda (n)
+               (if (= n 0) 0 (count-down (- n 1)))))
+             (count-down 3))))
+         (test)",
+        0.0,
+    );
+}
+
+#[test]
+fn exec_local_define_fibonacci() {
+    // Local recursive fibonacci
+    assert_num(
+        "(define test (lambda ()
+           (define fib (lambda (n)
+             (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))))
+           (fib 10)))
+         (test)",
+        55.0,
+    );
+}
+
+#[test]
+fn exec_local_define_with_closure_capture() {
+    // Local define that captures from the enclosing lambda's params
+    assert_num(
+        "(define make-counter (lambda (start)
+           (define step (lambda (n)
+             (if (= n 0) start (step (- n 1)))))
+           (step 5)))
+         (make-counter 42)",
+        42.0,
+    );
+}
+
+#[test]
+fn exec_local_define_after_expr_errors() {
+    // A define that appears after a non-define expression should be rejected
+    assert_error(
+        "(define test (lambda ()
+           (+ 1 2)
+           (define x 10)
+           x))
+         (test)",
+        "define 'x' is not allowed here",
+    );
+}
+
+#[test]
+fn exec_local_define_after_expr_in_begin_errors() {
+    // Same rule applies inside begin blocks within lambdas
+    assert_error(
+        "(define test (lambda ()
+           (begin
+             (+ 1 2)
+             (define y 20)
+             y)))
+         (test)",
+        "define 'y' is not allowed here",
     );
 }
 

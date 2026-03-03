@@ -4,8 +4,8 @@ use marlang_core::ast::{self, Expr, LispValue};
 use marlang_core::intern::{Interner, Symbol};
 
 use crate::bytecode::{
-    Chunk, ConstantValue, FfiSigEntry, FunctionPrototype, Instruction, ModuleId, Op, ROOT_MODULE,
-    UpvalueDescriptor,
+    Chunk, ConstantValue, FfiSigEntry, FunctionPrototype, Instruction, ModuleId, Op,
+    UpvalueDescriptor, ROOT_MODULE,
 };
 use crate::errors::CompileError;
 
@@ -142,6 +142,10 @@ struct Local {
     name: Symbol,
     depth: u32,
     slot: u32,
+    /// True if this local was pre-allocated by `prescan_leading_defines` for a
+    /// letrec-style local define. When captured as an upvalue, it requires a
+    /// mutable cell (the closure is created before the value is stored).
+    is_define_slot: bool,
 }
 
 // --- Parent scope snapshot for upvalue resolution ---
@@ -184,6 +188,9 @@ struct Compiler<'a> {
     known_effect_ops: HashMap<Symbol, Symbol>, // opName → effectName
     /// Module ID for the code being compiled. Propagated to all FunctionPrototypes.
     module_id: ModuleId,
+    /// True when `prescan_body_defines` has run for this compiler scope
+    /// (i.e. user-written lambda).  Used to reject non-leading defines.
+    did_prescan: bool,
 }
 
 impl<'a> Compiler<'a> {
@@ -209,6 +216,7 @@ impl<'a> Compiler<'a> {
             known_constructors,
             known_effect_ops,
             module_id,
+            did_prescan: false,
         }
     }
 
@@ -301,6 +309,21 @@ impl<'a> Compiler<'a> {
             name,
             depth: self.scope_depth,
             slot,
+            is_define_slot: false,
+        });
+        slot
+    }
+
+    /// Add a local that was pre-allocated for a letrec-style local define.
+    /// When captured as an upvalue, this produces a mutable cell.
+    fn add_define_local(&mut self, name: Symbol) -> u32 {
+        let slot = self.local_count;
+        self.local_count += 1;
+        self.locals.push(Local {
+            name,
+            depth: self.scope_depth,
+            slot,
+            is_define_slot: true,
         });
         slot
     }
@@ -316,14 +339,51 @@ impl<'a> Compiler<'a> {
         None
     }
 
-    fn add_upvalue(&mut self, is_local: bool, index: u16) -> u32 {
+    fn add_upvalue(&mut self, is_local: bool, index: u16, is_mutable: bool) -> u32 {
         for (i, uv) in self.upvalues.iter().enumerate() {
             if uv.is_local == is_local && uv.index == index {
+                // If we're upgrading an existing capture to mutable, do so
+                if is_mutable && !uv.is_mutable {
+                    self.upvalues[i].is_mutable = true;
+                }
                 return i as u32;
             }
         }
-        self.upvalues.push(UpvalueDescriptor { is_local, index });
+        self.upvalues.push(UpvalueDescriptor {
+            is_local,
+            index,
+            is_mutable,
+        });
         (self.upvalues.len() - 1) as u32
+    }
+
+    /// Check if a name is resolvable as an upvalue WITHOUT adding any descriptors.
+    /// Used during pre-scanning to avoid side effects.
+    fn can_resolve_upvalue(&self, name: Symbol) -> bool {
+        let enclosing = match self.enclosing.as_ref() {
+            Some(e) => e,
+            None => return false,
+        };
+        // Check enclosing locals
+        for local in enclosing.locals.iter().rev() {
+            if local.name == name {
+                return true;
+            }
+        }
+        // Walk enclosing chain
+        if let Some(grandparent) = &enclosing.enclosing {
+            for local in grandparent.locals.iter().rev() {
+                if local.name == name {
+                    // Check if parent already captured it
+                    for uv in enclosing.upvalues.iter() {
+                        if uv.is_local && uv.index == local.slot as u16 {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     fn resolve_upvalue(&mut self, name: Symbol) -> Option<u32> {
@@ -332,7 +392,8 @@ impl<'a> Compiler<'a> {
         // Check enclosing locals
         for local in enclosing.locals.iter().rev() {
             if local.name == name {
-                return Some(self.add_upvalue(true, local.slot as u16));
+                let is_mutable = local.is_define_slot;
+                return Some(self.add_upvalue(true, local.slot as u16, is_mutable));
             }
         }
 
@@ -345,7 +406,8 @@ impl<'a> Compiler<'a> {
                     // First, check if it's in enclosing's upvalues
                     for (i, uv) in enclosing.upvalues.iter().enumerate() {
                         if uv.is_local && uv.index == local.slot as u16 {
-                            return Some(self.add_upvalue(false, i as u16));
+                            // Propagate mutability from the parent's descriptor
+                            return Some(self.add_upvalue(false, i as u16, uv.is_mutable));
                         }
                     }
                     // Not already captured by parent — this is a deeper case
@@ -462,6 +524,72 @@ impl<'a> Compiler<'a> {
                 "define expects a symbol or (symbol : Type)",
                 Self::get_line(expr),
             )),
+        }
+    }
+
+    /// Check if an expression is a `(define name value)` form and return the name symbol.
+    fn is_define_form(&self, expr: &Expr) -> Option<Symbol> {
+        if let Expr::List { .. } = expr {
+            let elements = ast::list_to_array(expr);
+            if elements.len() == 3 {
+                if let Some(sym) = Self::get_symbol(elements[0]) {
+                    if sym == self.known_symbols.define {
+                        return self.get_define_name(elements[1]).ok();
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if we're inside a function body (not at the top level).
+    fn is_inside_function(&self) -> bool {
+        self.enclosing.is_some()
+    }
+
+    /// Pre-scan a sequence of expressions for leading `define` forms and
+    /// pre-allocate local slots for their names (letrec-style).
+    /// Only allocates locals for names that are NOT already resolvable
+    /// (not already a local or upvalue from an enclosing scope).
+    fn prescan_leading_defines(&mut self, exprs: &[&Expr]) {
+        for expr in exprs {
+            if let Some(name) = self.is_define_form(expr) {
+                // Only pre-allocate if the name is not already resolvable as a
+                // local or upvalue. This avoids turning re-definitions of outer
+                // variables (e.g. `(define counter (+ counter 1))`) into new locals.
+                let already_resolvable =
+                    self.resolve_local(name).is_some() || self.can_resolve_upvalue(name);
+                if !already_resolvable {
+                    // Use add_define_local so the slot is marked for mutable
+                    // upvalue capture (needed for letrec recursive references).
+                    self.add_define_local(name);
+                }
+            } else {
+                break; // Stop at first non-define expression
+            }
+        }
+    }
+
+    /// Pre-scan a lambda body for leading defines. If the body is a single
+    /// `(begin ...)` expression, also scans inside the begin.
+    fn prescan_body_defines(&mut self, body_exprs: &[&Expr]) {
+        self.did_prescan = true;
+        // First, scan the body directly
+        self.prescan_leading_defines(body_exprs);
+
+        // If the body is a single `(begin ...)`, also scan inside it
+        if body_exprs.len() == 1 {
+            if let Expr::List { .. } = body_exprs[0] {
+                let elements = ast::list_to_array(body_exprs[0]);
+                if !elements.is_empty() {
+                    if let Some(sym) = Self::get_symbol(elements[0]) {
+                        if sym == self.known_symbols.begin {
+                            let begin_body: Vec<&Expr> = elements[1..].to_vec();
+                            self.prescan_leading_defines(&begin_body);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -600,6 +728,35 @@ impl<'a> Compiler<'a> {
         }
         let name = self.get_define_name(elements[1])?;
         self.compile_expr(elements[2], false)?;
+
+        // If inside a function and the name was pre-allocated as a local, use SetLocal
+        if self.is_inside_function() {
+            if let Some(slot) = self.resolve_local(name) {
+                self.emit_op(Op::SetLocal, line, slot);
+                self.emit_constant(ConstantValue::Nil, line); // define returns nil
+                return Ok(());
+            }
+            // Inside a user-written lambda (did_prescan == true) at the
+            // function's base scope (scope_depth == 0) but name wasn't
+            // pre-allocated — the define appears after non-define expressions.
+            // Reject it (Scheme convention: internal defines must be leading).
+            //
+            // Defines in nested scopes (inside let, match, if, etc.) or in
+            // handler-clause lambdas (did_prescan == false) fall through to
+            // SetGlobal to preserve backward compatibility.
+            if self.did_prescan && self.scope_depth == 0 {
+                let name_str = self.interner.resolve(name);
+                return Err(CompileError::new(
+                    &format!(
+                        "define '{}' is not allowed here; internal defines must appear at the beginning of the function body",
+                        name_str
+                    ),
+                    line,
+                ));
+            }
+        }
+
+        // Top-level: use SetGlobal
         let name_str = self.interner.resolve(name).to_string();
         let name_idx = self.add_constant(ConstantValue::String(name_str));
         self.emit_op(Op::SetGlobal, line, name_idx);
@@ -672,6 +829,14 @@ impl<'a> Compiler<'a> {
         if let Some(rest) = rest_param {
             fn_compiler.add_local(rest);
         }
+
+        // Pre-scan for leading defines and pre-allocate local slots (letrec semantics).
+        // This must happen BEFORE snapshot_scope is called by any child lambdas,
+        // so that inner lambdas can resolve these names as locals/upvalues.
+        //
+        // We scan the body directly. If the body is a single `(begin ...)` expression,
+        // we also scan inside the begin for leading defines.
+        fn_compiler.prescan_body_defines(&body_exprs);
 
         // Compile body
         fn_compiler.compile_sequence(&body_exprs, true)?;

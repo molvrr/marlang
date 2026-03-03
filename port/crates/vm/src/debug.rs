@@ -111,6 +111,7 @@ fn has_operand(inst: &Instruction) -> bool {
             | Op::PushLocal
             | Op::SetLocal
             | Op::PushUpvalue
+            | Op::SetUpvalue
             | Op::PushGlobal
             | Op::SetGlobal
             | Op::Jump

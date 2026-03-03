@@ -1,7 +1,48 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::bytecode::FunctionPrototype;
 use crate::value::Value;
+
+/// A mutable upvalue cell, shared between a closure and its enclosing scope.
+/// Uses `Arc<Mutex<Value>>` for thread-safety (required by multi-threaded scheduler).
+pub type UpvalueCell = Arc<Mutex<Value>>;
+
+/// A captured upvalue: either a plain value copy (cheap, common case) or a
+/// shared mutable cell (for letrec-style recursive local defines).
+#[derive(Debug, Clone)]
+pub enum Upvalue {
+    /// Captured by value — the common case. No heap allocation, no locking.
+    Value(Value),
+    /// Shared mutable cell — used when a local is captured while still being
+    /// assigned to (e.g., recursive local define capturing itself).
+    Cell(UpvalueCell),
+}
+
+impl Upvalue {
+    /// Read the current value from this upvalue.
+    #[inline]
+    pub fn get(&self) -> Value {
+        match self {
+            Upvalue::Value(v) => v.clone(),
+            Upvalue::Cell(cell) => cell.lock().unwrap().clone(),
+        }
+    }
+
+    /// Write a value into this upvalue (only valid for Cell variant).
+    #[inline]
+    pub fn set(&self, val: Value) {
+        match self {
+            Upvalue::Value(_) => {
+                // Value upvalues are immutable snapshots — this shouldn't be called.
+                // In debug builds, panic; in release, silently ignore.
+                debug_assert!(false, "cannot set a Value upvalue");
+            }
+            Upvalue::Cell(cell) => {
+                *cell.lock().unwrap() = val;
+            }
+        }
+    }
+}
 
 /// Heap-allocated VM objects, stored behind `Arc` in NaN-boxed Values.
 #[derive(Debug, Clone)]
@@ -124,10 +165,12 @@ pub type BuiltinFn = fn(&mut crate::vm::VM, &[Value]) -> Result<Value, crate::er
 
 /// A closure: a function prototype plus captured upvalues.
 /// Uses Arc to share the prototype, avoiding expensive clones of the chunk.
+/// Most upvalues are cheap value copies; only letrec-style recursive local
+/// defines use shared mutable cells (`Arc<Mutex<Value>>`).
 #[derive(Debug, Clone)]
 pub struct Closure {
     pub proto: Arc<FunctionPrototype>,
-    pub upvalues: Vec<Value>,
+    pub upvalues: Vec<Upvalue>,
     /// The module this closure belongs to. Copied from `proto.module_id` at creation,
     /// stored here for fast access during PushGlobal resolution without indirecting
     /// through the Arc<FunctionPrototype>.
@@ -140,6 +183,11 @@ pub struct CallFrame {
     pub closure: Closure,
     pub ip: usize,
     pub locals: Vec<Value>,
+    /// Open upvalue cells for locals that have been captured by inner closures.
+    /// Maps local slot index → shared upvalue cell. When a local is captured,
+    /// its value is moved into an `UpvalueCell` stored here; subsequent reads/writes
+    /// to that local go through the cell (shared with the capturing closure).
+    pub open_upvalues: Vec<Option<UpvalueCell>>,
 }
 
 /// An entry in a handler frame mapping an effect operation to its handler closure.

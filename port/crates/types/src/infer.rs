@@ -58,6 +58,189 @@ fn is_symbol(expr: &Expr, interner: &Interner, name: &str) -> bool {
     get_symbol(expr, interner) == Some(name)
 }
 
+/// Get the symbol name of the first element of a list expression.
+fn get_first_symbol<'a>(expr: &'a Expr, interner: &'a Interner) -> Option<&'a str> {
+    if let Expr::List { .. } = expr {
+        let elements = list_to_array(expr);
+        if !elements.is_empty() {
+            return get_symbol(elements[0], interner);
+        }
+    }
+    None
+}
+
+/// Check if an expression is a `(define name value)` form and extract the name.
+fn is_define_form<'a>(expr: &'a Expr, interner: &'a Interner) -> Option<&'a str> {
+    if let Expr::List { .. } = expr {
+        let elements = list_to_array(expr);
+        if elements.len() == 3 {
+            if is_symbol(elements[0], interner, "define") {
+                // Simple define: (define name value)
+                if let Some(name) = get_symbol(elements[1], interner) {
+                    return Some(name);
+                }
+                // Annotated define: (define (name : Type) value)
+                if let Expr::List { .. } = elements[1] {
+                    let name_elements = list_to_array(elements[1]);
+                    if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
+                        return get_symbol(name_elements[0], interner);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract the annotation type from a `(define (name : Type) value)` form, if present.
+fn get_define_annotation(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Option<Type> {
+    if let Expr::List { .. } = expr {
+        let elements = list_to_array(expr);
+        if elements.len() == 3 && is_symbol(elements[0], interner, "define") {
+            if let Expr::List { .. } = elements[1] {
+                let name_elements = list_to_array(elements[1]);
+                if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
+                    return parse_type_annotation(name_elements[2], env, interner).ok();
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Infer a body sequence with letrec semantics for leading defines.
+/// Leading define forms get placeholder type variables inserted into the environment
+/// before their bodies are inferred, allowing mutual recursion.
+fn infer_body_with_defines(
+    env: &TypeEnv,
+    body_exprs: &[&Expr],
+    interner: &Interner,
+) -> Result<(Substitution, Type, EffectRow), TypeError> {
+    if body_exprs.is_empty() {
+        return Ok((empty_subst(), t_unit(), effect_row_empty()));
+    }
+
+    // Count leading defines
+    let mut num_defines = 0;
+    for expr in body_exprs {
+        if is_define_form(expr, interner).is_some() {
+            num_defines += 1;
+        } else {
+            break;
+        }
+    }
+
+    if num_defines == 0 {
+        // No leading defines — fall through to normal sequential inference
+        return infer_body_sequence(env, body_exprs, interner);
+    }
+
+    // Phase 1: Collect define names and create placeholders
+    let define_exprs = &body_exprs[..num_defines];
+    let rest_exprs = &body_exprs[num_defines..];
+
+    let mut placeholders: Vec<(String, Type)> = Vec::new();
+    let mut define_env = env.clone();
+
+    for &def_expr in define_exprs {
+        let name = is_define_form(def_expr, interner).unwrap().to_string();
+        let ann_type = get_define_annotation(def_expr, &define_env, interner);
+        let placeholder = ann_type.unwrap_or_else(fresh_type_var);
+        define_env = extend_env(
+            &define_env,
+            &name,
+            TypeScheme {
+                quantified_vars: vec![],
+                ty: placeholder.clone(),
+            },
+        );
+        placeholders.push((name, placeholder));
+    }
+
+    // Phase 2: Infer each define's value in the extended environment
+    let mut subst = empty_subst();
+    let mut all_effects = effect_row_empty();
+
+    for (i, &def_expr) in define_exprs.iter().enumerate() {
+        let elements = list_to_array(def_expr);
+        let value_expr = elements[2];
+        let applied_env = apply_subst_env(&subst, &define_env);
+        let result = infer_expr(&applied_env, value_expr, interner)?;
+        subst = compose_subst(&result.subst, &subst);
+        all_effects = combine_effect_rows(&all_effects, &result.effects);
+
+        // Unify inferred type with placeholder
+        let (ref name, ref placeholder) = placeholders[i];
+        let placeholder_applied = apply_subst(&subst, placeholder);
+        let value_type_applied = apply_subst(&subst, &result.ty);
+        let unify_result = unify_with_context(
+            &placeholder_applied,
+            &value_type_applied,
+            &format!("local definition of {name}"),
+        )?;
+        subst = compose_subst(&unify_result, &subst);
+    }
+
+    // Phase 3: Generalize and update the environment with final types
+    let mut final_env = apply_subst_env(&subst, env);
+    for (name, _) in &placeholders {
+        // Look up the final type from the define_env (which has the placeholder)
+        // and apply all accumulated substitutions
+        let final_type = if let Some(scheme) = lookup_var(&define_env, name) {
+            let ty = apply_subst(&subst, &scheme.ty);
+            generalize(&final_env, &ty)
+        } else {
+            TypeScheme {
+                quantified_vars: vec![],
+                ty: t_unit(),
+            }
+        };
+        final_env = extend_env(&final_env, name, final_type);
+    }
+
+    // Phase 4: Infer remaining (non-define) body expressions
+    if rest_exprs.is_empty() {
+        // All expressions were defines — the body type is Unit (from last define)
+        return Ok((subst, t_unit(), all_effects));
+    }
+
+    let mut body_type = t_unit();
+    for (i, body_expr) in rest_exprs.iter().enumerate() {
+        let env_for_body = apply_subst_env(&subst, &final_env);
+        let result = infer_expr(&env_for_body, body_expr, interner)?;
+        subst = compose_subst(&result.subst, &subst);
+        all_effects = combine_effect_rows(&all_effects, &result.effects);
+        if i == rest_exprs.len() - 1 {
+            body_type = result.ty;
+        }
+    }
+
+    Ok((subst, body_type, all_effects))
+}
+
+/// Infer a body sequence without special define handling (the original logic).
+fn infer_body_sequence(
+    env: &TypeEnv,
+    exprs: &[&Expr],
+    interner: &Interner,
+) -> Result<(Substitution, Type, EffectRow), TypeError> {
+    let mut subst = empty_subst();
+    let mut last_type = t_unit();
+    let mut all_effects = effect_row_empty();
+
+    for (i, expr) in exprs.iter().enumerate() {
+        let env_for_body = apply_subst_env(&subst, env);
+        let result = infer_expr(&env_for_body, expr, interner)?;
+        subst = compose_subst(&result.subst, &subst);
+        all_effects = combine_effect_rows(&all_effects, &result.effects);
+        if i == exprs.len() - 1 {
+            last_type = result.ty;
+        }
+    }
+
+    Ok((subst, last_type, all_effects))
+}
+
 // ===== Variadic Arithmetic =====
 
 struct VariadicArithInfo {
@@ -625,22 +808,21 @@ fn infer_lambda(
         rest_param = Some((rest_name.to_string(), elem_type));
     }
 
-    // Infer body
-    let mut body_subst = empty_subst();
-    let mut body_type = t_unit();
-    let mut body_effects = effect_row_empty();
-
-    for (i, body_expr) in body_exprs.iter().enumerate() {
-        let env_for_body = apply_subst_env(&body_subst, &param_env);
-        let result = infer_expr(&env_for_body, body_expr, interner)?;
-
-        body_subst = compose_subst(&result.subst, &body_subst);
-        body_effects = combine_effect_rows(&body_effects, &result.effects);
-
-        if i == body_exprs.len() - 1 {
-            body_type = result.ty;
+    // Infer body with letrec semantics for leading defines.
+    // Determine which body expressions to process (unwrap a single begin if present).
+    let effective_body: Vec<&Expr> = if body_exprs.len() == 1 {
+        if let Some("begin") = get_first_symbol(body_exprs[0], interner) {
+            let begin_elements = list_to_array(body_exprs[0]);
+            begin_elements[1..].to_vec()
+        } else {
+            body_exprs.to_vec()
         }
-    }
+    } else {
+        body_exprs.to_vec()
+    };
+
+    let (body_subst, body_type, body_effects) =
+        infer_body_with_defines(&param_env, &effective_body, interner)?;
 
     let mut param_types: Vec<Type> = params
         .iter()
@@ -832,23 +1014,13 @@ fn infer_begin(
     elements: &[&Expr],
     interner: &Interner,
 ) -> Result<InferResult, TypeError> {
-    let body_exprs = &elements[1..];
+    let body_exprs: Vec<&Expr> = elements[1..].to_vec();
 
     if body_exprs.is_empty() {
         return Ok(pure_result(t_unit()));
     }
 
-    let mut subst = empty_subst();
-    let mut last_type = t_unit();
-    let mut all_effects = effect_row_empty();
-
-    for body_expr in body_exprs {
-        let env_for_body = apply_subst_env(&subst, env);
-        let result = infer_expr(&env_for_body, body_expr, interner)?;
-        subst = compose_subst(&result.subst, &subst);
-        all_effects = combine_effect_rows(&all_effects, &result.effects);
-        last_type = result.ty;
-    }
+    let (subst, last_type, all_effects) = infer_body_with_defines(env, &body_exprs, interner)?;
 
     Ok(InferResult {
         ty: apply_subst(&subst, &last_type),
