@@ -10,3 +10,4 @@
 - [ ] Cross process messaging
 - [ ] Rewrite examples to not call perform directly, only call it if there's no wrapper available
 - [ ] Typecheck should only show last expression type, not every top-level expression
+- [ ] What happens to builtin handlers if there's another operation with the same name which belongs to another effect

@@ -256,10 +256,7 @@ fn cmd_run(file: &PathBuf) -> ExitCode {
         &mut loader,
         &interner,
     ) {
-        Ok(value) => {
-            println!("{}", format_value(&value));
-            ExitCode::SUCCESS
-        }
+        Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{}", e.format_with_location(&line_map, &filename));
             ExitCode::FAILURE
