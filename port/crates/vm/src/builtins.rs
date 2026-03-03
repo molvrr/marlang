@@ -1441,7 +1441,7 @@ fn register_ffi_builtins(
                 let type_str = at
                     .as_string()
                     .ok_or_else(|| VMError::runtime("ffi-open: arg type must be string"))?;
-                if type_str == "void" {
+                if type_str == "void" || type_str == "Unit" {
                     continue;
                 }
                 arg_types.push(ffi::parse_ffi_type(type_str)?);

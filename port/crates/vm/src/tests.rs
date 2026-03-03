@@ -10,9 +10,9 @@ use crate::compiler::{compile, compile_program};
 use crate::debug::disassemble;
 use crate::errors::VMError;
 use crate::expand::MacroExpander;
-use crate::modules::{expand_macros, run_program, run_program_from_exprs, ModuleLoader};
+use crate::modules::{ModuleLoader, expand_macros, run_program, run_program_from_exprs};
 use crate::object::VMObject;
-use crate::value::{format_value, Value};
+use crate::value::{Value, format_value};
 use crate::vm::VM;
 
 // --- Test Helpers ---
@@ -77,28 +77,34 @@ fn literal_string() {
 #[test]
 fn literal_boolean_true() {
     let (chunk, _) = compile_source("#t");
-    assert!(chunk
-        .constants
-        .iter()
-        .any(|c| matches!(c, ConstantValue::Boolean(true))));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Boolean(true)))
+    );
 }
 
 #[test]
 fn literal_boolean_false() {
     let (chunk, _) = compile_source("#f");
-    assert!(chunk
-        .constants
-        .iter()
-        .any(|c| matches!(c, ConstantValue::Boolean(false))));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Boolean(false)))
+    );
 }
 
 #[test]
 fn literal_nil() {
     let (chunk, _) = compile_source("nil");
-    assert!(chunk
-        .constants
-        .iter()
-        .any(|c| matches!(c, ConstantValue::Nil)));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Nil))
+    );
 }
 
 #[test]
@@ -204,10 +210,12 @@ fn if_no_else() {
     let (chunk, _) = compile_source("(if #t 1)");
     assert!(find_op(&chunk, Op::JumpIfFalse));
     // Should have nil for the else branch
-    assert!(chunk
-        .constants
-        .iter()
-        .any(|c| matches!(c, ConstantValue::Nil)));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Nil))
+    );
 }
 
 #[test]
@@ -284,10 +292,12 @@ fn lambda_basic() {
     let (chunk, _) = compile_source("(lambda (x) x)");
     assert!(find_op(&chunk, Op::Closure));
     // Should have a prototype in constants
-    assert!(chunk
-        .constants
-        .iter()
-        .any(|c| matches!(c, ConstantValue::Prototype(_))));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Prototype(_)))
+    );
 }
 
 #[test]
@@ -372,10 +382,12 @@ fn data_nullary_constructor() {
 fn data_nary_constructor() {
     let (chunk, _) = compile_source("(data Option (Some a) None)");
     // Some is N-ary (arity 1), encoded as special string
-    assert!(chunk
-        .constants
-        .iter()
-        .any(|c| { matches!(c, ConstantValue::String(s) if s == "\0ctor:Some:1") }));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| { matches!(c, ConstantValue::String(s) if s == "\0ctor:Some:1") })
+    );
     // None is nullary
     assert!(find_op(&chunk, Op::Construct));
 }
@@ -435,10 +447,12 @@ fn match_no_match_halt() {
 fn effect_declaration_emits_nil() {
     let (chunk, _) = compile_source("(effect IO (print (-> String Unit)))");
     // effect declarations just produce nil
-    assert!(chunk
-        .constants
-        .iter()
-        .any(|c| matches!(c, ConstantValue::Nil)));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Nil))
+    );
 }
 
 #[test]
@@ -460,10 +474,12 @@ fn handle_produces_push_handler() {
     let (chunk, _) = compile_source(source);
     assert!(find_op(&chunk, Op::PushHandler));
     // Should have handler descriptor
-    assert!(chunk
-        .constants
-        .iter()
-        .any(|c| { matches!(c, ConstantValue::String(s) if s.starts_with("\0handler:")) }));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| { matches!(c, ConstantValue::String(s) if s.starts_with("\0handler:")) })
+    );
 }
 
 #[test]
@@ -514,10 +530,12 @@ fn class_compile_error() {
 fn type_emits_nil() {
     let (chunk, _) = compile_source("(type Pair (a b) (MkPair a b))");
     // type declarations emit nil
-    assert!(chunk
-        .constants
-        .iter()
-        .any(|c| matches!(c, ConstantValue::Nil)));
+    assert!(
+        chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, ConstantValue::Nil))
+    );
 }
 
 // ===== Disassembler =====

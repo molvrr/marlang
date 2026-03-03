@@ -4,8 +4,8 @@ use marlang_core::ast::{self, Expr, LispValue};
 use marlang_core::intern::{Interner, Symbol};
 
 use crate::bytecode::{
-    Chunk, ConstantValue, FfiSigEntry, FunctionPrototype, Instruction, ModuleId, Op,
-    UpvalueDescriptor, ROOT_MODULE,
+    Chunk, ConstantValue, FfiSigEntry, FunctionPrototype, Instruction, ModuleId, Op, ROOT_MODULE,
+    UpvalueDescriptor,
 };
 use crate::errors::CompileError;
 
@@ -1698,7 +1698,7 @@ impl<'a> Compiler<'a> {
             // Convert FFI type names to C type strings
             let arg_types: Vec<String> = arg_type_names
                 .iter()
-                .filter(|t| t.as_str() != "Void") // Void as param means no args
+                .filter(|t| t.as_str() != "Void" && t.as_str() != "Unit") // Void/Unit as param means no args
                 .map(|t| ffi_type_to_c_string(t))
                 .collect();
             let ret_type = ffi_type_to_c_string(&ret_type_name[0]);
