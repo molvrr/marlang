@@ -24,11 +24,15 @@
 
 ; --- Core Functions ---
 
+; raise : (-> String {Exception} a)
+; Throw an exception with a message. Wrapper around (perform throw msg).
+(define raise (lambda (msg) (perform throw msg)))
+
 ; string->number: parses a string to a Float, throws on failure
 (define string->number (lambda (s)
   (match (__try-string->number s)
     ((Some n) n)
-    (None (perform throw (string-append "string->number: invalid number: " s))))))
+    (None (raise (string-append "string->number: invalid number: " s))))))
 
 (define not (lambda (x) (if x #f #t)))
 (define cons (lambda (h t) (Cons h t)))

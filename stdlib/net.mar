@@ -7,7 +7,7 @@
 ; effect level. This module provides two sets of wrappers:
 ;
 ;   - Throwing variants (connect, listen, send): unwrap the Result and
-;     (perform throw msg) on error. The default throw handler crashes the fiber.
+;     raise on error. The default throw handler crashes the fiber.
 ;
 ;   - Try variants (try-connect, try-listen, try-send): return the Result
 ;     directly for the caller to match on.
@@ -18,18 +18,20 @@
 ;
 ; Example usage (throwing):
 ;   (import "std:net" as net)
+;   (import "std:io" as io)
 ;
 ;   (run-fibers-parallel (lambda ()
 ;     (let ((sock (net/connect "127.0.0.1" 8080)))
 ;       (net/send sock "hello\n")
 ;       (match (net/recv sock)
-;         ((Some resp) (perform println resp))
-;         (None (perform println "connection closed")))
+;         ((Some resp) (io/println resp))
+;         (None (io/println "connection closed")))
 ;       (net/close sock)))
 ;     2)
 ;
 ; Example usage (try):
 ;   (import "std:net" as net)
+;   (import "std:io" as io)
 ;
 ;   (run-fibers-parallel (lambda ()
 ;     (match (net/try-connect "127.0.0.1" 8080)
@@ -37,7 +39,7 @@
 ;         (net/send sock "hello\n")
 ;         (net/close sock))
 ;       ((Err msg)
-;         (perform println (string-append "connect failed: " msg)))))
+;         (io/println (string-append "connect failed: " msg)))))
 ;     2)
 
 ; === TCP Effect ===
@@ -55,33 +57,6 @@
   (tcp-recv    (-> TcpSocket (Option String)))
   (tcp-close   (-> TcpSocket Unit))
   (tcp-close-listener (-> TcpListener Unit)))
-
-; === Internal helper ===
-
-(define unwrap-or-throw (lambda (result label)
-  (match result
-    ((Ok v) v)
-    ((Err msg) (perform throw (string-append label ": " msg))))))
-
-; === Throwing TCP Operations ===
-;
-; These unwrap the Result and throw on error.
-; The default throw handler crashes the fiber.
-
-; connect : (-> String Int {Tcp, Exception} TcpSocket)
-; Connect to a TCP server at host:port. Throws on failure.
-(define connect (lambda (host port)
-  (unwrap-or-throw (perform tcp-connect host port) "tcp-connect")))
-
-; listen : (-> Int {Tcp, Exception} TcpListener)
-; Start listening for TCP connections on port. Throws on failure.
-(define listen (lambda (port)
-  (unwrap-or-throw (perform tcp-listen port) "tcp-listen")))
-
-; send : (-> TcpSocket String {Tcp, Exception} Unit)
-; Send data over a TCP socket. Throws on failure.
-(define send (lambda (sock data)
-  (unwrap-or-throw (perform tcp-send sock data) "tcp-send")))
 
 ; === Try TCP Operations ===
 ;
@@ -101,6 +76,33 @@
 ; Send data over a TCP socket. Returns (Ok nil) or (Err msg).
 (define try-send (lambda (sock data)
   (perform tcp-send sock data)))
+
+; === Internal helper ===
+
+(define unwrap-or-throw (lambda (result label)
+  (match result
+    ((Ok v) v)
+    ((Err msg) (raise (string-append label ": " msg))))))
+
+; === Throwing TCP Operations ===
+;
+; These unwrap the Result and throw on error.
+; The default throw handler crashes the fiber.
+
+; connect : (-> String Int {Tcp, Exception} TcpSocket)
+; Connect to a TCP server at host:port. Throws on failure.
+(define connect (lambda (host port)
+  (unwrap-or-throw (try-connect host port) "tcp-connect")))
+
+; listen : (-> Int {Tcp, Exception} TcpListener)
+; Start listening for TCP connections on port. Throws on failure.
+(define listen (lambda (port)
+  (unwrap-or-throw (try-listen port) "tcp-listen")))
+
+; send : (-> TcpSocket String {Tcp, Exception} Unit)
+; Send data over a TCP socket. Throws on failure.
+(define send (lambda (sock data)
+  (unwrap-or-throw (try-send sock data) "tcp-send")))
 
 ; === Non-failable TCP Operations ===
 ;

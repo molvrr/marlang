@@ -23,9 +23,9 @@
 ; chan-send! : (-> Channel a {Channel, Exception} Unit)
 ; Send a value to a channel. Throws on closed channel.
 (define chan-send! (lambda (ch v)
-  (match (perform chan-send ch v)
+  (match (chan-send ch v)
     ((Ok _) nil)
-    ((Err msg) (perform throw (string-append "chan-send: " msg))))))
+    ((Err msg) (raise (string-append "chan-send: " msg))))))
 
 (define chan-recv  (lambda (ch) (perform chan-recv ch)))
 (define chan-close (lambda (ch) (perform chan-close ch)))

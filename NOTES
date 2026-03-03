@@ -7,5 +7,5 @@
 - [ ] JIT
 - [ ] Can we override builtin effect handlers?
 - [ ] Cross process messaging
-- [ ] Rewrite examples to not call perform directly, only if there's no wrapper available
-- [ ] Rewrite stdlib to not call perform directly, only if there's no wrapper available
+- [ ] Rewrite examples to not call perform directly, only call it if there's no wrapper available
+- [ ] Rewrite stdlib to not call perform directly, only if call it if there's no wrapper available

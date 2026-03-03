@@ -13,7 +13,7 @@
 ;     (let ((resp (http/get "http://example.com")))
 ;       (match resp
 ;         ((HttpResponse status headers body)
-;           (perform println body))))))
+;           (io/println body))))))
 ;
 ; Example server:
 ;   (import "std:http" as http)
@@ -55,12 +55,12 @@
 
 ; get : (-> String {HttpClient} HttpResponse)
 ; Make a GET request
-(define get (lambda (url) (perform http-fetch url (list))))
+(define get (lambda (url) (fetch url (list))))
 
 ; post : (-> String String {HttpClient} HttpResponse)
 ; Make a POST request with body
 (define post (lambda (url body)
-  (perform http-fetch url (list (Method "POST") (Body body)))))
+  (fetch url (list (Method "POST") (Body body)))))
 
 ; === HTTP Server Operations ===
 
@@ -80,12 +80,12 @@
 ; respond-text : (-> HttpRequest Int String {HttpServ} Unit)
 ; Send a plain text response
 (define respond-text (lambda (handle status body)
-  (perform http-respond handle status (list (list "content-type" "text/plain")) body)))
+  (respond handle status (list (list "content-type" "text/plain")) body)))
 
 ; respond-json : (-> HttpRequest Int String {HttpServ} Unit)
 ; Send a JSON response
 (define respond-json (lambda (handle status body)
-  (perform http-respond handle status (list (list "content-type" "application/json")) body)))
+  (respond handle status (list (list "content-type" "application/json")) body)))
 
 ; close-server : (-> HttpServer {HttpServ} Unit)
 ; Stop the HTTP server

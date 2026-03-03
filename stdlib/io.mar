@@ -56,9 +56,9 @@
 ; read-file! : (-> String {IO, Exception} String)
 ; Read the entire contents of a file. Throws on error.
 (define read-file! (lambda (path)
-  (match (perform read-file path)
+  (match (read-file path)
     ((Ok content) content)
-    ((Err msg) (perform throw msg)))))
+    ((Err msg) (raise msg)))))
 
 ; write-file : (-> String String {IO} (Result String Unit))
 ; Write a string to a file (overwrites existing content). Returns (Ok nil) or (Err msg).
@@ -67,6 +67,6 @@
 ; write-file! : (-> String String {IO, Exception} Unit)
 ; Write a string to a file. Throws on error.
 (define write-file! (lambda (path content)
-  (match (perform write-file path content)
+  (match (write-file path content)
     ((Ok _) nil)
-    ((Err msg) (perform throw msg)))))
+    ((Err msg) (raise msg)))))
