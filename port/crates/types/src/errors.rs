@@ -51,6 +51,11 @@ pub enum TypeError {
         missing: Vec<String>,
         span: Option<Span>,
     },
+    NonExhaustiveHandlers {
+        effect_name: String,
+        missing_ops: Vec<String>,
+        span: Option<Span>,
+    },
     MissingTypeAnnotation {
         name: String,
         span: Option<Span>,
@@ -130,6 +135,17 @@ pub fn format_error(err: &TypeError) -> String {
         TypeError::NonExhaustivePatterns { missing, .. } => {
             format!("Non-exhaustive patterns. Missing: {}", missing.join(", "))
         }
+        TypeError::NonExhaustiveHandlers {
+            effect_name,
+            missing_ops,
+            ..
+        } => {
+            format!(
+                "Non-exhaustive effect handler for '{}'. Missing operations: {}",
+                effect_name,
+                missing_ops.join(", ")
+            )
+        }
         TypeError::MissingTypeAnnotation { name, .. } => {
             format!("Missing type annotation for top-level definition: {name}")
         }
@@ -161,6 +177,7 @@ pub fn error_span(err: &TypeError) -> Option<Span> {
         | TypeError::NotAFunction { span, .. }
         | TypeError::PatternTypeMismatch { span, .. }
         | TypeError::NonExhaustivePatterns { span, .. }
+        | TypeError::NonExhaustiveHandlers { span, .. }
         | TypeError::MissingTypeAnnotation { span, .. }
         | TypeError::InvalidTypeAnnotation { span, .. }
         | TypeError::CyclicTypeAlias { span, .. }

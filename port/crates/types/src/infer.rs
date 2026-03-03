@@ -1911,7 +1911,8 @@ fn infer_handle(
 
     let mut subst = body_result.subst.clone();
     let mut result_type: Option<Type> = None;
-    let mut handled_effects: Vec<String> = Vec::new();
+    // Map from effect name -> list of handled operation names
+    let mut handled_ops_by_effect: HashMap<String, Vec<String>> = HashMap::new();
 
     let handler_clauses = &elements[2..];
     for clause in handler_clauses {
@@ -1975,11 +1976,16 @@ fn infer_handle(
                 }
 
                 // Effect handler
-                handled_effects.push(op_name.to_string());
                 let op_info = lookup_effect_op(env, op_name).ok_or(TypeError::UndefinedVariable {
                     name: format!("effect operation '{op_name}' in handler (declare with (effect EffectName ({op_name} : ArgType -> ResultType)))"),
                     span: Some(pattern_elements[0].span()),
                 })?;
+
+                // Track which operations are handled per effect
+                handled_ops_by_effect
+                    .entry(op_info.0.name.clone())
+                    .or_default()
+                    .push(op_name.to_string());
 
                 let mut handler_env = apply_subst_env(&subst, env);
                 let arg_patterns = &pattern_elements[1..pattern_elements.len().saturating_sub(1)];
@@ -2037,13 +2043,38 @@ fn infer_handle(
 
     let final_type = result_type.unwrap_or_else(|| body_result.ty.clone());
 
-    // Remove handled effects
+    // Check exhaustiveness: if any operation from an effect is handled,
+    // ALL operations from that effect must be handled.
+    for (effect_name, handled_op_names) in &handled_ops_by_effect {
+        if let Some(effect_decl) = lookup_effect(env, effect_name) {
+            let all_op_names: Vec<&str> = effect_decl
+                .operations
+                .iter()
+                .map(|op| op.name.as_str())
+                .collect();
+            let missing: Vec<String> = all_op_names
+                .iter()
+                .filter(|op| !handled_op_names.iter().any(|h| h == *op))
+                .map(|op| op.to_string())
+                .collect();
+            if !missing.is_empty() {
+                return Err(TypeError::NonExhaustiveHandlers {
+                    effect_name: effect_name.clone(),
+                    missing_ops: missing,
+                    span: Some(elements[0].span()),
+                });
+            }
+        }
+    }
+
+    // Remove handled effects (using effect names, not operation names)
     let mut remaining_effects = body_result.effects.clone();
-    if !handled_effects.is_empty() {
+    if !handled_ops_by_effect.is_empty() {
+        let handled_effect_names: Vec<&String> = handled_ops_by_effect.keys().collect();
         let remaining: Vec<String> = remaining_effects
             .effects()
             .iter()
-            .filter(|e| !handled_effects.contains(e))
+            .filter(|e| !handled_effect_names.contains(e))
             .cloned()
             .collect();
         remaining_effects = match &remaining_effects {

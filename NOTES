@@ -1,8 +1,8 @@
 - [x] Deprecate typescript version
 - [x] Rewrite CLAUDE.md with only needed info
 - [x] Do we actually need typeclasses? — No. Removed in favor of OCaml-style operator split.
+- [x] Exhaustiveness check effect handler
 - [ ] Cleanup code
 - [ ] JIT
 - [ ] Can we override builtin effect handlers?
 - [ ] Cross process messaging
-- [ ] Exhaustiveness check effect handler

@@ -1180,5 +1180,188 @@ fn effect_row_handled_effect_removed() {
                ((println msg k) -> (resume k (begin))))"#,
     );
     // The handle expression itself should be pure (IO was handled)
-    let _ = types;
+    // Verify the result type is Unit (the body returns Unit from println)
+    assert_eq!(last_type(&types), "Unit");
+}
+
+// ===== Effect Handler Exhaustiveness =====
+
+#[test]
+fn handle_exhaustive_single_op_effect() {
+    // Effect with one operation, handler covers it — should pass
+    check_ok(
+        r#"(effect Ask
+               (ask (-> Unit Int)))
+           (handle (perform ask ())
+               ((ask k) -> (resume k 42)))"#,
+    );
+}
+
+#[test]
+fn handle_exhaustive_multi_op_effect() {
+    // Effect with two operations, handler covers both — should pass
+    check_ok(
+        r#"(effect State
+               (get (-> Unit Int))
+               (put (-> Int Unit)))
+           (handle
+             (begin (perform put 10) (perform get ()))
+             ((get k) -> (resume k 0))
+             ((put v k) -> (resume k (begin))))"#,
+    );
+}
+
+#[test]
+fn handle_non_exhaustive_missing_one_op() {
+    // Effect with two operations, handler only covers one — should fail
+    let err = check_err(
+        r#"(effect State
+               (get (-> Unit Int))
+               (put (-> Int Unit)))
+           (handle
+             (perform get ())
+             ((get k) -> (resume k 0)))"#,
+    );
+    assert!(
+        err.contains("Non-exhaustive effect handler"),
+        "expected non-exhaustive handler error, got: {}",
+        err
+    );
+    assert!(
+        err.contains("State"),
+        "expected error to mention 'State', got: {}",
+        err
+    );
+    assert!(
+        err.contains("put"),
+        "expected error to mention missing op 'put', got: {}",
+        err
+    );
+}
+
+#[test]
+fn handle_non_exhaustive_missing_multiple_ops() {
+    // Effect with three operations, handler only covers one — should fail
+    let err = check_err(
+        r#"(effect Multi
+               (op-a (-> Unit Int))
+               (op-b (-> Int Unit))
+               (op-c (-> Unit String)))
+           (handle
+             (perform op-a ())
+             ((op-a k) -> (resume k 0)))"#,
+    );
+    assert!(
+        err.contains("Non-exhaustive effect handler"),
+        "expected non-exhaustive handler error, got: {}",
+        err
+    );
+    assert!(
+        err.contains("op-b"),
+        "expected error to mention missing op 'op-b', got: {}",
+        err
+    );
+    assert!(
+        err.contains("op-c"),
+        "expected error to mention missing op 'op-c', got: {}",
+        err
+    );
+}
+
+#[test]
+fn handle_return_only_no_exhaustiveness_required() {
+    // Handler with only a return clause and no effect operations — should pass
+    // (no effect operations are being handled, so nothing to check)
+    check_ok(
+        r#"(handle 42
+               ((return x) -> (+ x 1)))"#,
+    );
+}
+
+#[test]
+fn handle_no_effect_ops_in_scope() {
+    // Handler with an unrecognized operation should fail with undefined variable
+    let err = check_err(
+        r#"(handle 42
+               ((unknown-op k) -> 0))"#,
+    );
+    assert!(
+        err.contains("Undefined variable") || err.contains("effect operation"),
+        "expected undefined variable error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn handle_multiple_effects_all_exhaustive() {
+    // Two effects, handler covers all operations from both — should pass
+    check_ok(
+        r#"(effect Eff1
+               (op1 (-> Unit Int)))
+           (effect Eff2
+               (op2 (-> Unit String)))
+           (handle
+             (begin (perform op1 ()) (perform op2 ()))
+             ((op1 k) -> (resume k 0))
+             ((op2 k) -> (resume k "hi")))"#,
+    );
+}
+
+#[test]
+fn handle_multiple_effects_one_non_exhaustive() {
+    // Two effects, handler covers all ops from one but not the other — should fail
+    let err = check_err(
+        r#"(effect Eff1
+               (op1a (-> Unit Int))
+               (op1b (-> Unit Int)))
+           (effect Eff2
+               (op2 (-> Unit String)))
+           (handle
+             (begin (perform op1a ()) (perform op2 ()))
+             ((op1a k) -> (resume k 0))
+             ((op2 k) -> (resume k "hi")))"#,
+    );
+    assert!(
+        err.contains("Non-exhaustive effect handler"),
+        "expected non-exhaustive handler error, got: {}",
+        err
+    );
+    assert!(
+        err.contains("Eff1"),
+        "expected error to mention 'Eff1', got: {}",
+        err
+    );
+    assert!(
+        err.contains("op1b"),
+        "expected error to mention missing op 'op1b', got: {}",
+        err
+    );
+}
+
+#[test]
+fn handle_exception_single_op_exhaustive() {
+    // Exception has only one op (throw), so handling it is automatically exhaustive
+    check_ok(
+        r#"(effect Exception
+               (throw (-> String a)))
+           (handle
+             (perform throw "error")
+             ((throw msg k) -> msg))"#,
+    );
+}
+
+#[test]
+fn handle_effect_removal_verified() {
+    // Verify that handled effects are actually removed from the effect row.
+    // A function annotated as pure should accept a handle expression that
+    // handles all effects from its body.
+    check_ok(
+        r#"(effect MyEff
+               (my-op (-> Unit Int)))
+           (define (f : (-> Unit Int))
+             (lambda ()
+               (handle
+                 (perform my-op ())
+                 ((my-op k) -> (resume k 42)))))"#,
+    );
 }

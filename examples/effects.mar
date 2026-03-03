@@ -76,9 +76,10 @@
     (begin
       (perform log "hello")
       (+ 100 (perform get ())))
-    ((get k) -> (resume k 42)))
+    ((get k) -> (resume k 42))
+    ((put v k) -> (resume k nil)))
   ((log msg k) -> (resume k nil)))
-; => 142 (inner handles get, outer handles log)
+; => 142 (inner handles State, outer handles Log)
 
 
 ; === Example 5: Accumulating with Return Handler ===
