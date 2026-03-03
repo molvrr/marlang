@@ -50,6 +50,14 @@ enum Command {
         /// Path to the .mar file
         file: PathBuf,
     },
+    /// Show macro-expanded source
+    Expand {
+        /// Path to the .mar file
+        file: PathBuf,
+        /// Strip hygiene marks for cleaner output
+        #[arg(long)]
+        clean: bool,
+    },
 }
 
 // ===== CLI Module Loader for Type Checking =====
@@ -173,6 +181,7 @@ fn main() -> ExitCode {
         Command::Repl => cmd_repl(),
         Command::Typecheck { file, verbose } => cmd_typecheck(&file, verbose),
         Command::Disasm { file } => cmd_disasm(&file),
+        Command::Expand { file, clean } => cmd_expand(&file, clean),
     }
 }
 
@@ -372,6 +381,57 @@ fn cmd_disasm(file: &PathBuf) -> ExitCode {
 
     let name = file.file_stem().and_then(|s| s.to_str());
     println!("{}", disassemble(&chunk, name));
+
+    ExitCode::SUCCESS
+}
+
+fn cmd_expand(file: &PathBuf, clean: bool) -> ExitCode {
+    let source = match fs::read_to_string(file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error reading file: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let interner = Interner::new();
+    let loader = ModuleLoader::new();
+
+    let tokens = match lex(&source, &interner) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Lex error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let exprs = match parse_with_interner(&tokens, &interner) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Parse error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let expanded = match expand_macros(&interner, &exprs, Some(file.as_path()), &loader) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Macro expansion error: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Print only the user's expanded expressions (skip the prelude)
+    for expr in &expanded.exprs[expanded.prelude_count..] {
+        let output_expr;
+        let to_print = if clean {
+            output_expr = marlang_core::ast::strip_marks_expr(expr, &interner);
+            &output_expr
+        } else {
+            expr
+        };
+        println!("{}", marlang_core::ast::expr_to_source(to_print, &interner));
+    }
 
     ExitCode::SUCCESS
 }

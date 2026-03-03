@@ -282,28 +282,7 @@ impl<'a> MacroExpander<'a> {
     }
 
     fn expr_to_source(&self, expr: &Expr) -> String {
-        match expr {
-            Expr::Atom(LispValue::Symbol(sym), _) => self.interner.resolve(*sym).to_string(),
-            Expr::Atom(LispValue::Number(n, is_float), _) => {
-                if *is_float {
-                    format!("{}", n)
-                } else {
-                    let i = *n as i64;
-                    if (i as f64 - n).abs() < 1e-10 {
-                        format!("{}", i)
-                    } else {
-                        format!("{}", n)
-                    }
-                }
-            }
-            Expr::Atom(LispValue::String(s), _) => format!("\"{}\"", s),
-            Expr::Nil(_) => "()".to_string(),
-            Expr::List { .. } => {
-                let elems = ast::list_to_array(expr);
-                let parts: Vec<String> = elems.iter().map(|e| self.expr_to_source(e)).collect();
-                format!("({})", parts.join(" "))
-            }
-        }
+        ast::expr_to_source(expr, self.interner)
     }
 
     // --- Macro expansion ---
@@ -716,18 +695,7 @@ fn toggle_mark(name: &str, mark: u64, interner: &Interner) -> Symbol {
 
 /// Strip all hygiene marks from a name (for fallback lookups).
 pub fn strip_all_marks(name: &str) -> &str {
-    match name.find('~') {
-        Some(pos) => {
-            let rest = &name[pos + 1..];
-            // Verify the rest is digits possibly interspersed with ~digits
-            if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit() || b == b'~') {
-                &name[..pos]
-            } else {
-                name
-            }
-        }
-        None => name,
-    }
+    ast::strip_marks(name)
 }
 
 // --- Immune set ---

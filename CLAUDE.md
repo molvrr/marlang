@@ -11,6 +11,8 @@ cargo run -p marlang-cli -- run file.mar           # Run a file
 cargo run -p marlang-cli -- typecheck file.mar     # Type check only
 cargo run -p marlang-cli -- typecheck file.mar --verbose  # Show inferred types
 cargo run -p marlang-cli -- disasm file.mar        # Disassemble bytecode
+cargo run -p marlang-cli -- expand file.mar        # Show macro-expanded source
+cargo run -p marlang-cli -- expand file.mar --clean # Expanded source without hygiene marks
 cargo run -p marlang-cli -- repl                   # Interactive REPL
 ```
 
@@ -32,7 +34,7 @@ port/crates/
   core/       - marlang-core: lexer, parser, string interning, spans
   types/      - marlang-types: HM type inference, exhaustiveness
   vm/         - marlang-vm: compiler, NaN-boxed VM, modules, FFI, schedulers, macros, TCP
-  cli/        - marlang-cli: clap-based CLI (run, repl, typecheck, disasm)
+  cli/        - marlang-cli: clap-based CLI (run, repl, typecheck, disasm, expand)
 stdlib/       - Standard library (.mar files, shared)
 examples/     - Example programs
 bench/        - Benchmark .mar programs
@@ -118,6 +120,15 @@ Declared in the prelude with a polymorphic return type so `throw` unifies with a
   ((throw msg k) -> (perform println (string-append "caught: " msg))))
 ```
 Without a handler, `throw` crashes the fiber. Note: `string->number` (defined in prelude) wraps the `__try-string->number` builtin and throws on parse failure.
+
+## Workflow
+
+### Verifying macro-using code
+When writing or modifying Marlang code that uses macros (e.g. `when`, `unless`, or any `defmacro`), always run `expand` to inspect the expanded output:
+```bash
+cargo run -p marlang-cli -- expand file.mar --clean
+```
+Check that the expansion looks correct before running or type-checking. This catches macro bugs early — the expanded form is exactly what the compiler and type checker will see.
 
 ## Adding Features
 

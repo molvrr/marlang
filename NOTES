@@ -2,10 +2,11 @@
 - [x] Rewrite CLAUDE.md with only needed info
 - [x] Do we actually need typeclasses? — No. Removed in favor of OCaml-style operator split.
 - [x] Exhaustiveness check effect handler
-- [ ] Macro expansion cli subcommand
+- [x] Rewrite stdlib to not call perform directly, only if call it if there's no wrapper available
+- [x] Macro expansion cli subcommand
 - [ ] Cleanup code
 - [ ] JIT
 - [ ] Can we override builtin effect handlers?
 - [ ] Cross process messaging
 - [ ] Rewrite examples to not call perform directly, only call it if there's no wrapper available
-- [ ] Rewrite stdlib to not call perform directly, only if call it if there's no wrapper available
+- [ ] Typecheck should only show last expression type, not every top-level expression
