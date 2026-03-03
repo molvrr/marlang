@@ -5,3 +5,4 @@
 - [ ] JIT
 - [ ] Can we override builtin effect handlers?
 - [ ] Cross process messaging
+- [ ] Exhaustiveness check effect handler

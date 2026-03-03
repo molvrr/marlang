@@ -1,3 +1,0 @@
-(import "std:string" as str)
-
-(str/substring 0 5 "mateus")
