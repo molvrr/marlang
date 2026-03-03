@@ -423,7 +423,7 @@
 (rl/SetTargetFPS 60)
 
 (define loop (lambda (f)
-  (when (rl/WindowShouldClose)
+  (when (not (rl/WindowShouldClose))
     (begin
       (rl/BeginDrawing)
       (rl/ClearBackground RAYWHITE)

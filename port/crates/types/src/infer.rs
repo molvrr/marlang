@@ -864,8 +864,10 @@ fn infer_if(
         });
     }
 
+    let if_span = elements[0].span();
     let cond_result = infer_expr(env, elements[1], interner)?;
-    let cond_unify = unify_with_context(&cond_result.ty, &t_bool(), "if condition")?;
+    let cond_unify = unify_with_context(&cond_result.ty, &t_bool(), "if condition")
+        .map_err(|e| e.with_span_if_missing(if_span))?;
     let s1 = compose_subst(&cond_unify, &cond_result.subst);
     let env1 = apply_subst_env(&s1, env);
 
@@ -880,7 +882,8 @@ fn infer_if(
         let then_type = apply_subst(&s3, &then_result.ty);
         let else_type = apply_subst(&s3, &else_result.ty);
 
-        let branch_unify = unify_with_context(&then_type, &else_type, "if branches")?;
+        let branch_unify = unify_with_context(&then_type, &else_type, "if branches")
+            .map_err(|e| e.with_span_if_missing(if_span))?;
         let final_subst = compose_subst(&branch_unify, &s3);
         let all_effects = combine_effect_rows(
             &combine_effect_rows(&cond_result.effects, &then_result.effects),
@@ -975,8 +978,10 @@ fn infer_let(
         let mut binding_type = value_result.ty;
 
         if let Some(ann_type) = annotated_type {
+            let binding_span = name_expr.span();
             let unify_result =
-                unify_with_context(&ann_type, &binding_type, &format!("let binding {name}"))?;
+                unify_with_context(&ann_type, &binding_type, &format!("let binding {name}"))
+                    .map_err(|e| e.with_span_if_missing(binding_span))?;
             subst = compose_subst(&unify_result, &subst);
             binding_type = apply_subst(&subst, &ann_type);
         }
@@ -1060,7 +1065,8 @@ fn infer_cond(
         if !is_symbol(test_expr, interner, "else") {
             let test_env = apply_subst_env(&subst, env);
             let test_result = infer_expr(&test_env, test_expr, interner)?;
-            let test_unify = unify_with_context(&test_result.ty, &t_bool(), "cond test")?;
+            let test_unify = unify_with_context(&test_result.ty, &t_bool(), "cond test")
+                .map_err(|e| e.with_span_if_missing(test_expr.span()))?;
             subst = compose_subst(&test_unify, &compose_subst(&test_result.subst, &subst));
             all_effects = combine_effect_rows(&all_effects, &test_result.effects);
         }
@@ -1075,7 +1081,8 @@ fn infer_cond(
         match &result_type {
             None => result_type = Some(clause_type),
             Some(rt) => {
-                let branch_unify = unify_with_context(rt, &clause_type, "cond branches")?;
+                let branch_unify = unify_with_context(rt, &clause_type, "cond branches")
+                    .map_err(|e| e.with_span_if_missing(clause_expr.span()))?;
                 subst = compose_subst(&branch_unify, &subst);
                 result_type = Some(apply_subst(&subst, rt));
             }
@@ -1226,7 +1233,8 @@ fn infer_match(
         match &result_type {
             None => result_type = Some(branch_type),
             Some(rt) => {
-                let branch_unify = unify_with_context(rt, &branch_type, "match branches")?;
+                let branch_unify = unify_with_context(rt, &branch_type, "match branches")
+                    .map_err(|e| e.with_span_if_missing(body_expr.span()))?;
                 subst = compose_subst(&branch_unify, &subst);
                 result_type = Some(apply_subst(&subst, rt));
             }
@@ -1707,7 +1715,9 @@ fn infer_application(
     );
 
     let fn_type = apply_subst(&subst, &fn_result.ty);
-    let app_subst = unify_with_context(&fn_type, &expected_fn_type, "function application")?;
+    let app_span = fn_expr.span();
+    let app_subst = unify_with_context(&fn_type, &expected_fn_type, "function application")
+        .map_err(|e| e.with_span_if_missing(app_span))?;
     let final_subst = compose_subst(&app_subst, &subst);
 
     // Propagate function effects
@@ -1877,8 +1887,9 @@ fn infer_perform(
     for (i, arg_type) in arg_types.iter().enumerate() {
         let at = apply_subst(&subst, arg_type);
         let pt = &instantiated_params[i];
-        let unify_result =
-            unify_with_context(&at, pt, &format!("argument {} of {op_name}", i + 1))?;
+        let perform_span = elements[0].span();
+        let unify_result = unify_with_context(&at, pt, &format!("argument {} of {op_name}", i + 1))
+            .map_err(|e| e.with_span_if_missing(perform_span))?;
         subst = compose_subst(&unify_result, &subst);
     }
 
@@ -2330,8 +2341,10 @@ fn process_define(
     let mut value_type = value_result.ty;
 
     if let Some(ref ann_type) = annotated_type {
+        let def_span = elements[1].span();
         let unify_result =
-            unify_with_context(ann_type, &value_type, &format!("definition of {name}"))?;
+            unify_with_context(ann_type, &value_type, &format!("definition of {name}"))
+                .map_err(|e| e.with_span_if_missing(def_span))?;
         subst = compose_subst(&unify_result, &subst);
         value_type = apply_subst(&subst, ann_type);
     }

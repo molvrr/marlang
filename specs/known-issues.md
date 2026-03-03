@@ -1,32 +1,28 @@
 # Known Issues — Rust Port
 
-**Last updated:** 2026-03-02
+**Last updated:** 2026-03-03
 
-Comprehensive catalog of known bugs, limitations, workarounds, and architectural debt in the Rust port (`port/`). Issues are ordered by severity. Issues #2, #3, and #4 are fixed.
+Comprehensive catalog of known bugs, limitations, workarounds, and architectural debt in the Rust port (`port/`). Issues are ordered by severity.
 
 ---
 
 ## Table of Contents
 
 1. [Runtime Performance Regression](#1-runtime-performance-regression)
-2. [~~Module Globals Workaround — Flat Namespace Collisions~~](#2-module-globals-workaround--flat-namespace-collisions) **[FIXED]**
-3. [~~Type Checker Rejects `net.mar`~~](#3-type-checker-rejects-netmar) **[FIXED]**
-4. [~~`handle`/`throw` Unreliable Across Scheduler Effects~~](#4-handlethrow-unreliable-across-scheduler-effects) **[FIXED]**
-5. [Recursive `define` + TCP Effects Hangs](#5-recursive-define--tcp-effects-hangs)
-6. [Cross-Scheduler TCP Not Supported](#6-cross-scheduler-tcp-not-supported)
-7. [`match` Branches Require Single Expressions](#7-match-branches-require-single-expressions)
-8. [Hygiene Mark Fallback Is Pervasive](#8-hygiene-mark-fallback-is-pervasive)
-9. [Silent Error Swallowing in Macro Expansion](#9-silent-error-swallowing-in-macro-expansion)
-10. [TCP Unavailable in Single-Threaded Scheduler](#10-tcp-unavailable-in-single-threaded-scheduler)
-11. [Sentinel `u64::MAX` for TCP Type Disambiguation](#11-sentinel-u64max-for-tcp-type-disambiguation)
-12. [`PopHandler` Opcode Is a No-Op](#12-pophandler-opcode-is-a-no-op)
-13. [Type Inference Fallbacks for Unknown Structs](#13-type-inference-fallbacks-for-unknown-structs)
-14. [Dead Code (`#[allow(dead_code)]`)](#14-dead-code-allowdead_code)
-15. [Per-Instruction Allocation in `PushConst`](#15-per-instruction-allocation-in-pushconst)
-16. [Closure Clone on Every Function Call](#16-closure-clone-on-every-function-call)
-17. [Mutex `unwrap()` in Hot Paths](#17-mutex-unwrap-in-hot-paths)
-18. [LSP Not Implemented](#18-lsp-not-implemented)
-19. [WASM & Web Editor Not Implemented](#19-wasm--web-editor-not-implemented)
+2. [Recursive `define` + TCP Effects Hangs](#2-recursive-define--tcp-effects-hangs)
+3. [Cross-Scheduler TCP Not Supported](#3-cross-scheduler-tcp-not-supported)
+4. [`match` Branches Require Single Expressions](#4-match-branches-require-single-expressions)
+5. [Hygiene Mark Fallback Is Pervasive](#5-hygiene-mark-fallback-is-pervasive)
+6. [Silent Error Swallowing in Macro Expansion](#6-silent-error-swallowing-in-macro-expansion)
+7. [TCP Unavailable in Single-Threaded Scheduler](#7-tcp-unavailable-in-single-threaded-scheduler)
+8. [Sentinel `u64::MAX` for TCP Type Disambiguation](#8-sentinel-u64max-for-tcp-type-disambiguation)
+9. [Type Inference Fallbacks for Unknown Structs](#9-type-inference-fallbacks-for-unknown-structs)
+10. [Dead Code (`#[allow(dead_code)]`)](#10-dead-code-allowdead_code)
+11. [Per-Instruction Allocation in `PushConst`](#11-per-instruction-allocation-in-pushconst)
+12. [Closure Clone on Every Function Call](#12-closure-clone-on-every-function-call)
+13. [Mutex `unwrap()` in Hot Paths](#13-mutex-unwrap-in-hot-paths)
+14. [LSP Not Implemented](#14-lsp-not-implemented)
+15. [WASM & Web Editor Not Implemented](#15-wasm--web-editor-not-implemented)
 
 ---
 
@@ -48,7 +44,7 @@ The Rust port is currently ~5x **slower** than the TypeScript VM, the opposite o
 
 1. **Per-instruction constant allocation** — The `PushConst` opcode (`vm.rs:646`) calls `ConstantValue::as_value()` on every execution, which allocates a new `Arc<VMObject>` for string constants. A `preconvert_constants()` function exists in `value.rs:327` that pre-converts an entire constant pool to NaN-boxed `Value`s, but it is only used in tests (`value.rs:420`). Constants should be pre-converted per-chunk and cached so `PushConst` becomes a simple array index.
 
-2. **Closure clone on every `Op::Call`** — At `vm.rs:1010`, every function call does `(**closure).clone()`, which copies the upvalue `Vec<Value>` (each element is a NaN-boxed `Value` — cheap for primitives, but triggers `Arc` refcount bumps for object values). For closures with many captured variables in hot loops, this is a per-call allocation. See also Issue #16.
+2. **Closure clone on every `Op::Call`** — At `vm.rs:1010`, every function call does `(**closure).clone()`, which copies the upvalue `Vec<Value>` (each element is a NaN-boxed `Value` — cheap for primitives, but triggers `Arc` refcount bumps for object values). For closures with many captured variables in hot loops, this is a per-call allocation. See also Issue #12.
 
 3. **`Arc` refcounting overhead** — Every `Value::clone()` for object values increments/decrements an atomic refcount. Hot loops with closures pay this cost on every call.
 
@@ -58,142 +54,7 @@ The Rust port is currently ~5x **slower** than the TypeScript VM, the opposite o
 
 ---
 
-### 2. ~~Module Globals Workaround — Flat Namespace Collisions~~ [FIXED]
-
-**Severity:** ~~Critical~~ Resolved
-**Status:** **FIXED** — module-scoped globals implemented
-
-The VM previously had a single flat global namespace. When two modules defined the same name and were imported with qualifiers, the first-imported module silently won for unqualified name collisions.
-
-#### Resolution
-
-Replaced the flat `vm.globals` with per-module globals tables:
-
-1. **`ModuleId` type** (`bytecode.rs`): `u32` index into the VM's `module_globals` table. `ROOT_MODULE = 0` for builtins + prelude + main program.
-
-2. **Per-module globals** (`vm.rs`): `vm.module_globals: Vec<FxHashMap<String, Value>>` indexed by `ModuleId`. `vm.current_module` tracks which module is being executed.
-
-3. **`module_id` on `FunctionPrototype` and `Closure`** (`bytecode.rs`, `object.rs`): Every compiled function carries its home module ID. Closures copy it from the prototype at creation for fast access.
-
-4. **`PushGlobal` resolution** (`vm.rs`): Looks up `module_globals[closure.module_id]` first, then falls back to `module_globals[ROOT_MODULE]`. Module closures always resolve their own globals even when called from a different module.
-
-5. **`SetGlobal`** (`vm.rs`): Writes to `module_globals[vm.current_module]`.
-
-6. **`merge_exports` simplified** (`modules.rs`): Qualified import branch only installs `"qualifier/name"` in the importing module's table. The old unqualified fallback (first-imported-wins) is removed.
-
-7. **`handle_import` refactored** (`modules.rs`): Allocates a new `ModuleId` for each module, switches `vm.current_module` during module execution, and restores it after. No more `std::mem::take` of globals.
-
-8. **Compiler propagation** (`compiler.rs`): All `Compiler::new` and `FunctionPrototype` constructors accept and propagate `module_id`.
-
-**Tests added:** `module_qualified_no_namespace_collision` (two modules with same name, independently accessible), `module_qualified_internal_cross_reference` (module functions calling each other), `module_qualified_no_unqualified_leak` (unqualified names not visible after qualified import).
-
----
-
-### 3. ~~Type Checker Rejects `net.mar` / `tcp.mar`~~ [FIXED]
-
-**Severity:** ~~Critical~~ Resolved
-**Status:** **FIXED** — Full-stack variadic function support + Option-wrapped TCP returns
-**Locations:**
-- `stdlib/net.mar:62` — 3-argument `string-append` call
-- `port/crates/types/src/builtins.rs:311-315` — `string-append` typed as binary
-- `port/crates/vm/src/builtins.rs:183-192` — `string-append` runtime is variadic
-- `port/crates/types/src/infer.rs:1403-1461` — `infer_application` (builds expected fn type)
-- `port/crates/types/src/unify.rs:112-133` — Arrow unification (param count check)
-- `port/crates/vm/src/runtime.rs` — TCP accept/recv returned raw `nil` instead of `Option` ADT
-
-#### Misdiagnosis
-
-The CLAUDE.md known issue states:
-
-> Running with type checking fails on parameterized types like `(Result String TcpSocket)` in effect signatures.
-
-**This is wrong.** Parameterized types in effect signatures work correctly. The expression `(Result String TcpSocket)` is correctly parsed as `Type::App { constructor: Const("Result"), args: [Const("String"), Const("TcpSocket")] }` by `parse_type_expr` in `infer.rs:175-184`.
-
-#### Actual Root Cause
-
-The error comes from `net.mar:62`:
-
-```lisp
-(define unwrap-or-throw (lambda (label result)
-  (match result
-    ((Ok v) v)
-    ((Err msg) (perform throw (string-append label ": " msg))))))
-```
-
-This calls `(string-append label ": " msg)` with **3 arguments**. The type system declares `string-append` as `(-> String String String)` (binary), but the runtime implementation is variadic.
-
-**Error path:**
-1. `infer_application` infers `string-append` as `(-> String String String)` — 2 params
-2. It builds `expected_fn_type` as `(-> t0 t1 t2 t3)` — 3 params from the 3 arguments
-3. `unify_with_context` tries to unify these arrow types
-4. `unify_internal` at `unify.rs:126-132` detects the param count mismatch:
-   ```
-   ArityMismatch { expected: 2, got: 3, context: "function type" }
-   ```
-5. `format_error` produces: `"function type: expected 2 arguments, got 3"`
-
-#### Resolution
-
-Full-stack variadic function support was implemented, going well beyond the minimal fix:
-
-1. **Type AST** (`ast.rs`): Added `rest: Option<Box<Type>>` field to `Type::Arrow`, representing the element type for variadic rest parameters. New helpers: `type_arrow_variadic`, `type_arrow_variadic_with_effects`.
-
-2. **Unification** (`unify.rs`): Arrow unification handles all `rest`/non-`rest` combinations. When a variadic arrow is unified with a non-variadic arrow, excess params unify against the rest element type.
-
-3. **Type inference** (`infer.rs`): Parses `(... T)` syntax in arrow type annotations. Detects `.` dot notation in lambda param lists to build variadic arrow types. Rest param gets type `(List T)` in the function body. Removed `list` from `FFI_VARIADIC_FUNCTIONS` — it now uses the general variadic type mechanism.
-
-4. **Builtins** (`builtins.rs`): `string-append` and `list` registered with proper variadic types: `(-> (... String) String)` and `(-> (... a) (List a))`. (`string-concat` was later removed as a redundant alias for `string-append`.)
-
-5. **Compiler** (`compiler.rs`): `compile_lambda` detects `.` in parameter list, sets `is_variadic: true` on `FunctionPrototype`, and gives the rest param a local slot.
-
-6. **VM** (`vm.rs`): `CALL` and `TAIL_CALL` handlers pack excess arguments into a `VMObject::List` for the rest-param local slot when calling a variadic closure.
-
-7. **Bytecode** (`bytecode.rs`): Added `is_variadic: bool` to `FunctionPrototype`.
-
-8. **Disassembler** (`debug.rs`): Shows `+` suffix for variadic functions (e.g., `<fn <lambda>/1+>`).
-
-**User syntax:**
-```lisp
-(lambda (a b . rest) body)          ; dot notation for rest params
-(-> String (... String) String)     ; variadic type annotation
-```
-
-**Tests added:** 10 type system tests, 11 VM tests covering variadic builtins, user-defined variadic lambdas, tail calls, arity errors, and type checking.
-
-#### Phase 2: Option-Wrapped TCP Returns
-
-The second issue preventing `tcp.mar` from type-checking: `tcp-accept` and `tcp-recv` returned raw `nil` at runtime but were typed as returning `TcpSocket` and `String` respectively. Code like `(= client nil)` forced `client : Unit` because `nil` is typed as `Unit` and `=` requires both args to be the same type.
-
-**Fix:**
-
-1. **Runtime** (`runtime.rs`): `tcp-accept` now returns `Some(socket)` or `None` (ADT values) instead of raw `Port` or `nil`. Same for `tcp-recv`: returns `Some(data)` or `None`. Added `make_some()`/`make_none()` helpers alongside existing `make_ok()`/`make_err()`.
-
-2. **Effect signatures** (`net.mar`): `tcp-accept` changed to `(-> TcpListener (Option TcpSocket))`, `tcp-recv` changed to `(-> TcpSocket (Option String))`. Added `tcp-close-listener` effect for type-safe listener close (previously `tcp-close` handled both sockets and listeners but was typed only for sockets).
-
-3. **Wrappers** (`net.mar`): `accept` and `recv` wrappers now return `(Option a)`. Added `close-listener` wrapper for `tcp-close-listener`.
-
-4. **Examples** (`tcp.mar`): Replaced `(= client nil)` with `(match (net/accept listener) (None ...) ((Some client) ...))` pattern matching. Uses `net/close-listener` for listener close.
-
-5. **Tests** (`tests.rs`): All 6 TCP tests updated to unwrap `Some`/match `None` from `tcp-accept` and `tcp-recv`.
-
-Both `net.mar` and `tcp.mar` now type check successfully and run correctly with and without `--no-typecheck`.
-
----
-
-### 4. ~~`handle`/`throw` Unreliable Across Scheduler Effects~~ [FIXED]
-
-**Severity:** ~~Critical~~ Resolved
-**Status:** **FIXED** — CPS handler dispatch (see `specs/cps-handler-dispatch.md`)
-
-The old architecture used Rust-stack-recursive `run_with_handler` for deep handler semantics. When a scheduler-suspending effect fired inside a handler clause, the Rust stack was unwound but VM state survived, causing the handler context to be lost on resume.
-
-**Resolution:** Handler dispatch is now entirely in VM state via `HandlerDispatch` markers — no Rust stack involvement. `Op::PushHandler` installs the handler frame + dispatch marker and calls the body thunk inline. `Op::Perform` for user handlers captures the continuation, unwinds, re-installs the handler (deep semantics), and calls the clause inline. `Op::Return` detects dispatch markers and applies return handlers. `Op::Resume` was simplified to inline continuation restore.
-
-Additionally, `throw` was removed from the scheduler's `HANDLED_EFFECTS` — unhandled `throw` now gives "Uncaught exception: ..." instead of going through the scheduler. The deleted functions `run_with_handler` and `run_restored_continuation` are no longer needed.
-
----
-
-### 5. Recursive `define` + TCP Effects Hangs
+### 2. Recursive `define` + TCP Effects Hangs
 
 **Severity:** High
 **Status:** Open
@@ -201,7 +62,7 @@ Additionally, `throw` was removed from the scheduler's `HANDLED_EFFECTS` — unh
 
 Using `(define f (lambda () ... (f)))` inside `fiber-spawn` where the recursive body performs TCP effects (accept, recv, send, close) causes the program to hang. The `define` sets a global on the scheduler thread's VM, but after a TCP effect suspends/resumes the fiber, `PUSH_GLOBAL "f"` may not resolve correctly.
 
-**Related to:** Issue #2's flat globals root cause is now fixed (module-scoped globals), but this hang may persist due to globals being cloned per-thread — a `define` on one scheduler thread is invisible to others after work stealing. Issue #4 (handler state lost across scheduler suspension) is also fixed, so the remaining cause is likely the per-thread globals snapshot divergence.
+**Related to:** The flat globals root cause is now fixed (module-scoped globals), but this hang may persist due to globals being cloned per-thread — a `define` on one scheduler thread is invisible to others after work stealing. Handler state lost across scheduler suspension is also fixed, so the remaining cause is likely the per-thread globals snapshot divergence.
 
 **Workaround:** Unroll the recursion, or avoid combining recursive `define` with scheduler-suspending effects.
 
@@ -209,7 +70,7 @@ Using `(define f (lambda () ... (f)))` inside `fiber-spawn` where the recursive 
 
 ## Medium Impact
 
-### 6. Cross-Scheduler TCP Not Supported
+### 3. Cross-Scheduler TCP Not Supported
 
 **Severity:** Medium
 **Status:** Open — by design, deferred
@@ -228,7 +89,7 @@ In practice, sockets are used by the fiber that created them (same scheduler). C
 
 ---
 
-### 7. `match` Branches Require Single Expressions
+### 4. `match` Branches Require Single Expressions
 
 **Severity:** Medium
 **Status:** By design — but common source of user confusion
@@ -250,7 +111,7 @@ Match branches must be `(pattern body)` where body is a single expression. Multi
 
 ---
 
-### 8. Hygiene Mark Fallback Is Pervasive
+### 5. Hygiene Mark Fallback Is Pervasive
 
 **Severity:** Medium
 **Status:** Open — suggests incomplete hygiene propagation
@@ -268,7 +129,7 @@ Six different locations across four subsystems implement the same "strip `~N` hy
 
 ---
 
-### 9. Silent Error Swallowing in Macro Expansion
+### 6. Silent Error Swallowing in Macro Expansion
 
 **Severity:** Medium
 **Status:** Open
@@ -290,7 +151,7 @@ All failures defer to runtime with the comment pattern: `"let runtime handle"`. 
 
 ## Low Impact / Tech Debt
 
-### 10. TCP Unavailable in Single-Threaded Scheduler
+### 7. TCP Unavailable in Single-Threaded Scheduler
 
 **Severity:** Low (by design)
 **Status:** Won't fix — architectural decision
@@ -306,7 +167,7 @@ TCP requires Tokio's async runtime, which is only available in the multi-threade
 
 ---
 
-### 11. Sentinel `u64::MAX` for TCP Type Disambiguation
+### 8. Sentinel `u64::MAX` for TCP Type Disambiguation
 
 **Severity:** Low (tech debt)
 **Status:** Open
@@ -323,14 +184,7 @@ Should use a proper enum variant instead of a magic number.
 
 ---
 
-### 12. ~~`PopHandler` Opcode Is a No-Op~~ [FIXED]
-
-**Severity:** ~~Low~~ Resolved
-**Status:** **FIXED** — `PopHandler` now pops handler frames and dispatch markers as part of CPS handler dispatch (Issue #4 fix).
-
----
-
-### 13. Type Inference Fallbacks for Unknown Structs
+### 9. Type Inference Fallbacks for Unknown Structs
 
 **Severity:** Low
 **Status:** Open
@@ -345,7 +199,7 @@ This means struct-related type errors are never caught at type-check time.
 
 ---
 
-### 14. Dead Code (`#[allow(dead_code)]`)
+### 10. Dead Code (`#[allow(dead_code)]`)
 
 **Severity:** Low (tech debt)
 **Status:** Open
@@ -364,7 +218,7 @@ Several items are declared but not actively used:
 
 ---
 
-### 15. Per-Instruction Allocation in `PushConst`
+### 11. Per-Instruction Allocation in `PushConst`
 
 **Severity:** Low (performance, related to Issue #1)
 **Status:** Open
@@ -376,7 +230,7 @@ A `preconvert_constants()` function exists in `value.rs:327` that batch-converts
 
 ---
 
-### 16. Closure Clone on Every Function Call
+### 12. Closure Clone on Every Function Call
 
 **Severity:** Low (performance, related to Issue #1)
 **Status:** Open
@@ -390,7 +244,7 @@ For hot recursive closures (e.g., `fib`), this is a significant per-call cost. A
 
 ---
 
-### 17. Mutex `unwrap()` in Hot Paths
+### 13. Mutex `unwrap()` in Hot Paths
 
 **Severity:** Low (robustness)
 **Status:** Open
@@ -402,7 +256,7 @@ In practice, `STRUCT_REGISTRY` is only written during FFI setup and read during 
 
 ---
 
-### 18. LSP Not Implemented
+### 14. LSP Not Implemented
 
 **Severity:** Low (feature gap, not a bug)
 **Status:** Phase 9 — not started
@@ -412,7 +266,7 @@ The `tower-lsp` server, analyzer, hover, definition, completion, and diagnostics
 
 ---
 
-### 19. WASM & Web Editor Not Implemented
+### 15. WASM & Web Editor Not Implemented
 
 **Severity:** Low (feature gap, not a bug)
 **Status:** Phase 10 — not started

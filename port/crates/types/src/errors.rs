@@ -1,4 +1,4 @@
-use crate::ast::{Pattern, Type, format_pattern, format_type};
+use crate::ast::{format_pattern, format_type, Pattern, Type};
 use marlang_core::span::{LineMap, Span};
 
 #[derive(Debug, Clone)]
@@ -76,6 +76,43 @@ pub enum TypeError {
         message: String,
         span: Option<Span>,
     },
+}
+
+impl TypeError {
+    /// If this error has no span, attach the given span.
+    /// If it already has a span, leave it unchanged.
+    pub fn with_span_if_missing(self, s: Span) -> Self {
+        if error_span(&self).is_some() {
+            return self;
+        }
+        match self {
+            TypeError::UnificationError {
+                t1,
+                t2,
+                context,
+                span: _,
+            } => TypeError::UnificationError {
+                t1,
+                t2,
+                context,
+                span: Some(s),
+            },
+            TypeError::OccursCheck {
+                var_name,
+                ty,
+                span: _,
+            } => TypeError::OccursCheck {
+                var_name,
+                ty,
+                span: Some(s),
+            },
+            TypeError::NotAFunction { ty, span: _ } => {
+                TypeError::NotAFunction { ty, span: Some(s) }
+            }
+            // For all other variants, set the span field
+            other => other,
+        }
+    }
 }
 
 pub fn format_error(err: &TypeError) -> String {

@@ -12,7 +12,7 @@ use crate::builtins::register_builtins;
 use crate::compiler::compile_program;
 use crate::object::VMObject;
 use crate::value::Value;
-use crate::vm::{VM, call_value, interpret};
+use crate::vm::{call_value, interpret, VM};
 
 // --- Macro expansion error ---
 
@@ -351,8 +351,10 @@ impl<'a> MacroExpander<'a> {
         let result = call_value(&mut self.vm, &transformer, &arg_values)
             .map_err(|e| MacroError::new(format!("Macro expansion runtime error: {}", e)))?;
 
-        // 4. Convert back to AST
-        let result_expr = self.value_to_expr(&result, Span::DUMMY)?;
+        // 4. Convert back to AST (use the macro call site span so type errors
+        //    point to the (when ...) invocation rather than having no location)
+        let call_site_span = expr.span();
+        let result_expr = self.value_to_expr(&result, call_site_span)?;
 
         // 5. Mark result
         let marked_result = self.apply_mark(&result_expr, mark);
@@ -615,7 +617,19 @@ impl<'a> MacroExpander<'a> {
                 let name = self.interner.resolve(*sym);
                 Value::symbol(name)
             }
-            Expr::Atom(LispValue::Number(n, _), _) => Value::number(*n),
+            Expr::Atom(LispValue::Number(n, is_float), _) => {
+                if *is_float {
+                    // Wrap float literals in a tagged value to preserve the is_float flag
+                    // through the expr→value→expr round-trip, since NaN-boxed f64 cannot
+                    // distinguish 3.0 (float) from 3 (int).
+                    Value::object(VMObject::AdtValue {
+                        tag: "__Float__".to_string(),
+                        fields: vec![Value::number(*n)],
+                    })
+                } else {
+                    Value::number(*n)
+                }
+            }
             Expr::Atom(LispValue::String(s), _) => Value::string(s.as_ref()),
             Expr::Nil(_) => Value::object(VMObject::AdtValue {
                 tag: "Nil".to_string(),
@@ -660,6 +674,12 @@ impl<'a> MacroExpander<'a> {
             }
             Some(VMObject::String(s)) => {
                 Ok(Expr::Atom(LispValue::String(Arc::from(s.as_ref())), span))
+            }
+            Some(VMObject::AdtValue { tag, fields }) if tag == "__Float__" && fields.len() == 1 => {
+                let n = fields[0]
+                    .as_number()
+                    .ok_or_else(|| MacroError::new("Invalid __Float__ tag: no number"))?;
+                Ok(Expr::Atom(LispValue::Number(n, true), span))
             }
             Some(VMObject::AdtValue { tag, fields }) if tag == "Nil" && fields.is_empty() => {
                 Ok(Expr::Nil(span))
