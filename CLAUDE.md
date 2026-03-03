@@ -119,12 +119,6 @@ Declared in the prelude with a polymorphic return type so `throw` unifies with a
 ```
 Without a handler, `throw` crashes the fiber. Note: `string->number` (defined in prelude) wraps the `__try-string->number` builtin and throws on parse failure.
 
-## Known Issues
-
-1. **Recursive `define` + TCP effects hangs:** Using `(define f (lambda () ... (f)))` inside `fiber-spawn` where the body does TCP effects causes hangs. Workaround: unroll recursion or avoid combining recursive `define` with scheduler-suspending effects.
-
-2. **`match` branches require single expressions:** Multi-expression match bodies need explicit `(begin ...)` wrapping.
-
 ## Adding Features
 
 ### New Special Form

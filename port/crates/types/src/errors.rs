@@ -1,4 +1,4 @@
-use crate::ast::{format_pattern, format_type, Pattern, Type};
+use crate::ast::{Pattern, Type, format_pattern, format_type};
 use marlang_core::span::{LineMap, Span};
 
 #[derive(Debug, Clone)]

@@ -9,7 +9,7 @@ Comprehensive catalog of known bugs, limitations, workarounds, and architectural
 ## Table of Contents
 
 1. [Runtime Performance Regression](#1-runtime-performance-regression)
-2. [Recursive `define` + TCP Effects Hangs](#2-recursive-define--tcp-effects-hangs)
+2. [Per-Thread Globals Divergence with `define` in Nested Scopes](#2-per-thread-globals-divergence-with-define-in-nested-scopes)
 3. [Cross-Scheduler TCP Not Supported](#3-cross-scheduler-tcp-not-supported)
 4. [`match` Branches Require Single Expressions](#4-match-branches-require-single-expressions)
 5. [Hygiene Mark Fallback Is Pervasive](#5-hygiene-mark-fallback-is-pervasive)
@@ -54,17 +54,26 @@ The Rust port is currently ~5x **slower** than the TypeScript VM, the opposite o
 
 ---
 
-### 2. Recursive `define` + TCP Effects Hangs
+### 2. Per-Thread Globals Divergence with `define` in Nested Scopes
 
-**Severity:** High
-**Status:** Open
-**Locations:** `vm.rs:669` (`PushGlobal`), `runtime.rs` (fiber resume after TCP suspend)
+**Severity:** Medium (downgraded from High — primary case resolved)
+**Status:** Mostly fixed — narrow edge case remains
+**Locations:** `runtime.rs:2486-2513` (per-thread globals clone), `compiler.rs:747` (nested-scope define fallthrough)
 
-Using `(define f (lambda () ... (f)))` inside `fiber-spawn` where the recursive body performs TCP effects (accept, recv, send, close) causes the program to hang. The `define` sets a global on the scheduler thread's VM, but after a TCP effect suspends/resumes the fiber, `PUSH_GLOBAL "f"` may not resolve correctly.
+The original issue — recursive `(define f (lambda () ... (f)))` inside `fiber-spawn` with TCP effects causing hangs — is **resolved**. Three fixes addressed the root causes:
 
-**Related to:** The flat globals root cause is now fixed (module-scoped globals), but this hang may persist due to globals being cloned per-thread — a `define` on one scheduler thread is invisible to others after work stealing. Handler state lost across scheduler suspension is also fixed, so the remaining cause is likely the per-thread globals snapshot divergence.
+1. **Module-scoped globals** (`dc69208`) eliminated flat namespace collisions.
+2. **Handler state preservation** across scheduler suspension is fixed.
+3. **Letrec local defines** (`ffc2c7b`) — leading `define` forms in lambda bodies now compile as locals with shared upvalue cells (`Arc<Mutex<Value>>`). Recursive calls resolve via `PushUpvalue`, not `PushGlobal`, so per-thread globals divergence is irrelevant for this pattern.
 
-**Workaround:** Unroll the recursion, or avoid combining recursive `define` with scheduler-suspending effects.
+**Remaining edge case:** Each scheduler thread still gets an independent `module_globals.clone()` at startup (`runtime.rs:2486`). A `SetGlobal` on one thread is invisible to others. This can manifest if:
+
+- A `define` occurs in a **nested scope** (e.g., inside `let`, where `scope_depth > 0`) or in a **handler-clause lambda** (where `prescan_leading_defines` is skipped) — these still emit `SetGlobal` instead of `SetLocal`.
+- A fiber referencing that global gets spawned to a different scheduler thread via round-robin (`pick_scheduler`).
+
+Note: TCP suspend/resume sends the fiber back to the **same** scheduler thread, so TCP-specific hangs should not occur. The edge case only applies to cross-scheduler fiber spawning with nested-scope defines.
+
+**Workaround:** Use leading `define` forms in lambda bodies (which get the letrec treatment), or avoid `define` inside nested scopes like `let` when fibers may be distributed across scheduler threads.
 
 ---
 
