@@ -44,26 +44,49 @@ fn pure_result(ty: Type) -> InferResult {
     }
 }
 
+// ===== Branch Unification =====
+
+/// Unify a new branch type with the accumulated result type.
+///
+/// On the first branch (`result_type` is `None`), simply stores the type.
+/// On subsequent branches, unifies with the existing type and composes the
+/// resulting substitution into `subst`.
+fn unify_branch(
+    result_type: &mut Option<Type>,
+    subst: &mut Substitution,
+    branch_type: Type,
+    context: &str,
+    span: Option<Span>,
+) -> Result<(), TypeError> {
+    match result_type {
+        None => *result_type = Some(branch_type),
+        Some(rt) => {
+            let u = unify_with_context(rt, &branch_type, context).map_err(|e| {
+                if let Some(s) = span {
+                    e.with_span_if_missing(s)
+                } else {
+                    e
+                }
+            })?;
+            *subst = compose_subst(&u, subst);
+            *result_type = Some(apply_subst(subst, rt));
+        }
+    }
+    Ok(())
+}
+
 // ===== AST Helpers =====
 
-fn list_to_array<'a>(expr: &'a Expr) -> Vec<&'a Expr> {
-    ast::list_to_array(expr)
-}
-
-fn get_symbol<'a>(expr: &'a Expr, interner: &'a Interner) -> Option<&'a str> {
-    ast::get_symbol_name(expr, interner)
-}
-
 fn is_symbol(expr: &Expr, interner: &Interner, name: &str) -> bool {
-    get_symbol(expr, interner) == Some(name)
+    ast::get_symbol_name(expr, interner) == Some(name)
 }
 
 /// Get the symbol name of the first element of a list expression.
 fn get_first_symbol<'a>(expr: &'a Expr, interner: &'a Interner) -> Option<&'a str> {
     if let Expr::List { .. } = expr {
-        let elements = list_to_array(expr);
+        let elements = ast::list_to_array(expr);
         if !elements.is_empty() {
-            return get_symbol(elements[0], interner);
+            return ast::get_symbol_name(elements[0], interner);
         }
     }
     None
@@ -72,18 +95,18 @@ fn get_first_symbol<'a>(expr: &'a Expr, interner: &'a Interner) -> Option<&'a st
 /// Check if an expression is a `(define name value)` form and extract the name.
 fn is_define_form<'a>(expr: &'a Expr, interner: &'a Interner) -> Option<&'a str> {
     if let Expr::List { .. } = expr {
-        let elements = list_to_array(expr);
+        let elements = ast::list_to_array(expr);
         if elements.len() == 3 {
             if is_symbol(elements[0], interner, "define") {
                 // Simple define: (define name value)
-                if let Some(name) = get_symbol(elements[1], interner) {
+                if let Some(name) = ast::get_symbol_name(elements[1], interner) {
                     return Some(name);
                 }
                 // Annotated define: (define (name : Type) value)
                 if let Expr::List { .. } = elements[1] {
-                    let name_elements = list_to_array(elements[1]);
+                    let name_elements = ast::list_to_array(elements[1]);
                     if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
-                        return get_symbol(name_elements[0], interner);
+                        return ast::get_symbol_name(name_elements[0], interner);
                     }
                 }
             }
@@ -95,10 +118,10 @@ fn is_define_form<'a>(expr: &'a Expr, interner: &'a Interner) -> Option<&'a str>
 /// Extract the annotation type from a `(define (name : Type) value)` form, if present.
 fn get_define_annotation(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Option<Type> {
     if let Expr::List { .. } = expr {
-        let elements = list_to_array(expr);
+        let elements = ast::list_to_array(expr);
         if elements.len() == 3 && is_symbol(elements[0], interner, "define") {
             if let Expr::List { .. } = elements[1] {
-                let name_elements = list_to_array(elements[1]);
+                let name_elements = ast::list_to_array(elements[1]);
                 if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
                     return parse_type_annotation(name_elements[2], env, interner).ok();
                 }
@@ -146,9 +169,8 @@ fn infer_body_with_defines(
         let name = is_define_form(def_expr, interner).unwrap().to_string();
         let ann_type = get_define_annotation(def_expr, &define_env, interner);
         let placeholder = ann_type.unwrap_or_else(fresh_type_var);
-        define_env = extend_env(
-            &define_env,
-            &name,
+        define_env.bindings.insert(
+            name.clone(),
             TypeScheme {
                 quantified_vars: vec![],
                 ty: placeholder.clone(),
@@ -162,7 +184,7 @@ fn infer_body_with_defines(
     let mut all_effects = effect_row_empty();
 
     for (i, &def_expr) in define_exprs.iter().enumerate() {
-        let elements = list_to_array(def_expr);
+        let elements = ast::list_to_array(def_expr);
         let value_expr = elements[2];
         let applied_env = apply_subst_env(&subst, &define_env);
         let result = infer_expr(&applied_env, value_expr, interner)?;
@@ -195,7 +217,7 @@ fn infer_body_with_defines(
                 ty: t_unit(),
             }
         };
-        final_env = extend_env(&final_env, name, final_type);
+        final_env.bindings.insert(name.clone(), final_type);
     }
 
     // Phase 4: Infer remaining (non-define) body expressions
@@ -204,17 +226,9 @@ fn infer_body_with_defines(
         return Ok((subst, t_unit(), all_effects));
     }
 
-    let mut body_type = t_unit();
-    for (i, body_expr) in rest_exprs.iter().enumerate() {
-        let env_for_body = apply_subst_env(&subst, &final_env);
-        let result = infer_expr(&env_for_body, body_expr, interner)?;
-        subst = compose_subst(&result.subst, &subst);
-        all_effects = combine_effect_rows(&all_effects, &result.effects);
-        if i == rest_exprs.len() - 1 {
-            body_type = result.ty;
-        }
-    }
-
+    let (subst, all_effects, types) =
+        infer_exprs(&final_env, rest_exprs, interner, subst, all_effects)?;
+    let body_type = types.into_iter().last().unwrap_or_else(t_unit);
     Ok((subst, body_type, all_effects))
 }
 
@@ -224,36 +238,50 @@ fn infer_body_sequence(
     exprs: &[&Expr],
     interner: &Interner,
 ) -> Result<(Substitution, Type, EffectRow), TypeError> {
-    let mut subst = empty_subst();
-    let mut last_type = t_unit();
-    let mut all_effects = effect_row_empty();
+    let (subst, effects, types) =
+        infer_exprs(env, exprs, interner, empty_subst(), effect_row_empty())?;
+    let last_type = types.into_iter().last().unwrap_or_else(t_unit);
+    Ok((subst, last_type, effects))
+}
 
-    for (i, expr) in exprs.iter().enumerate() {
-        let env_for_body = apply_subst_env(&subst, env);
-        let result = infer_expr(&env_for_body, expr, interner)?;
+// ===== Shared Inference Helpers =====
+
+/// Infer a sequence of expressions, threading substitutions and collecting effects.
+///
+/// This is the core loop that appears throughout inference: for each expression,
+/// apply the current substitution to the environment, infer, compose substitutions,
+/// and combine effect rows.
+///
+/// Returns `(final_subst, combined_effects, inferred_types)`.
+fn infer_exprs(
+    env: &TypeEnv,
+    exprs: &[&Expr],
+    interner: &Interner,
+    mut subst: Substitution,
+    mut effects: EffectRow,
+) -> Result<(Substitution, EffectRow, Vec<Type>), TypeError> {
+    let mut types = Vec::with_capacity(exprs.len());
+    for expr in exprs {
+        let env_applied = apply_subst_env(&subst, env);
+        let result = infer_expr(&env_applied, expr, interner)?;
         subst = compose_subst(&result.subst, &subst);
-        all_effects = combine_effect_rows(&all_effects, &result.effects);
-        if i == exprs.len() - 1 {
-            last_type = result.ty;
-        }
+        effects = combine_effect_rows(&effects, &result.effects);
+        types.push(result.ty);
     }
-
-    Ok((subst, last_type, all_effects))
+    Ok((subst, effects, types))
 }
 
 // ===== Variadic Arithmetic =====
 
-struct VariadicArithInfo {
-    min_args: usize,
-}
-
-fn variadic_arith_ops() -> HashMap<&'static str, VariadicArithInfo> {
-    let mut m = HashMap::new();
-    m.insert("+", VariadicArithInfo { min_args: 0 });
-    m.insert("*", VariadicArithInfo { min_args: 0 });
-    m.insert("-", VariadicArithInfo { min_args: 1 });
-    m.insert("/", VariadicArithInfo { min_args: 2 });
-    m
+/// Returns the minimum argument count for a variadic arithmetic operator,
+/// or `None` if the name is not a variadic arithmetic op.
+fn variadic_arith_min_args(op: &str) -> Option<usize> {
+    match op {
+        "+" | "*" => Some(0),
+        "-" => Some(1),
+        "/" => Some(2),
+        _ => None,
+    }
 }
 
 const FFI_VARIADIC_FUNCTIONS: &[&str] = &["ffi-call", "struct-new", "struct-get", "struct-set"];
@@ -263,9 +291,9 @@ const FFI_VARIADIC_FUNCTIONS: &[&str] = &["ffi-call", "struct-new", "struct-get"
 /// Check if an expression is an `__effect_row` form (produced by the parser for `{...}`).
 fn is_effect_row_expr(expr: &Expr, interner: &Interner) -> bool {
     if let Expr::List { .. } = expr {
-        let elements = list_to_array(expr);
+        let elements = ast::list_to_array(expr);
         if !elements.is_empty() {
-            if let Some("__effect_row") = get_symbol(elements[0], interner) {
+            if let Some("__effect_row") = ast::get_symbol_name(elements[0], interner) {
                 return true;
             }
         }
@@ -279,13 +307,13 @@ fn is_effect_row_expr(expr: &Expr, interner: &Interner) -> bool {
 /// `(__effect_row IO __row_var:e)` → Open { effects: ["IO"], row_var: "e" }
 /// `(__effect_row __row_var:e)` → Open { effects: [], row_var: "e" }
 fn parse_effect_row_expr(expr: &Expr, interner: &Interner) -> Result<EffectRow, TypeError> {
-    let elements = list_to_array(expr);
+    let elements = ast::list_to_array(expr);
     // elements[0] is "__effect_row"
     let mut effects = Vec::new();
     let mut row_var: Option<String> = None;
 
     for e in &elements[1..] {
-        if let Some(name) = get_symbol(e, interner) {
+        if let Some(name) = ast::get_symbol_name(e, interner) {
             if let Some(stripped) = name.strip_prefix("__row_var:") {
                 row_var = Some(stripped.to_string());
             } else {
@@ -337,12 +365,12 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
             span: Some(expr.span()),
         }),
         Expr::List { .. } => {
-            let elements = list_to_array(expr);
+            let elements = ast::list_to_array(expr);
             if elements.is_empty() {
                 return Ok(t_unit());
             }
 
-            let first_sym = get_symbol(elements[0], interner);
+            let first_sym = ast::get_symbol_name(elements[0], interner);
 
             // Arrow type: (-> a b c) or (-> a (... b) c) or (-> a {IO} b) for variadic/effectful
             if first_sym == Some("->") {
@@ -370,9 +398,9 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                     }
                     // Check for (... T) rest type syntax
                     if let Expr::List { .. } = e {
-                        let sub_elems = list_to_array(e);
+                        let sub_elems = ast::list_to_array(e);
                         if sub_elems.len() == 2 {
-                            if let Some("...") = get_symbol(sub_elems[0], interner) {
+                            if let Some("...") = ast::get_symbol_name(sub_elems[0], interner) {
                                 if rest_type.is_some() {
                                     return Err(TypeError::InvalidTypeAnnotation {
                                         message:
@@ -428,11 +456,12 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                         span: Some(expr.span()),
                     });
                 }
-                let var_name =
-                    get_symbol(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
+                let var_name = ast::get_symbol_name(elements[1], interner).ok_or(
+                    TypeError::InvalidTypeAnnotation {
                         message: "mu variable must be a symbol".into(),
                         span: Some(elements[1].span()),
-                    })?;
+                    },
+                )?;
                 let body = parse_type_expr(elements[2], env, interner)?;
                 return Ok(type_rec(var_name, body));
             }
@@ -459,9 +488,9 @@ fn parse_type_annotation(
     interner: &Interner,
 ) -> Result<Type, TypeError> {
     if let Expr::List { .. } = expr {
-        let elements = list_to_array(expr);
+        let elements = ast::list_to_array(expr);
         if !elements.is_empty() {
-            if let Some("=>") = get_symbol(elements[0], interner) {
+            if let Some("=>") = ast::get_symbol_name(elements[0], interner) {
                 return Err(TypeError::InvalidTypeAnnotation {
                     message: "'=> (constrained types)' declarations are not supported".into(),
                     span: Some(expr.span()),
@@ -497,18 +526,19 @@ fn parse_pattern(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Patt
             Ok(Pattern::Literal(LiteralPattern::String(s.to_string())))
         }
         Expr::List { .. } => {
-            let elements = list_to_array(expr);
+            let elements = ast::list_to_array(expr);
             if elements.is_empty() {
                 return Err(TypeError::InvalidTypeAnnotation {
                     message: "Empty pattern".into(),
                     span: Some(expr.span()),
                 });
             }
-            let ctor_name =
-                get_symbol(elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
+            let ctor_name = ast::get_symbol_name(elements[0], interner).ok_or(
+                TypeError::InvalidTypeAnnotation {
                     message: "Pattern constructor must be a symbol".into(),
                     span: Some(elements[0].span()),
-                })?;
+                },
+            )?;
             let mut args = Vec::new();
             for e in &elements[1..] {
                 args.push(parse_pattern(e, env, interner)?);
@@ -536,12 +566,12 @@ pub fn infer_expr(
         Expr::Nil(_) => Ok(pure_result(t_unit())),
         Expr::Atom(value, _) => infer_atom(env, value, expr.span(), interner),
         Expr::List { .. } => {
-            let elements = list_to_array(expr);
+            let elements = ast::list_to_array(expr);
             if elements.is_empty() {
                 return Ok(pure_result(t_unit()));
             }
 
-            let first_sym = get_symbol(elements[0], interner);
+            let first_sym = ast::get_symbol_name(elements[0], interner);
 
             if let Some(sym) = first_sym {
                 match sym {
@@ -639,13 +669,14 @@ fn infer_define(
 
     // Check for type annotation: (define (name : Type) value)
     if let Expr::List { .. } = name_expr {
-        let name_elements = list_to_array(name_expr);
+        let name_elements = ast::list_to_array(name_expr);
         if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
-            let name =
-                get_symbol(name_elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
+            let name = ast::get_symbol_name(name_elements[0], interner).ok_or(
+                TypeError::InvalidTypeAnnotation {
                     message: "Expected symbol before :".into(),
                     span: Some(name_elements[0].span()),
-                })?;
+                },
+            )?;
 
             let annotated_type = parse_type_annotation(name_elements[2], env, interner)?;
             let value_result = infer_expr(env, value_expr, interner)?;
@@ -664,12 +695,12 @@ fn infer_define(
         }
     }
 
-    // Regular define
-    let name = get_symbol(name_expr, interner).ok_or(TypeError::InvalidTypeAnnotation {
-        message: "define expects a symbol name".into(),
-        span: Some(elements[1].span()),
-    })?;
-    let _ = name; // suppress unused warning
+    // Regular define — validate that the name is a symbol
+    let _name =
+        ast::get_symbol_name(name_expr, interner).ok_or(TypeError::InvalidTypeAnnotation {
+            message: "define expects a symbol name".into(),
+            span: Some(elements[1].span()),
+        })?;
 
     let result = infer_expr(env, value_expr, interner)?;
     Ok(InferResult {
@@ -698,7 +729,7 @@ fn infer_lambda(
     let params_expr = elements[1];
     let body_exprs = &elements[2..];
 
-    let param_list = list_to_array(params_expr);
+    let param_list = ast::list_to_array(params_expr);
     let mut params: Vec<(String, Type)> = Vec::new();
     let mut rest_param: Option<(String, Type)> = None; // (name, element_type)
     let mut param_env = child_env(env);
@@ -706,7 +737,7 @@ fn infer_lambda(
     // Detect dot notation: (a b . rest) => param_list = [a, b, ., rest]
     let dot_pos = param_list
         .iter()
-        .position(|p| get_symbol(p, interner) == Some("."));
+        .position(|p| ast::get_symbol_name(p, interner) == Some("."));
 
     let (required_params, rest_param_expr) = if let Some(pos) = dot_pos {
         if pos + 1 >= param_list.len() {
@@ -729,9 +760,9 @@ fn infer_lambda(
     for param in required_params {
         // Check for annotated param: (x : Int)
         if let Expr::List { .. } = param {
-            let param_elements = list_to_array(param);
+            let param_elements = ast::list_to_array(param);
             if param_elements.len() == 3 && is_symbol(param_elements[1], interner, ":") {
-                let name = get_symbol(param_elements[0], interner).ok_or(
+                let name = ast::get_symbol_name(param_elements[0], interner).ok_or(
                     TypeError::InvalidTypeAnnotation {
                         message: "Parameter name must be a symbol".into(),
                         span: Some(param_elements[0].span()),
@@ -739,9 +770,8 @@ fn infer_lambda(
                 )?;
                 let ty = parse_type_expr(param_elements[2], env, interner)?;
                 params.push((name.to_string(), ty.clone()));
-                param_env = extend_env(
-                    &param_env,
-                    name,
+                param_env.bindings.insert(
+                    name.to_string(),
                     TypeScheme {
                         quantified_vars: vec![],
                         ty,
@@ -751,15 +781,15 @@ fn infer_lambda(
             }
         }
 
-        let name = get_symbol(param, interner).ok_or(TypeError::InvalidTypeAnnotation {
-            message: "Parameter must be a symbol".into(),
-            span: Some(param.span()),
-        })?;
+        let name =
+            ast::get_symbol_name(param, interner).ok_or(TypeError::InvalidTypeAnnotation {
+                message: "Parameter must be a symbol".into(),
+                span: Some(param.span()),
+            })?;
         let param_type = fresh_type_var();
         params.push((name.to_string(), param_type.clone()));
-        param_env = extend_env(
-            &param_env,
-            name,
+        param_env.bindings.insert(
+            name.to_string(),
             TypeScheme {
                 quantified_vars: vec![],
                 ty: param_type,
@@ -771,9 +801,9 @@ fn infer_lambda(
     if let Some(rest_expr) = rest_param_expr {
         // Check for annotated rest param: (rest : Type) — Type is the element type
         let (rest_name, elem_type) = if let Expr::List { .. } = rest_expr {
-            let param_elements = list_to_array(rest_expr);
+            let param_elements = ast::list_to_array(rest_expr);
             if param_elements.len() == 3 && is_symbol(param_elements[1], interner, ":") {
-                let name = get_symbol(param_elements[0], interner).ok_or(
+                let name = ast::get_symbol_name(param_elements[0], interner).ok_or(
                     TypeError::InvalidTypeAnnotation {
                         message: "Rest parameter name must be a symbol".into(),
                         span: Some(param_elements[0].span()),
@@ -788,18 +818,19 @@ fn infer_lambda(
                 });
             }
         } else {
-            let name = get_symbol(rest_expr, interner).ok_or(TypeError::InvalidTypeAnnotation {
-                message: "Rest parameter must be a symbol".into(),
-                span: Some(rest_expr.span()),
-            })?;
+            let name = ast::get_symbol_name(rest_expr, interner).ok_or(
+                TypeError::InvalidTypeAnnotation {
+                    message: "Rest parameter must be a symbol".into(),
+                    span: Some(rest_expr.span()),
+                },
+            )?;
             (name, fresh_type_var())
         };
 
         // The rest parameter has type (List elem_type) in the function body
         let list_type = t_list(elem_type.clone());
-        param_env = extend_env(
-            &param_env,
-            rest_name,
+        param_env.bindings.insert(
+            rest_name.to_string(),
             TypeScheme {
                 quantified_vars: vec![],
                 ty: list_type,
@@ -812,7 +843,7 @@ fn infer_lambda(
     // Determine which body expressions to process (unwrap a single begin if present).
     let effective_body: Vec<&Expr> = if body_exprs.len() == 1 {
         if let Some("begin") = get_first_symbol(body_exprs[0], interner) {
-            let begin_elements = list_to_array(body_exprs[0]);
+            let begin_elements = ast::list_to_array(body_exprs[0]);
             begin_elements[1..].to_vec()
         } else {
             body_exprs.to_vec()
@@ -924,13 +955,13 @@ fn infer_let(
     let bindings_expr = elements[1];
     let body_exprs = &elements[2..];
 
-    let bindings = list_to_array(bindings_expr);
+    let bindings = ast::list_to_array(bindings_expr);
     let mut let_env = child_env(env);
     let mut subst = empty_subst();
     let mut all_effects = effect_row_empty();
 
     for binding in &bindings {
-        let pair = list_to_array(binding);
+        let pair = ast::list_to_array(binding);
         if pair.len() != 2 {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "let binding must be (name value)".into(),
@@ -945,9 +976,9 @@ fn infer_let(
         let mut annotated_type: Option<Type> = None;
 
         if let Expr::List { .. } = name_expr {
-            let name_elements = list_to_array(name_expr);
+            let name_elements = ast::list_to_array(name_expr);
             if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
-                let n = get_symbol(name_elements[0], interner).ok_or(
+                let n = ast::get_symbol_name(name_elements[0], interner).ok_or(
                     TypeError::InvalidTypeAnnotation {
                         message: "Expected symbol before :".into(),
                         span: Some(name_elements[0].span()),
@@ -962,10 +993,12 @@ fn infer_let(
                 });
             }
         } else {
-            let n = get_symbol(name_expr, interner).ok_or(TypeError::InvalidTypeAnnotation {
-                message: "let binding name must be a symbol".into(),
-                span: Some(name_expr.span()),
-            })?;
+            let n = ast::get_symbol_name(name_expr, interner).ok_or(
+                TypeError::InvalidTypeAnnotation {
+                    message: "let binding name must be a symbol".into(),
+                    span: Some(name_expr.span()),
+                },
+            )?;
             name = n.to_string();
         }
 
@@ -988,22 +1021,13 @@ fn infer_let(
 
         let env_for_gen = apply_subst_env(&subst, &let_env);
         let scheme = generalize(&env_for_gen, &apply_subst(&subst, &binding_type));
-        let_env = extend_env(&let_env, &name, scheme);
+        let_env.bindings.insert(name.to_string(), scheme);
     }
 
     // Infer body
-    let mut body_type = t_unit();
-    for (i, body_expr) in body_exprs.iter().enumerate() {
-        let env_for_body = apply_subst_env(&subst, &let_env);
-        let result = infer_expr(&env_for_body, body_expr, interner)?;
-
-        subst = compose_subst(&result.subst, &subst);
-        all_effects = combine_effect_rows(&all_effects, &result.effects);
-
-        if i == body_exprs.len() - 1 {
-            body_type = result.ty;
-        }
-    }
+    let (subst, all_effects, types) =
+        infer_exprs(&let_env, body_exprs, interner, subst, all_effects)?;
+    let body_type = types.into_iter().last().unwrap_or_else(t_unit);
 
     Ok(InferResult {
         ty: apply_subst(&subst, &body_type),
@@ -1051,7 +1075,7 @@ fn infer_cond(
     let mut all_effects = effect_row_empty();
 
     for clause_expr in clauses {
-        let clause = list_to_array(clause_expr);
+        let clause = ast::list_to_array(clause_expr);
         if clause.len() != 2 {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "cond clause must be (test result)".into(),
@@ -1077,16 +1101,13 @@ fn infer_cond(
         all_effects = combine_effect_rows(&all_effects, &expr_result.effects);
 
         let clause_type = apply_subst(&subst, &expr_result.ty);
-
-        match &result_type {
-            None => result_type = Some(clause_type),
-            Some(rt) => {
-                let branch_unify = unify_with_context(rt, &clause_type, "cond branches")
-                    .map_err(|e| e.with_span_if_missing(clause_expr.span()))?;
-                subst = compose_subst(&branch_unify, &subst);
-                result_type = Some(apply_subst(&subst, rt));
-            }
-        }
+        unify_branch(
+            &mut result_type,
+            &mut subst,
+            clause_type,
+            "cond branches",
+            Some(clause_expr.span()),
+        )?;
     }
 
     Ok(InferResult {
@@ -1182,7 +1203,7 @@ fn infer_match(
     let mut parsed_patterns: Vec<Pattern> = Vec::new();
 
     for branch_expr in branches {
-        let branch_elements = list_to_array(branch_expr);
+        let branch_elements = ast::list_to_array(branch_expr);
         if branch_elements.len() != 2 {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "match branch must be (pattern body)".into(),
@@ -1214,9 +1235,8 @@ fn infer_match(
         // Extend env with pattern bindings
         let mut branch_env = apply_subst_env(&subst, env);
         for (name, ty) in &pattern_check.bindings {
-            branch_env = extend_env(
-                &branch_env,
-                name,
+            branch_env.bindings.insert(
+                name.to_string(),
                 TypeScheme {
                     quantified_vars: vec![],
                     ty: apply_subst(&subst, ty),
@@ -1229,16 +1249,13 @@ fn infer_match(
         all_effects = combine_effect_rows(&all_effects, &body_result.effects);
 
         let branch_type = apply_subst(&subst, &body_result.ty);
-
-        match &result_type {
-            None => result_type = Some(branch_type),
-            Some(rt) => {
-                let branch_unify = unify_with_context(rt, &branch_type, "match branches")
-                    .map_err(|e| e.with_span_if_missing(body_expr.span()))?;
-                subst = compose_subst(&branch_unify, &subst);
-                result_type = Some(apply_subst(&subst, rt));
-            }
-        }
+        unify_branch(
+            &mut result_type,
+            &mut subst,
+            branch_type,
+            "match branches",
+            Some(body_expr.span()),
+        )?;
     }
 
     // Check exhaustiveness
@@ -1375,12 +1392,12 @@ fn infer_variadic_arith(
     op_span: Span,
     interner: &Interner,
 ) -> Result<InferResult, TypeError> {
-    let ops = variadic_arith_ops();
-    let info = &ops[op_name];
+    let min_args =
+        variadic_arith_min_args(op_name).expect("infer_variadic_arith called with non-arith op");
 
-    if arg_exprs.len() < info.min_args {
+    if arg_exprs.len() < min_args {
         return Err(TypeError::ArityMismatch {
-            expected: info.min_args,
+            expected: min_args,
             got: arg_exprs.len(),
             context: op_name.to_string(),
             span: Some(op_span),
@@ -1391,17 +1408,8 @@ fn infer_variadic_arith(
         return Ok(pure_result(t_int()));
     }
 
-    let mut subst = empty_subst();
-    let mut all_effects = effect_row_empty();
-    let mut arg_types = Vec::new();
-
-    for arg_expr in arg_exprs {
-        let env_for_arg = apply_subst_env(&subst, env);
-        let arg_result = infer_expr(&env_for_arg, arg_expr, interner)?;
-        subst = compose_subst(&arg_result.subst, &subst);
-        all_effects = combine_effect_rows(&all_effects, &arg_result.effects);
-        arg_types.push(arg_result.ty);
-    }
+    let (mut subst, all_effects, arg_types) =
+        infer_exprs(env, arg_exprs, interner, empty_subst(), effect_row_empty())?;
 
     let mut unified_type = apply_subst(&subst, &arg_types[0]);
     for (i, at) in arg_types.iter().enumerate().skip(1) {
@@ -1447,11 +1455,12 @@ fn infer_ffi_application(
             });
         }
 
-        let lib_name =
-            get_symbol(arg_exprs[0], interner).ok_or_else(|| TypeError::InvalidTypeAnnotation {
+        let lib_name = ast::get_symbol_name(arg_exprs[0], interner).ok_or_else(|| {
+            TypeError::InvalidTypeAnnotation {
                 message: "ffi-call first argument must be a library variable".into(),
                 span: Some(arg_exprs[0].span()),
-            })?;
+            }
+        })?;
 
         let foreign_fn_name =
             get_string_literal(arg_exprs[1]).ok_or_else(|| TypeError::InvalidTypeAnnotation {
@@ -1493,29 +1502,14 @@ fn infer_ffi_application(
             });
         }
 
-        let mut subst = empty_subst();
-        let mut all_effects = effect_row_empty();
+        // Infer all args (lib, fn-name, then call args)
+        let (mut subst, all_effects, all_arg_types) =
+            infer_exprs(env, arg_exprs, interner, empty_subst(), effect_row_empty())?;
 
-        // Infer lib arg
-        let env_for_lib = apply_subst_env(&subst, env);
-        let lib_result = infer_expr(&env_for_lib, arg_exprs[0], interner)?;
-        subst = compose_subst(&lib_result.subst, &subst);
-        all_effects = combine_effect_rows(&all_effects, &lib_result.effects);
-
-        // Infer fn-name arg
-        let env_for_fn = apply_subst_env(&subst, env);
-        let fn_result = infer_expr(&env_for_fn, arg_exprs[1], interner)?;
-        subst = compose_subst(&fn_result.subst, &subst);
-        all_effects = combine_effect_rows(&all_effects, &fn_result.effects);
-
-        // Infer and unify each call arg with declared param type
-        for (arg_expr, param_type) in call_args.iter().zip(&decl_params) {
-            let env_for_arg = apply_subst_env(&subst, env);
-            let arg_result = infer_expr(&env_for_arg, arg_expr, interner)?;
-            subst = compose_subst(&arg_result.subst, &subst);
-            all_effects = combine_effect_rows(&all_effects, &arg_result.effects);
-
-            let arg_type = apply_subst(&subst, &arg_result.ty);
+        // Unify each call arg type with its declared param type
+        let call_arg_types = &all_arg_types[2..]; // skip lib and fn-name
+        for (arg_type, param_type) in call_arg_types.iter().zip(&decl_params) {
+            let arg_type = apply_subst(&subst, arg_type);
             let unify_result = unify_with_context(
                 &arg_type,
                 param_type,
@@ -1532,24 +1526,15 @@ fn infer_ffi_application(
     }
 
     // Non-ffi-call variadic functions: struct-new, struct-get, struct-set, list
-    let mut subst = empty_subst();
-    let mut all_effects = effect_row_empty();
-    let mut arg_types = Vec::new();
-
-    for arg_expr in arg_exprs {
-        let env_for_arg = apply_subst_env(&subst, env);
-        let arg_result = infer_expr(&env_for_arg, arg_expr, interner)?;
-        subst = compose_subst(&arg_result.subst, &subst);
-        all_effects = combine_effect_rows(&all_effects, &arg_result.effects);
-        arg_types.push(arg_result.ty);
-    }
+    let (mut subst, all_effects, arg_types) =
+        infer_exprs(env, arg_exprs, interner, empty_subst(), effect_row_empty())?;
 
     let result_type = match fn_name {
         "struct-new" => {
             // (struct-new StructDef val1 val2 ...)
             // First arg is the struct def, remaining are field values
             if !arg_exprs.is_empty() {
-                if let Some(sym_name) = get_symbol(arg_exprs[0], interner) {
+                if let Some(sym_name) = ast::get_symbol_name(arg_exprs[0], interner) {
                     if let Some(info) = lookup_ffi_struct_info(env, sym_name) {
                         let value_args = &arg_types[1..]; // skip struct def arg
                         if value_args.len() != info.fields.len() {
@@ -1674,8 +1659,8 @@ fn infer_application(
     let arg_exprs = &elements[1..];
 
     // Check for variadic arithmetic
-    if let Some(fn_name) = get_symbol(fn_expr, interner) {
-        if variadic_arith_ops().contains_key(fn_name) {
+    if let Some(fn_name) = ast::get_symbol_name(fn_expr, interner) {
+        if variadic_arith_min_args(fn_name).is_some() {
             return infer_variadic_arith(env, fn_name, arg_exprs, fn_expr.span(), interner);
         }
         if FFI_VARIADIC_FUNCTIONS.contains(&fn_name) {
@@ -1684,25 +1669,16 @@ fn infer_application(
     }
 
     let fn_result = infer_expr(env, fn_expr, interner)?;
-    let mut subst = fn_result.subst;
-    let mut all_effects = fn_result.effects;
-    let mut arg_types = Vec::new();
 
-    for arg_expr in arg_exprs {
-        let env_for_arg = apply_subst_env(&subst, env);
-        let arg_result = infer_expr(&env_for_arg, arg_expr, interner)?;
-        subst = compose_subst(&arg_result.subst, &subst);
-        all_effects = combine_effect_rows(&all_effects, &arg_result.effects);
-        arg_types.push(arg_result.ty);
-    }
+    let (subst, mut all_effects, arg_types) =
+        infer_exprs(env, arg_exprs, interner, fn_result.subst, fn_result.effects)?;
 
     let result_type = fresh_type_var();
     let fresh_eff_var = fresh_effect_row_var();
     // Zero-arg calls get an implicit Unit param to match thunk types (-> Unit X),
-    // Zero-arg calls get an implicit Unit param to match thunk types (-> Unit X),
     // but not for variadic functions (which can legitimately take zero args).
-    let fn_type_resolved = apply_subst(&subst, &fn_result.ty);
-    let is_variadic = matches!(&fn_type_resolved, Type::Arrow { rest: Some(_), .. });
+    let fn_type = apply_subst(&subst, &fn_result.ty);
+    let is_variadic = matches!(&fn_type, Type::Arrow { rest: Some(_), .. });
     let expected_params: Vec<Type> = if arg_types.is_empty() && !is_variadic {
         vec![t_unit()]
     } else {
@@ -1714,7 +1690,6 @@ fn infer_application(
         result_type.clone(),
     );
 
-    let fn_type = apply_subst(&subst, &fn_result.ty);
     let app_span = fn_expr.span();
     let app_subst = unify_with_context(&fn_type, &expected_fn_type, "function application")
         .map_err(|e| e.with_span_if_missing(app_span))?;
@@ -1749,7 +1724,7 @@ fn infer_data_def(
 // ===== Effect System =====
 
 fn parse_effect_op(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<EffectOp, TypeError> {
-    let elements = list_to_array(expr);
+    let elements = ast::list_to_array(expr);
     if elements.len() != 2 {
         return Err(TypeError::InvalidTypeAnnotation {
             message: "Effect operation must be (name (-> ParamType ResultType))".into(),
@@ -1757,17 +1732,18 @@ fn parse_effect_op(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Ef
         });
     }
 
-    let op_name = get_symbol(elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
-        message: "Effect operation name must be a symbol".into(),
-        span: Some(elements[0].span()),
-    })?;
+    let op_name =
+        ast::get_symbol_name(elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
+            message: "Effect operation name must be a symbol".into(),
+            span: Some(elements[0].span()),
+        })?;
 
     let type_expr = elements[1];
     let mut arrow_expr = type_expr;
 
     // Check for constrained type: (=> constraints... arrow-type) — just skip to the arrow type
     if let Expr::List { .. } = type_expr {
-        let type_elements = list_to_array(type_expr);
+        let type_elements = ast::list_to_array(type_expr);
         if !type_elements.is_empty() && is_symbol(type_elements[0], interner, "=>") {
             if type_elements.len() < 3 {
                 return Err(TypeError::InvalidTypeAnnotation {
@@ -1836,10 +1812,11 @@ fn infer_perform(
         });
     }
 
-    let op_name = get_symbol(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
-        message: "perform operation name must be a symbol".into(),
-        span: Some(elements[1].span()),
-    })?;
+    let op_name =
+        ast::get_symbol_name(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
+            message: "perform operation name must be a symbol".into(),
+            span: Some(elements[1].span()),
+        })?;
 
     let op_name_str = op_name.to_string();
     let (effect, op) = if let Some((effect_name, op_name_only)) = op_name_str.rsplit_once('/') {
@@ -1871,17 +1848,8 @@ fn infer_perform(
     };
 
     let arg_exprs = &elements[2..];
-    let mut subst = empty_subst();
-    let mut all_effects = effect_row_empty();
-    let mut arg_types = Vec::new();
-
-    for arg_expr in arg_exprs {
-        let env_for_arg = apply_subst_env(&subst, env);
-        let arg_result = infer_expr(&env_for_arg, arg_expr, interner)?;
-        subst = compose_subst(&arg_result.subst, &subst);
-        all_effects = combine_effect_rows(&all_effects, &arg_result.effects);
-        arg_types.push(arg_result.ty);
-    }
+    let (mut subst, mut all_effects, arg_types) =
+        infer_exprs(env, arg_exprs, interner, empty_subst(), effect_row_empty())?;
 
     // Allow zero-arg perform on thunk-typed ops: (perform op) when op has params=[Unit]
     let is_implicit_unit_thunk =
@@ -1927,6 +1895,82 @@ fn infer_perform(
     })
 }
 
+/// Resolve an effect operation name to its (effect_name, op_name) pair.
+///
+/// Handles both qualified (`Effect/op`) and unqualified (`op`) names.
+/// For unqualified names, looks up the operation across all effects and
+/// errors if ambiguous.
+fn resolve_effect_op(
+    env: &TypeEnv,
+    op_name: &str,
+    span: Span,
+) -> Result<(String, String), TypeError> {
+    if let Some((e, o)) = op_name.rsplit_once('/') {
+        return Ok((e.to_string(), o.to_string()));
+    }
+    let possible_effects = find_effects_with_op(env, op_name);
+    if possible_effects.len() > 1 {
+        return Err(TypeError::AmbiguousEffectOperation {
+            op_name: op_name.to_string(),
+            effects: possible_effects.clone(),
+            suggestion: format!("({}/{})", possible_effects[0], op_name),
+            span: Some(span),
+        });
+    }
+    let (effect, _op) = lookup_effect_op(env, op_name).ok_or(TypeError::UndefinedVariable {
+        name: format!("effect operation '{op_name}' in handler (declare with (effect EffectName ({op_name} : ArgType -> ResultType)))"),
+        span: Some(span),
+    })?;
+    Ok((effect.name.clone(), op_name.to_string()))
+}
+
+/// Check that all operations of each handled effect are covered.
+fn check_handler_exhaustiveness(
+    env: &TypeEnv,
+    handled_ops_by_effect: &HashMap<String, Vec<String>>,
+    span: Span,
+) -> Result<(), TypeError> {
+    for (effect_name, handled_op_names) in handled_ops_by_effect {
+        let Some(effect_decl) = lookup_effect(env, effect_name) else {
+            continue;
+        };
+        let missing: Vec<String> = effect_decl
+            .operations
+            .iter()
+            .filter(|op| !handled_op_names.iter().any(|h| h == &op.name))
+            .map(|op| op.name.clone())
+            .collect();
+        if !missing.is_empty() {
+            return Err(TypeError::NonExhaustiveHandlers {
+                effect_name: effect_name.clone(),
+                missing_ops: missing,
+                span: Some(span),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Remove handled effects from the body's effect row.
+fn remove_handled_effects(
+    body_effects: &EffectRow,
+    handled_ops_by_effect: &HashMap<String, Vec<String>>,
+) -> EffectRow {
+    if handled_ops_by_effect.is_empty() {
+        return body_effects.clone();
+    }
+    let remaining: Vec<String> = body_effects
+        .effects()
+        .iter()
+        .filter(|e| !handled_ops_by_effect.contains_key(*e))
+        .cloned()
+        .collect();
+    match body_effects {
+        EffectRow::Open { row_var, .. } => effect_row_open(remaining, row_var.clone()),
+        EffectRow::Closed(_) => effect_row_closed(remaining),
+    }
+}
+
 fn infer_handle(
     env: &TypeEnv,
     elements: &[&Expr],
@@ -1946,12 +1990,10 @@ fn infer_handle(
 
     let mut subst = body_result.subst.clone();
     let mut result_type: Option<Type> = None;
-    // Map from effect name -> list of handled operation names
     let mut handled_ops_by_effect: HashMap<String, Vec<String>> = HashMap::new();
 
-    let handler_clauses = &elements[2..];
-    for clause in handler_clauses {
-        let clause_elements = list_to_array(clause);
+    for clause in &elements[2..] {
+        let clause_elements = ast::list_to_array(clause);
         if clause_elements.len() != 3 {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "handle clause must be ((pattern) -> body)".into(),
@@ -1967,187 +2009,116 @@ fn infer_handle(
 
         let pattern = clause_elements[0];
         let body = clause_elements[2];
+        let Expr::List { .. } = pattern else { continue };
+        let pattern_elements = ast::list_to_array(pattern);
+        if pattern_elements.is_empty() {
+            return Err(TypeError::InvalidTypeAnnotation {
+                message: "Handler pattern must have operation name".into(),
+                span: Some(pattern.span()),
+            });
+        }
 
-        if let Expr::List { .. } = pattern {
-            let pattern_elements = list_to_array(pattern);
-            if pattern_elements.is_empty() {
-                return Err(TypeError::InvalidTypeAnnotation {
-                    message: "Handler pattern must have operation name".into(),
-                    span: Some(pattern.span()),
-                });
+        let Some(op_name) = ast::get_symbol_name(pattern_elements[0], interner) else {
+            continue;
+        };
+
+        if op_name == "return" {
+            // Return handler — bind the return variable and infer the body
+            let mut handler_env = apply_subst_env(&subst, env);
+            if pattern_elements.len() >= 2 {
+                if let Some(return_var_name) = ast::get_symbol_name(pattern_elements[1], interner) {
+                    handler_env.bindings.insert(
+                        return_var_name.to_string(),
+                        TypeScheme {
+                            quantified_vars: vec![],
+                            ty: apply_subst(&subst, &body_result.ty),
+                        },
+                    );
+                }
             }
+            let handler_result = infer_expr(&handler_env, body, interner)?;
+            subst = compose_subst(&handler_result.subst, &subst);
+            let handler_type = apply_subst(&subst, &handler_result.ty);
+            unify_branch(
+                &mut result_type,
+                &mut subst,
+                handler_type,
+                "handler return types",
+                None,
+            )?;
+            continue;
+        }
 
-            if let Some(op_name) = get_symbol(pattern_elements[0], interner) {
-                if op_name == "return" {
-                    // Return handler
-                    let mut handler_env = apply_subst_env(&subst, env);
-                    if pattern_elements.len() >= 2 {
-                        if let Some(return_var_name) = get_symbol(pattern_elements[1], interner) {
-                            let return_type = apply_subst(&subst, &body_result.ty);
-                            handler_env = extend_env(
-                                &handler_env,
-                                return_var_name,
-                                TypeScheme {
-                                    quantified_vars: vec![],
-                                    ty: return_type,
-                                },
-                            );
-                        }
-                    }
+        // Effect operation handler
+        let (effect_name, op_name_only) =
+            resolve_effect_op(env, op_name, pattern_elements[0].span())?;
 
-                    let handler_result = infer_expr(&handler_env, body, interner)?;
-                    subst = compose_subst(&handler_result.subst, &subst);
+        let op_info = lookup_effect_op_in_effect(env, &effect_name, &op_name_only).ok_or(
+            TypeError::UndefinedVariable {
+                name: format!("effect operation '{op_name_only}' in effect '{effect_name}'"),
+                span: Some(pattern_elements[0].span()),
+            },
+        )?;
+        // Validate that the effect itself exists
+        let _effect_decl =
+            lookup_effect(env, &effect_name).ok_or(TypeError::UndefinedVariable {
+                name: format!("effect '{effect_name}' not found"),
+                span: Some(pattern_elements[0].span()),
+            })?;
 
-                    let handler_type = apply_subst(&subst, &handler_result.ty);
-                    match &result_type {
-                        None => result_type = Some(handler_type),
-                        Some(rt) => {
-                            let u = unify_with_context(rt, &handler_type, "handler return types")?;
-                            subst = compose_subst(&u, &subst);
-                            result_type = Some(apply_subst(&subst, rt));
-                        }
-                    }
-                    continue;
-                }
+        handled_ops_by_effect
+            .entry(effect_name.clone())
+            .or_default()
+            .push(op_name_only);
 
-                // Effect handler
-                let op_name_str = op_name.to_string();
-                let (effect_name, op_name_only) = if let Some((e, o)) = op_name_str.rsplit_once('/')
-                {
-                    (e.to_string(), o.to_string())
-                } else {
-                    let possible_effects = find_effects_with_op(env, op_name);
-                    if possible_effects.len() > 1 {
-                        return Err(TypeError::AmbiguousEffectOperation {
-                            op_name: op_name.to_string(),
-                            effects: possible_effects.clone(),
-                            suggestion: format!("({}/{})", possible_effects[0], op_name),
-                            span: Some(pattern_elements[0].span()),
-                        });
-                    }
-                    let (effect, _op) = lookup_effect_op(env, op_name).ok_or(TypeError::UndefinedVariable {
-                        name: format!("effect operation '{op_name}' in handler (declare with (effect EffectName ({op_name} : ArgType -> ResultType)))"),
-                        span: Some(pattern_elements[0].span()),
-                    })?;
-                    (effect.name.clone(), op_name.to_string())
-                };
-
-                let op_info = lookup_effect_op_in_effect(env, &effect_name, &op_name_only).ok_or(
-                    TypeError::UndefinedVariable {
-                        name: format!(
-                            "effect operation '{op_name_only}' in effect '{effect_name}'"
-                        ),
-                        span: Some(pattern_elements[0].span()),
-                    },
-                )?;
-                let _effect_decl =
-                    lookup_effect(env, &effect_name).ok_or(TypeError::UndefinedVariable {
-                        name: format!("effect '{effect_name}' not found"),
-                        span: Some(pattern_elements[0].span()),
-                    })?;
-
-                // Track which operations are handled per effect
-                handled_ops_by_effect
-                    .entry(effect_name.clone())
-                    .or_default()
-                    .push(op_name_only);
-
-                let mut handler_env = apply_subst_env(&subst, env);
-                let arg_patterns = &pattern_elements[1..pattern_elements.len().saturating_sub(1)];
-                let continuation_pattern = pattern_elements.last();
-
-                // Bind arguments
-                for (i, arg_p) in arg_patterns.iter().enumerate() {
-                    if let Some(arg_name) = get_symbol(arg_p, interner) {
-                        if i < op_info.params.len() {
-                            handler_env = extend_env(
-                                &handler_env,
-                                arg_name,
-                                TypeScheme {
-                                    quantified_vars: vec![],
-                                    ty: op_info.params[i].clone(),
-                                },
-                            );
-                        }
-                    }
-                }
-
-                // Bind continuation
-                if let Some(cont_p) = continuation_pattern {
-                    if let Some(k_name) = get_symbol(cont_p, interner) {
-                        let k_type = type_arrow(
-                            vec![op_info.result.clone()],
-                            apply_subst(&subst, &body_result.ty),
-                        );
-                        handler_env = extend_env(
-                            &handler_env,
-                            k_name,
-                            TypeScheme {
-                                quantified_vars: vec![],
-                                ty: k_type,
-                            },
-                        );
-                    }
-                }
-
-                let handler_result = infer_expr(&handler_env, body, interner)?;
-                subst = compose_subst(&handler_result.subst, &subst);
-
-                let handler_type = apply_subst(&subst, &handler_result.ty);
-                match &result_type {
-                    None => result_type = Some(handler_type),
-                    Some(rt) => {
-                        let u = unify_with_context(rt, &handler_type, "handler return types")?;
-                        subst = compose_subst(&u, &subst);
-                        result_type = Some(apply_subst(&subst, rt));
-                    }
+        // Build handler environment: bind operation arguments and continuation
+        let mut handler_env = apply_subst_env(&subst, env);
+        let arg_patterns = &pattern_elements[1..pattern_elements.len().saturating_sub(1)];
+        for (i, arg_p) in arg_patterns.iter().enumerate() {
+            if let Some(arg_name) = ast::get_symbol_name(arg_p, interner) {
+                if i < op_info.params.len() {
+                    handler_env.bindings.insert(
+                        arg_name.to_string(),
+                        TypeScheme {
+                            quantified_vars: vec![],
+                            ty: op_info.params[i].clone(),
+                        },
+                    );
                 }
             }
         }
+        if let Some(cont_p) = pattern_elements.last() {
+            if let Some(k_name) = ast::get_symbol_name(cont_p, interner) {
+                let k_type = type_arrow(
+                    vec![op_info.result.clone()],
+                    apply_subst(&subst, &body_result.ty),
+                );
+                handler_env.bindings.insert(
+                    k_name.to_string(),
+                    TypeScheme {
+                        quantified_vars: vec![],
+                        ty: k_type,
+                    },
+                );
+            }
+        }
+
+        let handler_result = infer_expr(&handler_env, body, interner)?;
+        subst = compose_subst(&handler_result.subst, &subst);
+        let handler_type = apply_subst(&subst, &handler_result.ty);
+        unify_branch(
+            &mut result_type,
+            &mut subst,
+            handler_type,
+            "handler return types",
+            None,
+        )?;
     }
 
     let final_type = result_type.unwrap_or_else(|| body_result.ty.clone());
 
-    // Check exhaustiveness: if any operation from an effect is handled,
-    // ALL operations from that effect must be handled.
-
-    for (effect_name, handled_op_names) in &handled_ops_by_effect {
-        if let Some(effect_decl) = lookup_effect(env, effect_name) {
-            let all_op_names: Vec<&str> = effect_decl
-                .operations
-                .iter()
-                .map(|op| op.name.as_str())
-                .collect();
-            let missing: Vec<String> = all_op_names
-                .iter()
-                .filter(|op| !handled_op_names.iter().any(|h| h == *op))
-                .map(|op| op.to_string())
-                .collect();
-            if !missing.is_empty() {
-                return Err(TypeError::NonExhaustiveHandlers {
-                    effect_name: effect_name.clone(),
-                    missing_ops: missing,
-                    span: Some(elements[0].span()),
-                });
-            }
-        }
-    }
-
-    // Remove handled effects (using effect names, not operation names)
-    let mut remaining_effects = body_result.effects.clone();
-    if !handled_ops_by_effect.is_empty() {
-        let handled_effect_names: Vec<&String> = handled_ops_by_effect.keys().collect();
-        let remaining: Vec<String> = remaining_effects
-            .effects()
-            .iter()
-            .filter(|e| !handled_effect_names.contains(e))
-            .cloned()
-            .collect();
-        remaining_effects = match &remaining_effects {
-            EffectRow::Open { row_var, .. } => effect_row_open(remaining, row_var.clone()),
-            EffectRow::Closed(_) => effect_row_closed(remaining),
-        };
-    }
+    check_handler_exhaustiveness(env, &handled_ops_by_effect, elements[0].span())?;
+    let remaining_effects = remove_handled_effects(&body_result.effects, &handled_ops_by_effect);
 
     Ok(InferResult {
         ty: apply_subst(&subst, &final_type),
@@ -2208,8 +2179,8 @@ fn process_data_def(
     let mut type_params: Vec<String> = Vec::new();
 
     if let Expr::List { .. } = type_expr {
-        let type_elements = list_to_array(type_expr);
-        type_name = get_symbol(type_elements[0], interner)
+        let type_elements = ast::list_to_array(type_expr);
+        type_name = ast::get_symbol_name(type_elements[0], interner)
             .ok_or(TypeError::InvalidTypeAnnotation {
                 message: "data type name must be a symbol".into(),
                 span: Some(type_elements[0].span()),
@@ -2217,7 +2188,7 @@ fn process_data_def(
             .to_string();
         for te in &type_elements[1..] {
             type_params.push(
-                get_symbol(te, interner)
+                ast::get_symbol_name(te, interner)
                     .ok_or(TypeError::InvalidTypeAnnotation {
                         message: "type parameter must be a symbol".into(),
                         span: Some(te.span()),
@@ -2226,7 +2197,7 @@ fn process_data_def(
             );
         }
     } else {
-        type_name = get_symbol(type_expr, interner)
+        type_name = ast::get_symbol_name(type_expr, interner)
             .ok_or(TypeError::InvalidTypeAnnotation {
                 message: "data type name must be a symbol".into(),
                 span: Some(type_expr.span()),
@@ -2256,8 +2227,8 @@ fn process_data_def(
                 });
             }
             Expr::List { .. } => {
-                let ctor_elements = list_to_array(ctor_expr);
-                let ctor_name = get_symbol(ctor_elements[0], interner)
+                let ctor_elements = ast::list_to_array(ctor_expr);
+                let ctor_name = ast::get_symbol_name(ctor_elements[0], interner)
                     .ok_or(TypeError::InvalidTypeAnnotation {
                         message: "constructor name must be a symbol".into(),
                         span: Some(ctor_elements[0].span()),
@@ -2299,7 +2270,7 @@ fn process_data_def(
             ty: ctor_type,
         };
 
-        new_env = extend_env(&new_env, &ctor.name, scheme);
+        new_env.bindings.insert(ctor.name.clone(), scheme);
     }
 
     Ok(new_env)
@@ -2322,10 +2293,11 @@ fn process_declare(
         });
     }
 
-    let name = get_symbol(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
-        message: "declare expects a symbol name".into(),
-        span: Some(elements[1].span()),
-    })?;
+    let name =
+        ast::get_symbol_name(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
+            message: "declare expects a symbol name".into(),
+            span: Some(elements[1].span()),
+        })?;
 
     let ty = parse_type_expr(elements[2], env, interner)?;
 
@@ -2352,9 +2324,9 @@ fn process_define(
     let mut annotated_type: Option<Type> = None;
 
     if let Expr::List { .. } = name_expr {
-        let name_elements = list_to_array(name_expr);
+        let name_elements = ast::list_to_array(name_expr);
         if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
-            name = get_symbol(name_elements[0], interner)
+            name = ast::get_symbol_name(name_elements[0], interner)
                 .ok_or(TypeError::InvalidTypeAnnotation {
                     message: "Expected symbol before :".into(),
                     span: Some(name_elements[0].span()),
@@ -2370,7 +2342,7 @@ fn process_define(
             });
         }
     } else {
-        name = get_symbol(name_expr, interner)
+        name = ast::get_symbol_name(name_expr, interner)
             .ok_or(TypeError::InvalidTypeAnnotation {
                 message: "define expects a symbol name".into(),
                 span: Some(elements[1].span()),
@@ -2464,14 +2436,15 @@ fn process_foreign_def(
         });
     }
 
-    let lib_name = get_symbol(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
-        message: "foreign library name must be a symbol".into(),
-        span: Some(elements[1].span()),
-    })?;
+    let lib_name =
+        ast::get_symbol_name(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
+            message: "foreign library name must be a symbol".into(),
+            span: Some(elements[1].span()),
+        })?;
 
     let mut functions = Vec::new();
     for e in &elements[2..] {
-        let op_elements = list_to_array(e);
+        let op_elements = ast::list_to_array(e);
         if op_elements.len() != 2 {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "foreign function entry must be (FnName ArrowType)".into(),
@@ -2479,11 +2452,12 @@ fn process_foreign_def(
             });
         }
 
-        let fn_name =
-            get_symbol(op_elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
+        let fn_name = ast::get_symbol_name(op_elements[0], interner).ok_or(
+            TypeError::InvalidTypeAnnotation {
                 message: "foreign function name must be a symbol".into(),
                 span: Some(op_elements[0].span()),
-            })?;
+            },
+        )?;
 
         let fn_type = parse_type_expr(op_elements[1], env, interner)?;
         let (params, result) = match &fn_type {
@@ -2574,57 +2548,55 @@ fn ffi_type_string_to_type_const(s: &str) -> Type {
 
 /// Check if an expression is `(ffi-struct "Name" (list (list "field" "type") ...))` and extract info.
 fn try_extract_ffi_struct_info(expr: &Expr, interner: &Interner) -> Option<FfiStructInfo> {
-    if let Expr::List { .. } = expr {
-        let elements = list_to_array(expr);
-        if elements.len() >= 2 && is_symbol(elements[0], interner, "ffi-struct") {
-            if let Expr::Atom(LispValue::String(name), _) = elements[1] {
-                let mut fields = Vec::new();
-                // Try to parse field definitions from the second argument: (list (list "field" "type") ...)
-                if elements.len() >= 3 {
-                    if let Expr::List { .. } = elements[2] {
-                        let list_elements = list_to_array(elements[2]);
-                        // Skip the leading `list` symbol
-                        let field_entries = if !list_elements.is_empty()
-                            && is_symbol(list_elements[0], interner, "list")
-                        {
-                            &list_elements[1..]
-                        } else {
-                            &list_elements[..]
-                        };
-                        for entry in field_entries {
-                            if let Expr::List { .. } = entry {
-                                let pair = list_to_array(entry);
-                                // (list "field_name" "type_string")
-                                let inner =
-                                    if pair.len() >= 3 && is_symbol(pair[0], interner, "list") {
-                                        &pair[1..]
-                                    } else {
-                                        &pair[..]
-                                    };
-                                if inner.len() == 2 {
-                                    if let (
-                                        Expr::Atom(LispValue::String(fname), _),
-                                        Expr::Atom(LispValue::String(ftype), _),
-                                    ) = (inner[0], inner[1])
-                                    {
-                                        fields.push(FfiStructFieldInfo {
-                                            name: fname.to_string(),
-                                            marlang_type: ffi_type_string_to_type_const(ftype),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
+    let Expr::List { .. } = expr else { return None };
+    let elements = ast::list_to_array(expr);
+    if elements.len() < 2 || !is_symbol(elements[0], interner, "ffi-struct") {
+        return None;
+    }
+    let Expr::Atom(LispValue::String(name), _) = elements[1] else {
+        return None;
+    };
+
+    let mut fields = Vec::new();
+
+    // Parse field definitions from the third argument: (list (list "field" "type") ...)
+    if elements.len() >= 3 {
+        if let Expr::List { .. } = elements[2] {
+            let list_elements = ast::list_to_array(elements[2]);
+            // Skip the leading `list` symbol
+            let field_entries =
+                if !list_elements.is_empty() && is_symbol(list_elements[0], interner, "list") {
+                    &list_elements[1..]
+                } else {
+                    &list_elements[..]
+                };
+            for entry in field_entries {
+                let Expr::List { .. } = entry else { continue };
+                let pair = ast::list_to_array(entry);
+                // (list "field_name" "type_string")
+                let inner = if pair.len() >= 3 && is_symbol(pair[0], interner, "list") {
+                    &pair[1..]
+                } else {
+                    &pair[..]
+                };
+                if let [
+                    Expr::Atom(LispValue::String(fname), _),
+                    Expr::Atom(LispValue::String(ftype), _),
+                ] = inner
+                {
+                    fields.push(FfiStructFieldInfo {
+                        name: fname.to_string(),
+                        marlang_type: ffi_type_string_to_type_const(ftype),
+                    });
                 }
-                return Some(FfiStructInfo {
-                    name: name.to_string(),
-                    fields,
-                });
             }
         }
     }
-    None
+
+    Some(FfiStructInfo {
+        name: name.to_string(),
+        fields,
+    })
 }
 
 fn process_ffi_lib_def(
@@ -2642,10 +2614,11 @@ fn process_ffi_lib_def(
         });
     }
 
-    let lib_name = get_symbol(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
-        message: "foreign-lib library name must be a symbol".into(),
-        span: Some(elements[1].span()),
-    })?;
+    let lib_name =
+        ast::get_symbol_name(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
+            message: "foreign-lib library name must be a symbol".into(),
+            span: Some(elements[1].span()),
+        })?;
 
     // elements[2] is the path string (we just check it's a string)
     match elements[2] {
@@ -2662,7 +2635,7 @@ fn process_ffi_lib_def(
     let mut new_env = env.clone();
 
     for e in &elements[3..] {
-        let op_elements = list_to_array(e);
+        let op_elements = ast::list_to_array(e);
         if op_elements.len() != 2 {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "foreign-lib function entry must be (FnName ArrowType)".into(),
@@ -2670,11 +2643,12 @@ fn process_ffi_lib_def(
             });
         }
 
-        let fn_name =
-            get_symbol(op_elements[0], interner).ok_or(TypeError::InvalidTypeAnnotation {
+        let fn_name = ast::get_symbol_name(op_elements[0], interner).ok_or(
+            TypeError::InvalidTypeAnnotation {
                 message: "foreign-lib function name must be a symbol".into(),
                 span: Some(op_elements[0].span()),
-            })?;
+            },
+        )?;
 
         // Parse the type in FFI type namespace
         let raw_type = parse_type_expr(op_elements[1], env, interner)?;
@@ -2701,14 +2675,16 @@ fn process_ffi_lib_def(
         // Register qualified binding: lib_name/FnName
         let qualified_name = format!("{}/{}", lib_name, fn_name);
         let fn_type = type_arrow(params, result);
-        new_env = extend_env(&new_env, &qualified_name, monotype(fn_type));
+        new_env.bindings.insert(qualified_name, monotype(fn_type));
     }
 
     // Register foreign lib for ffi-call backward compatibility
     new_env = define_foreign(&new_env, lib_name, functions);
 
     // Register lib_name with type FFILibrary
-    new_env = extend_env(&new_env, lib_name, monotype(t_ffi_library()));
+    new_env
+        .bindings
+        .insert(lib_name.to_string(), monotype(t_ffi_library()));
 
     Ok(new_env)
 }
@@ -2747,9 +2723,9 @@ fn infer_program_inner(
 
     for expr in exprs {
         if let Expr::List { .. } = expr {
-            let elements = list_to_array(expr);
+            let elements = ast::list_to_array(expr);
             if !elements.is_empty() {
-                let first_sym = get_symbol(elements[0], interner);
+                let first_sym = ast::get_symbol_name(elements[0], interner);
 
                 if first_sym == Some("data") {
                     current_env = process_data_def(&current_env, &elements, interner)?;
@@ -2858,7 +2834,7 @@ fn parse_import_form(
     // Check for `as alias`
     if elements.len() == 4 {
         if is_symbol(elements[2], interner, "as") {
-            if let Some(alias) = get_symbol(elements[3], interner) {
+            if let Some(alias) = ast::get_symbol_name(elements[3], interner) {
                 return Ok((path, ImportForm::Qualified(alias.to_string())));
             }
         }
@@ -2867,10 +2843,10 @@ fn parse_import_form(
     // Check for selective: (import "path" (name1 name2 ...))
     if elements.len() == 3 {
         if let Expr::List { .. } = elements[2] {
-            let name_exprs = list_to_array(elements[2]);
+            let name_exprs = ast::list_to_array(elements[2]);
             let mut names = Vec::new();
             for ne in &name_exprs {
-                if let Some(name) = get_symbol(ne, interner) {
+                if let Some(name) = ast::get_symbol_name(ne, interner) {
                     names.push(name.to_string());
                 } else {
                     return Err(TypeError::InvalidTypeAnnotation {

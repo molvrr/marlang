@@ -1,6 +1,5 @@
-- [ ] mar disasm when importing something doesn't work
-- [ ] Exhaustiveness check for strings
 - [ ] Cleanup code
+- [ ] Exhaustiveness check for strings
 - [ ] JIT
 - [ ] Remove NIL:   self.emit_constant(ConstantValue::Nil, line);
 - [ ] Cross process messaging
@@ -9,6 +8,7 @@
 - [ ] stdlib: add bytewise operators
 - [ ] stdlib: add byte manipulation functions
 - [ ] parse error filename, line number and column
+- [x] mar disasm when importing something doesn't work
 - [x] Suggestion for disambiguating same operation name for effect handler isn't deterministic
         Maybe we should order effects somehow, so we aways suggest the same operation?
 - [x] What happens to builtin handlers if there's another operation with the same name which belongs to another effect

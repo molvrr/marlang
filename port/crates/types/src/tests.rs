@@ -7,16 +7,146 @@ use marlang_core::lexer::lex;
 use marlang_core::parser::parse_with_interner;
 
 use crate::ast::format_type;
-use crate::checker::{TypeCheckResult, TypeModuleLoader, type_check, type_check_with_modules};
+use crate::checker::{TypeModuleLoader, type_check, type_check_with_modules};
 use crate::errors::{TypeError, format_error};
 
+/// Minimal prelude for type-checker tests: data types, builtin declares, and effects.
+/// Mirrors the declarations in stdlib/prelude.mar but omits macros and function definitions
+/// (which require VM execution to expand/evaluate).
+const TEST_PRELUDE: &str = r#"
+(data (Option a) None (Some a))
+(data (List a) Nil (Cons a (List a)))
+(data (Pair a b) (MkPair a b))
+(data (Result e a) (Err e) (Ok a))
+
+(declare + (-> Int Int Int))
+(declare - (-> Int Int Int))
+(declare * (-> Int Int Int))
+(declare / (-> Int Int Int))
+(declare negate (-> Int Int))
+(declare +. (-> Float Float Float))
+(declare -. (-> Float Float Float))
+(declare *. (-> Float Float Float))
+(declare /. (-> Float Float Float))
+(declare negate. (-> Float Float))
+(declare = (-> Int Int Bool))
+(declare < (-> Int Int Bool))
+(declare > (-> Int Int Bool))
+(declare <= (-> Int Int Bool))
+(declare >= (-> Int Int Bool))
+(declare =. (-> Float Float Bool))
+(declare <. (-> Float Float Bool))
+(declare >. (-> Float Float Bool))
+(declare <=. (-> Float Float Bool))
+(declare >=. (-> Float Float Bool))
+(declare string= (-> String String Bool))
+(declare string< (-> String String Bool))
+(declare string> (-> String String Bool))
+(declare string<= (-> String String Bool))
+(declare string>= (-> String String Bool))
+(declare equal? (-> a a Bool))
+(declare show (-> a String))
+(declare list (-> (... a) (List a)))
+(declare error (-> String a))
+(declare nil Unit)
+(declare abs (-> Int Int))
+(declare rem (-> Int Int Int))
+(declare mod (-> Int Int Int))
+(declare abs. (-> Float Float))
+(declare rem. (-> Float Float Float))
+(declare mod. (-> Float Float Float))
+(declare sign (-> Int Int))
+(declare sign. (-> Float Float))
+(declare int->float (-> Int Float))
+(declare floor (-> Float Int))
+(declare ceil (-> Float Int))
+(declare round (-> Float Int))
+(declare truncate (-> Float Int))
+(declare pow (-> Float Float Float))
+(declare sqrt (-> Float Float))
+(declare exp (-> Float Float))
+(declare log (-> Float Float))
+(declare log10 (-> Float Float))
+(declare log2 (-> Float Float))
+(declare sin (-> Float Float))
+(declare cos (-> Float Float))
+(declare tan (-> Float Float))
+(declare asin (-> Float Float))
+(declare acos (-> Float Float))
+(declare atan (-> Float Float))
+(declare sinh (-> Float Float))
+(declare cosh (-> Float Float))
+(declare tanh (-> Float Float))
+(declare atan2 (-> Float Float Float))
+(declare is-nan (-> Float Bool))
+(declare is-infinite (-> Float Bool))
+(declare is-finite (-> Float Bool))
+(declare string-length (-> String Int))
+(declare string-append (-> (... String) String))
+(declare string-is-empty (-> String Bool))
+(declare string-reverse (-> String String))
+(declare string-repeat (-> String Int String))
+(declare string-to-upper (-> String String))
+(declare string-to-lower (-> String String))
+(declare string-trim (-> String String))
+(declare string-trim-start (-> String String))
+(declare string-trim-end (-> String String))
+(declare string-starts-with (-> String String Bool))
+(declare string-ends-with (-> String String Bool))
+(declare string-contains (-> String String Bool))
+(declare string-index-of (-> String String (Option Int)))
+(declare string-substring (-> String Int Int String))
+(declare string-char-at (-> String Int (Option Char)))
+(declare string-split (-> String String (List String)))
+(declare string-join (-> String (List String) String))
+(declare string-replace (-> String String String String))
+(declare string-replace-all (-> String String String String))
+(declare string-pad-start (-> String Int String String))
+(declare string-pad-end (-> String Int String String))
+(declare char-code (-> Char Int))
+(declare char-from-code (-> Int Char))
+(declare char->string (-> Char String))
+(declare chars->string (-> (List Char) String))
+(declare string->chars (-> String (List Char)))
+(declare number->string (-> Float String))
+(declare __try-string->number (-> String (Option Float)))
+(declare run-fibers (-> (-> Unit {| e} a) a))
+(declare run-fibers-parallel (-> (-> Unit {| e} a) Int a))
+(declare time-it (-> (-> Unit {| e} a) (Pair a Float)))
+(declare ffi-open (-> String (List a) FFILibrary))
+(declare ffi-call (-> FFILibrary String a))
+(declare ffi-close (-> FFILibrary Unit))
+(declare ffi-struct (-> String (List a) FFIStructDef))
+(declare struct-new (-> FFIStructDef a FFIStruct))
+(declare struct-get (-> FFIStruct String a))
+(declare struct-set (-> FFIStruct String a Unit))
+(declare make-symbol (-> String Symbol))
+(declare gensym (-> Unit Symbol))
+(declare symbol->string (-> Symbol String))
+(declare string->symbol (-> String Symbol))
+(declare symbol? (-> a Bool))
+(declare pair? (-> a Bool))
+(declare nil? (-> a Bool))
+(declare number? (-> a Bool))
+(declare string? (-> a Bool))
+(declare list? (-> a Bool))
+
+(effect Exception
+  (throw (-> String a)))
+"#;
+
 fn check(source: &str) -> Result<Vec<crate::ast::Type>, String> {
+    let full_source = format!("{}\n{}", TEST_PRELUDE, source);
     let interner = Interner::new();
-    let tokens = lex(source, &interner).expect("lex failed");
+    let prelude_tokens = lex(TEST_PRELUDE, &interner).expect("prelude lex failed");
+    let prelude_count = parse_with_interner(&prelude_tokens, &interner)
+        .expect("prelude parse failed")
+        .len();
+    let tokens = lex(&full_source, &interner).expect("lex failed");
     let exprs = parse_with_interner(&tokens, &interner).expect("parse failed");
     match type_check(&exprs, &interner) {
-        TypeCheckResult::Ok { types, .. } => Ok(types),
-        TypeCheckResult::Err { error } => Err(format_error(&error)),
+        Ok(output) => Ok(output.types[prelude_count..].to_vec()),
+        Err(error) => Err(format_error(&error)),
     }
 }
 
@@ -831,12 +961,17 @@ fn check_with_modules(
     source: &str,
     loader: &dyn TypeModuleLoader,
 ) -> Result<Vec<crate::ast::Type>, String> {
+    let full_source = format!("{}\n{}", TEST_PRELUDE, source);
     let interner = Interner::new();
-    let tokens = lex(source, &interner).expect("lex failed");
+    let prelude_tokens = lex(TEST_PRELUDE, &interner).expect("prelude lex failed");
+    let prelude_count = parse_with_interner(&prelude_tokens, &interner)
+        .expect("prelude parse failed")
+        .len();
+    let tokens = lex(&full_source, &interner).expect("lex failed");
     let exprs = parse_with_interner(&tokens, &interner).expect("parse failed");
     match type_check_with_modules(&exprs, &interner, Some(Path::new("/test/main.mar")), loader) {
-        TypeCheckResult::Ok { types, .. } => Ok(types),
-        TypeCheckResult::Err { error } => Err(format_error(&error)),
+        Ok(output) => Ok(output.types[prelude_count..].to_vec()),
+        Err(error) => Err(format_error(&error)),
     }
 }
 

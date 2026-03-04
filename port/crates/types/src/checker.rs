@@ -6,8 +6,7 @@ use marlang_core::ast::Expr;
 use marlang_core::intern::Interner;
 
 use crate::ast::{Type, reset_effect_row_var_counter, reset_type_var_counter};
-use crate::builtins::create_builtin_env;
-use crate::env::TypeEnv;
+use crate::env::{TypeEnv, empty_env};
 use crate::errors::TypeError;
 use crate::infer::{infer_program, infer_program_with_context};
 
@@ -74,39 +73,42 @@ pub enum ModuleCacheState {
 
 // ===== Type Check Entry Points =====
 
-pub enum TypeCheckResult {
-    Ok { env: TypeEnv, types: Vec<Type> },
-    Err { error: TypeError },
+pub struct TypeCheckOutput {
+    pub env: TypeEnv,
+    pub types: Vec<Type>,
 }
 
 /// Type check without module support (backward compatible).
-pub fn type_check(exprs: &[Expr], interner: &Interner) -> TypeCheckResult {
+///
+/// `exprs` should include prelude expressions prepended before user code.
+/// All type declarations (data types, builtins, effects) are defined in
+/// `stdlib/prelude.mar`; the initial env is empty.
+pub fn type_check(exprs: &[Expr], interner: &Interner) -> Result<TypeCheckOutput, TypeError> {
     reset_type_var_counter();
     reset_effect_row_var_counter();
 
-    let env = create_builtin_env();
-
-    match infer_program(&env, exprs, interner) {
-        Ok((env, types)) => TypeCheckResult::Ok { env, types },
-        Err(error) => TypeCheckResult::Err { error },
-    }
+    let env = empty_env();
+    let (env, types) = infer_program(&env, exprs, interner)?;
+    Ok(TypeCheckOutput { env, types })
 }
 
 /// Type check with module/import support.
+///
+/// `exprs` should include prelude expressions prepended before user code.
+/// All type declarations (data types, builtins, effects) are defined in
+/// `stdlib/prelude.mar`; the initial env is empty.
 pub fn type_check_with_modules(
     exprs: &[Expr],
     interner: &Interner,
     file_path: Option<&Path>,
     loader: &dyn TypeModuleLoader,
-) -> TypeCheckResult {
+) -> Result<TypeCheckOutput, TypeError> {
     reset_type_var_counter();
     reset_effect_row_var_counter();
 
-    let env = create_builtin_env();
+    let env = empty_env();
     let cache = TypeModuleCache::new();
-
-    match infer_program_with_context(&env, exprs, interner, file_path, loader, &cache) {
-        Ok((env, types)) => TypeCheckResult::Ok { env, types },
-        Err(error) => TypeCheckResult::Err { error },
-    }
+    let (env, types) =
+        infer_program_with_context(&env, exprs, interner, file_path, loader, &cache)?;
+    Ok(TypeCheckOutput { env, types })
 }

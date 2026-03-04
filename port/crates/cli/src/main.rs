@@ -12,7 +12,7 @@ use marlang_core::lexer::lex;
 use marlang_core::parser::parse_with_interner;
 use marlang_core::span::LineMap;
 use marlang_types::ast::format_type;
-use marlang_types::checker::{TypeCheckResult, TypeModuleLoader, type_check_with_modules};
+use marlang_types::checker::{TypeModuleLoader, type_check_with_modules};
 use marlang_types::errors::{TypeError, format_error_with_location};
 use marlang_vm::builtins::register_builtins;
 use marlang_vm::compiler::compile_program;
@@ -230,8 +230,8 @@ fn cmd_run(file: &PathBuf) -> ExitCode {
         Some(file.as_path()),
         &type_loader,
     ) {
-        TypeCheckResult::Ok { .. } => {}
-        TypeCheckResult::Err { error } => {
+        Ok(_) => {}
+        Err(error) => {
             eprintln!(
                 "{}",
                 format_error_with_location(&error, &line_map, &filename)
@@ -307,10 +307,10 @@ fn cmd_typecheck(file: &PathBuf) -> ExitCode {
         Some(file.as_path()),
         &type_loader,
     ) {
-        TypeCheckResult::Ok { env, types } => {
+        Ok(output) => {
             let user_start = expanded.prelude_count;
             let user_exprs = &expanded.exprs[user_start..];
-            let user_types = &types[user_start..];
+            let user_types = &output.types[user_start..];
             if let Some(last_expr) = user_exprs.last() {
                 let elements = list_to_array(last_expr);
                 let name = if !elements.is_empty()
@@ -323,7 +323,8 @@ fn cmd_typecheck(file: &PathBuf) -> ExitCode {
                 };
                 match name {
                     Some(n) => {
-                        let ty = env
+                        let ty = output
+                            .env
                             .bindings
                             .get(n)
                             .map(|s| format_type(&s.ty))
@@ -343,7 +344,7 @@ fn cmd_typecheck(file: &PathBuf) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        TypeCheckResult::Err { error } => {
+        Err(error) => {
             eprintln!(
                 "{}",
                 format_error_with_location(&error, &line_map, &filename)

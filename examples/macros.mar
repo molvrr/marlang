@@ -9,7 +9,7 @@
 ; `when` and `unless` are built-in macros — no import needed.
 ; They execute the body for side effects and always return unit.
 
-(when #t (+ 1 1))
+(when #t (begin (+ 1 1) nil))
 ; => nil (body runs, result discarded)
 
 (when #f (error "never reached"))

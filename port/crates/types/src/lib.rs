@@ -1,5 +1,4 @@
 pub mod ast;
-pub mod builtins;
 pub mod checker;
 pub mod env;
 pub mod errors;
