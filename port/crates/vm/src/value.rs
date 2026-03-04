@@ -159,6 +159,35 @@ impl Value {
         })
     }
 
+    /// Attempt to take ownership of the inner VMObject by consuming this Value.
+    /// Succeeds if this Value holds the only Arc reference (refcount == 1).
+    /// On failure, returns the Value back unchanged.
+    ///
+    /// This is used to avoid deep-cloning one-shot continuations on resume:
+    /// if we're the sole owner, we can move the data instead of copying it.
+    pub(crate) fn try_take_object(self) -> Result<VMObject, Value> {
+        if !self.is_object() {
+            return Err(self);
+        }
+        let ptr = (self.0 & 0x0000_FFFF_FFFF_FFFF) as *const VMObject;
+        // Reconstruct the Arc without incrementing refcount —
+        // Arc::from_raw reclaims the Arc that was leaked by Arc::into_raw
+        // in Value::object(). We must prevent our Drop impl from also
+        // decrementing the refcount, so we forget self.
+        let bits = self.0;
+        std::mem::forget(self);
+        let arc = unsafe { Arc::from_raw(ptr) };
+        match Arc::try_unwrap(arc) {
+            Ok(obj) => Ok(obj),
+            Err(arc) => {
+                // Put the Arc back — into_raw leaks it again so the
+                // refcount stays balanced with the Value's Drop.
+                let _ = Arc::into_raw(arc);
+                Err(Value(bits))
+            }
+        }
+    }
+
     // --- Truthiness ---
 
     /// Only nil and false are falsy, everything else is truthy.

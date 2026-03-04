@@ -5,9 +5,9 @@
 ;
 ; Run with: cargo run -p marlang-cli -- run examples/actors.mar
 
-(import "std:concurrent")
-(import "std:actor")
-(import "std:io")
+(import "std:concurrent" as conc)
+(import "std:actor" as actor)
+(import "std:io" as io)
 
 ; === Example 1: Ping-Pong ===
 ;
@@ -16,25 +16,25 @@
 (data PingPong (Ping Pid) (Pong Pid))
 
 (define pong (lambda ()
-  (let ((msg (perform actor-receive)))
+  (let ((msg (actor/receive)))
     (match msg
       ((Ping sender)
-        (let ((me (perform fiber-self)))
-          (perform actor-send sender (Pong me))
+        (let ((me (conc/self)))
+          (actor/send sender (Pong me))
           (pong)))
       (_ (pong))))))
 
 (define ping (lambda (partner n)
   (if (<= n 0)
-    (perform println "ping-pong done!")
-    (let ((me (perform fiber-self)))
-      (perform actor-send partner (Ping me))
-      (let ((msg (perform actor-receive)))
+    (io/println "ping-pong done!")
+    (let ((me (conc/self)))
+      (actor/send partner (Ping me))
+      (let ((msg (actor/receive)))
         (match msg
           ((Pong _) (ping partner (- n 1)))
           (_ nil)))))))
 (run-fibers (lambda ()
-  (let ((p (perform fiber-spawn pong)))
+  (let ((p (conc/spawn pong)))
     (ping p 5))))
 
 ; Output:
@@ -52,24 +52,24 @@
   (Count Int))
 
 (define counter (lambda (count)
-  (let ((msg (perform actor-receive)))
+  (let ((msg (actor/receive)))
     (match msg
       ((Increment n) (counter (+ count n)))
       ((GetCount sender)
         (begin
-          (perform actor-send sender (Count count))
+          (actor/send sender (Count count))
           (counter count)))))))
 
 (run-fibers (lambda ()
-  (let ((c (perform fiber-spawn (lambda () (counter 0))))
-        (me (perform fiber-self)))
-    (perform actor-send c (Increment 5))
-    (perform actor-send c (Increment 3))
-    (perform actor-send c (Increment 10))
-    (perform actor-send c (GetCount me))
-    (let ((reply (perform actor-receive)))
+  (let ((c (conc/spawn (lambda () (counter 0))))
+        (me (conc/self)))
+    (actor/send c (Increment 5))
+    (actor/send c (Increment 3))
+    (actor/send c (Increment 10))
+    (actor/send c (GetCount me))
+    (let ((reply (actor/receive)))
       (match reply
-        ((Count n) (begin (perform print "count = ") (perform println n))))))))
+        ((Count n) (begin (io/print "count = ") (io/println n))))))))
 
 ; Output:
 ;   count = 18
@@ -82,32 +82,32 @@
 (data Priority (High String) (Low String))
 
 (run-fibers (lambda ()
-  (let ((me (perform fiber-self)))
+  (let ((me (conc/self)))
 
     ; Send low-priority then high-priority
-    (perform fiber-spawn (lambda ()
-      (perform actor-send me (Low "boring"))
-      (perform actor-send me (High "urgent"))
-      (perform actor-send me (Low "meh"))))
+    (conc/spawn (lambda ()
+      (actor/send me (Low "boring"))
+      (actor/send me (High "urgent"))
+      (actor/send me (Low "meh"))))
 
-    (perform fiber-yield)
-    (perform fiber-yield)
+    (conc/yield)
+    (conc/yield)
 
     ; Receive only High messages first
-    (let ((msg (perform actor-receive-match
+    (let ((msg (actor/receive-match
                  (lambda (m) (match m ((High _) #t) (_ #f))))))
       (match msg
-        ((High s) (perform println s))
+        ((High s) (io/println s))
         (_ nil)))
 
     ; Then drain the rest
-    (let ((msg (perform actor-receive)))
+    (let ((msg (actor/receive)))
       (match msg
-        ((Low s) (perform println s))
+        ((Low s) (io/println s))
         (_ nil)))
-    (let ((msg (perform actor-receive)))
+    (let ((msg (actor/receive)))
       (match msg
-        ((Low s) (perform println s))
+        ((Low s) (io/println s))
         (_ nil))))))
 
 ; Output:

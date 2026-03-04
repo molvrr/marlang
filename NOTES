@@ -4,10 +4,27 @@
 - [x] Exhaustiveness check effect handler
 - [x] Rewrite stdlib to not call perform directly, only if call it if there's no wrapper available
 - [x] Macro expansion cli subcommand
+- [x] Can we override builtin effect handlers?
+- [ ] Rewrite examples to not call perform directly, only call it if there's no wrapper available
+- [ ] Exhaustiveness check for strings
 - [ ] Cleanup code
 - [ ] JIT
-- [ ] Can we override builtin effect handlers?
 - [ ] Cross process messaging
-- [ ] Rewrite examples to not call perform directly, only call it if there's no wrapper available
-- [ ] Typecheck should only show last expression type, not every top-level expression
+- [ ] Typecheck --verbose should only show last expression type with expression name if there's one and the type info, not every top-level expression
+- [ ] Check if qualified import polutes global env
 - [ ] What happens to builtin handlers if there's another operation with the same name which belongs to another effect
+- [ ] stdlib: persistent data structures
+- [ ] stdlib: synchronization primitives
+
+# Errors to look into
+```lisp
+(import "std:io" as io)
+
+(define main (lambda ()
+  (io/println "Mateus")))
+
+(handle (main))
+```
+Runtime error: Compile error: [line 76] Compile error: handle expects an expression and handler clauses
+
+Doesn't say relevant file, and conflates runtime error and compile error

@@ -5,30 +5,30 @@
 ;
 ; Run with: cargo run -p marlang-cli -- run examples/channels.mar
 
-(import "std:concurrent")
-(import "std:io")
+(import "std:concurrent" as conc)
+(import "std:io" as io)
 
 ; === Example 1: Unbuffered Channel ===
 ;
 ; Sender blocks until a receiver is ready (and vice versa)
 
 (define consume (lambda (ch)
-  (match (perform chan-recv ch)
-    ((None) (perform println "done"))
+  (match (conc/chan-recv ch)
+    ((None) (io/println "done"))
     ((Some v)
       (begin
-        (perform println v)
+        (io/println v)
         (consume ch))))))
 
 (run-fibers (lambda ()
-  (let ((ch (perform chan-new 0)))
+  (let ((ch (conc/chan-new 0)))
 
     ; Producer: sends three values then closes
-    (perform fiber-spawn (lambda ()
-      (perform chan-send ch 10)
-      (perform chan-send ch 20)
-      (perform chan-send ch 30)
-      (perform chan-close ch)))
+    (conc/spawn (lambda ()
+      (conc/chan-send ch 10)
+      (conc/chan-send ch 20)
+      (conc/chan-send ch 30)
+      (conc/chan-close ch)))
 
     ; Consumer: receives until channel is closed (returns None)
     (consume ch))))
@@ -45,39 +45,39 @@
 ; Multiple workers read from one channel, results collected in another
 
 (define recv! (lambda (ch)
-  (match (perform chan-recv ch)
+  (match (conc/chan-recv ch)
     ((Some v) v)
-    ((None) (perform throw "channel closed unexpectedly")))))
+    ((None) (raise "channel closed unexpectedly")))))
 
 (run-fibers (lambda ()
-  (let ((jobs (perform chan-new 10))
-        (results (perform chan-new 10)))
+  (let ((jobs (conc/chan-new 10))
+        (results (conc/chan-new 10)))
 
     ; Spawn 3 workers
-    (perform fiber-spawn (lambda ()
+    (conc/spawn (lambda ()
       (let ((j (recv! jobs)))
-        (perform chan-send results (* j j))
+        (conc/chan-send results (* j j))
         nil)))
-    (perform fiber-spawn (lambda ()
+    (conc/spawn (lambda ()
       (let ((j (recv! jobs)))
-        (perform chan-send results (* j j))
+        (conc/chan-send results (* j j))
         nil)))
-    (perform fiber-spawn (lambda ()
+    (conc/spawn (lambda ()
       (let ((j (recv! jobs)))
-        (perform chan-send results (* j j))
+        (conc/chan-send results (* j j))
         nil)))
 
     ; Send 3 jobs
-    (perform chan-send jobs 2)
-    (perform chan-send jobs 3)
-    (perform chan-send jobs 4)
+    (conc/chan-send jobs 2)
+    (conc/chan-send jobs 3)
+    (conc/chan-send jobs 4)
 
     ; Collect results
     (let ((a (recv! results))
           (b (recv! results))
           (c (recv! results)))
-      (perform print "sum of squares: ")
-      (perform println (+ a (+ b c)))))))
+      (io/print "sum of squares: ")
+      (io/println (+ a (+ b c)))))))
 
 ; Output:
 ;   sum of squares: 29

@@ -20,7 +20,7 @@
 
 ; --- Macros ---
 (defmacro when (cond body)
-  `(if ,cond (begin ,body nil) nil))
+  `(if ,cond ,body nil))
 
 ; --- Core Functions ---
 

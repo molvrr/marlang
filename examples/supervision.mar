@@ -5,9 +5,9 @@
 ;
 ; Run with: cargo run -p marlang-cli -- run examples/supervision.mar
 
-(import "std:concurrent")
-(import "std:actor")
-(import "std:io")
+(import "std:concurrent" as conc)
+(import "std:actor" as actor)
+(import "std:io" as io)
 
 (data Signal (Down Pid String) (Exit Pid String))
 
@@ -17,17 +17,17 @@
 ; (normally or by crashing), a Down message is delivered.
 
 (run-fibers (lambda ()
-  (let ((worker (perform fiber-spawn (lambda ()
-                  (perform println "worker: doing work...")
-                  (perform fiber-yield)
+  (let ((worker (conc/spawn (lambda ()
+                  (io/println "worker: doing work...")
+                  (conc/yield)
                   (error "something went wrong!")))))
-    (perform actor-monitor worker)
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (let ((msg (perform actor-receive)))
+    (actor/monitor worker)
+    (conc/yield)
+    (conc/yield)
+    (conc/yield)
+    (let ((msg (actor/receive)))
       (match msg
-        ((Down pid reason) (begin (perform print "supervisor: worker crashed with: ") (perform println reason)))
+        ((Down pid reason) (begin (io/print "supervisor: worker crashed with: ") (io/println reason)))
         (_ nil))))))
 
 ; Output:
@@ -42,17 +42,17 @@
 ; case the crash is converted to an Exit message.
 
 (run-fibers (lambda ()
-  (perform actor-trap-exit #t)
-  (let ((worker (perform fiber-spawn (lambda ()
-                  (perform fiber-yield)
+  (actor/trap-exit #t)
+  (let ((worker (conc/spawn (lambda ()
+                  (conc/yield)
                   (error "crash!")))))
-    (perform actor-link worker)
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (let ((msg (perform actor-receive)))
+    (actor/link worker)
+    (conc/yield)
+    (conc/yield)
+    (conc/yield)
+    (let ((msg (actor/receive)))
       (match msg
-        ((Exit pid reason) (begin (perform print "trapped exit: ") (perform println reason)))
+        ((Exit pid reason) (begin (io/print "trapped exit: ") (io/println reason)))
         (_ nil))))))
 
 ; Output:
@@ -64,24 +64,24 @@
 ; A simple supervisor that restarts a worker when it crashes
 
 (define run-worker (lambda ()
-  (perform println "worker started")
-  (perform fiber-yield)
+  (io/println "worker started")
+  (conc/yield)
   (error "oops")))
 
 (define supervisor (lambda (restarts-left)
   (if (<= restarts-left 0)
-    (perform println "supervisor: giving up")
-    (let ((w (perform fiber-spawn run-worker)))
-      (perform actor-monitor w)
-      (perform fiber-yield)
-      (perform fiber-yield)
-      (perform fiber-yield)
-      (let ((msg (perform actor-receive)))
+    (io/println "supervisor: giving up")
+    (let ((w (conc/spawn run-worker)))
+      (actor/monitor w)
+      (conc/yield)
+      (conc/yield)
+      (conc/yield)
+      (let ((msg (actor/receive)))
         (match msg
           ((Down pid reason)
             (begin
-              (perform print "supervisor: restarting after: ")
-              (perform println reason)
+              (io/print "supervisor: restarting after: ")
+              (io/println reason)
               (supervisor (- restarts-left 1))))
           (_ nil)))))))
 

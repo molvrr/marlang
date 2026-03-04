@@ -5,8 +5,8 @@
 ;
 ; Run with: cargo run -p marlang-cli -- run examples/tcp.mar
 
-(import "std:concurrent")
-(import "std:io")
+(import "std:concurrent" as conc)
+(import "std:io" as io)
 (import "std:net" as net)
 
 ; === Example 1: Echo Server ===
@@ -17,7 +17,7 @@
   (let ((listener (net/listen 9001)))
 
     ; Server fiber: accept one connection, echo, close
-    (perform fiber-spawn (lambda ()
+    (conc/spawn (lambda ()
       (match (net/accept listener)
         (None nil)
         ((Some client)
@@ -29,15 +29,15 @@
             (net/close client))))))
 
     ; Give server time to start accepting
-    (perform fiber-yield)
-    (perform fiber-yield)
+    (conc/yield)
+    (conc/yield)
 
     ; Client: connect, send, receive, print
     (let ((sock (net/connect "127.0.0.1" 9001)))
       (net/send sock "hello from marlang!")
       (match (net/recv sock)
         (None nil)
-        ((Some resp) (perform println resp)))
+        ((Some resp) (io/println resp)))
       (net/close sock))
 
     (net/close-listener listener)))
@@ -55,10 +55,10 @@
   (match (net/try-connect "127.0.0.1" 19999)
     ((Ok sock)
       (begin
-        (perform println "connected (unexpected)")
+        (io/println "connected (unexpected)")
         (net/close sock)))
     ((Err msg)
-      (perform println (string-append "expected error: " msg)))))
+      (io/println (string-append "expected error: " msg)))))
   2)
 
 ; Output:
@@ -73,7 +73,7 @@
   (let ((listener (net/listen 9002)))
 
     ; Server fiber: handle 3 connections
-    (perform fiber-spawn (lambda ()
+    (conc/spawn (lambda ()
       (match (net/accept listener)
         (None nil)
         ((Some c1)
@@ -102,8 +102,8 @@
                 (net/send c3 (string-append "reply-3: " d3))))
             (net/close c3))))))
 
-    (perform fiber-yield)
-    (perform fiber-yield)
+    (conc/yield)
+    (conc/yield)
 
     ; Three clients connect sequentially
     (let ((do-request (lambda (msg)
@@ -111,7 +111,7 @@
               (net/send sock msg)
               (match (net/recv sock)
                 (None nil)
-                ((Some resp) (perform println resp)))
+                ((Some resp) (io/println resp)))
               (net/close sock)))))
       (do-request "alice")
       (do-request "bob")
@@ -135,9 +135,9 @@
     ; Try to bind the same port again
     (match (net/try-listen 9003)
       ((Ok _)
-        (perform println "bound twice (unexpected)"))
+        (io/println "bound twice (unexpected)"))
       ((Err msg)
-        (perform println (string-append "bind error: " msg))))
+        (io/println (string-append "bind error: " msg))))
     (net/close-listener listener)))
   2)
 

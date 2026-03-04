@@ -13,6 +13,7 @@ use crate::object::{Closure, HandlerEntry, VMHandlerFrame, VMObject};
 use crate::value::{Value, format_value_unquoted};
 use crate::vm::{
     EffectSignal, VM, VMSignal, call_closure, call_value, next_handler_id, resume_continuation,
+    resume_continuation_owned,
 };
 
 // ---------------------------------------------------------------------------
@@ -745,6 +746,7 @@ pub fn run_fibers(vm: &mut VM, body: &Closure) -> Result<Value, VMError> {
     let mut main_result = Value::nil();
 
     // Run main fiber (PID 0)
+    vm.current_pid = Some(0);
     install_handler_frame(vm);
     match call_closure(vm, body, &[]) {
         Ok(result) => {
@@ -763,9 +765,26 @@ pub fn run_fibers(vm: &mut VM, body: &Closure) -> Result<Value, VMError> {
     }
 
     // Synchronous scheduler loop
-    while let Some(fiber) = state.ready_queue.pop_front() {
+    loop {
+        let fiber = match state.ready_queue.pop_front() {
+            Some(f) => f,
+            None => {
+                if state.live_pids.is_empty() || !state.live_pids.contains(&0) {
+                    // All fibers exited, or the main fiber exited and only
+                    // orphaned background fibers remain — we're done.
+                    break;
+                }
+                // The main fiber is still alive but blocked, and no other fiber
+                // can make progress. This is a true deadlock — park the OS
+                // thread so the program blocks (like Go/Erlang).
+                loop {
+                    std::thread::park();
+                }
+            }
+        };
         let pid = fiber.pid();
         state.current_pid = pid;
+        vm.current_pid = Some(pid);
 
         let saved_frame_count = vm.frame_count;
         let saved_stack_top = vm.stack_top;
@@ -773,20 +792,31 @@ pub fn run_fibers(vm: &mut VM, body: &Closure) -> Result<Value, VMError> {
         // Reinstall handler frame (PERFORM removes it when catching an effect)
         install_handler_frame(vm);
 
-        let result = match &fiber {
-            Fiber::New { closure, .. } => call_closure(vm, closure, &[]),
+        let result = match fiber {
+            Fiber::New { closure, .. } => call_closure(vm, &closure, &[]),
             Fiber::Suspended {
                 continuation,
                 resume_value,
                 ..
-            } => match continuation.as_object() {
-                Some(VMObject::Continuation(c)) => {
-                    resume_continuation(vm, c.as_ref(), resume_value.clone())
+            } => {
+                // Try to take ownership of the continuation (avoids deep clone)
+                match continuation.try_take_object() {
+                    Ok(VMObject::Continuation(boxed)) => {
+                        resume_continuation_owned(vm, *boxed, resume_value)
+                    }
+                    Ok(_) => Err(VMSignal::Error(VMError::runtime(
+                        "Invalid continuation in fiber",
+                    ))),
+                    Err(val) => match val.as_object() {
+                        Some(VMObject::Continuation(c)) => {
+                            resume_continuation(vm, c.as_ref(), resume_value)
+                        }
+                        _ => Err(VMSignal::Error(VMError::runtime(
+                            "Invalid continuation in fiber",
+                        ))),
+                    },
                 }
-                _ => Err(VMSignal::Error(VMError::runtime(
-                    "Invalid continuation in fiber",
-                ))),
-            },
+            }
         };
 
         match result {
@@ -823,5 +853,6 @@ pub fn run_fibers(vm: &mut VM, body: &Closure) -> Result<Value, VMError> {
         }
     }
 
+    vm.current_pid = None;
     Ok(main_result)
 }

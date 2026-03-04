@@ -64,6 +64,8 @@ pub struct VM {
     pub captured_output: Option<String>,
     /// When Some, records the names of globals written via SetGlobal (for module export tracking).
     pub dirty_globals: Option<HashSet<String>>,
+    /// Current fiber PID when running under the scheduler (for fast-path fiber-self).
+    pub(crate) current_pid: Option<u64>,
 }
 
 impl VM {
@@ -80,6 +82,7 @@ impl VM {
             resumed_continuations: HashSet::new(),
             captured_output: None,
             dirty_globals: None,
+            current_pid: None,
         }
     }
 
@@ -325,12 +328,12 @@ pub fn call_value(vm: &mut VM, callee: &Value, args: &[Value]) -> Result<Value, 
 }
 
 /// Resume a continuation from Rust (used by scheduler).
+/// Takes ownership of the continuation to avoid deep-cloning.
 /// With CPS dispatch, user-handler effects are dispatched inline by PERFORM,
 /// so only scheduler effects escape as VMSignal::Effect.
-#[allow(dead_code)]
-pub(crate) fn resume_continuation(
+pub(crate) fn resume_continuation_owned(
     vm: &mut VM,
-    cont: &VMContinuation,
+    cont: VMContinuation,
     value: Value,
 ) -> Result<Value, VMSignal> {
     // Enforce one-shot semantics via VM-level tracking (works across Arc aliases)
@@ -341,32 +344,37 @@ pub(crate) fn resume_continuation(
     }
 
     let resume_base = vm.frame_count;
-    for f in &cont.frames {
-        let frame = CallFrame {
-            closure: f.closure.clone(),
-            ip: f.ip,
-            locals: f.locals.clone(),
-            open_upvalues: f.open_upvalues.clone(),
-        };
-        vm.push_frame(frame);
+    let stack_len = cont.stack.len();
+    let frame_base = cont.frame_base;
+    let stack_base = cont.stack_base;
+
+    // Restore frames by consuming — no clone
+    for f in cont.frames {
+        vm.push_frame(f);
     }
 
-    for v in &cont.stack {
-        vm.push(v.clone());
+    // Restore stack by consuming — no clone
+    for v in cont.stack {
+        vm.push(v);
     }
     vm.push(value);
 
     let saved_handler_len = vm.handler_stack.len();
     let saved_dispatch_len = vm.handler_dispatch_stack.len();
-    let frame_offset = resume_base as i64 - cont.frame_base as i64;
-    let stack_offset = (vm.stack_top as i64 - cont.stack.len() as i64 - 1) - cont.stack_base as i64;
-    for h in &cont.handler_stack {
-        let rebased = rebase_handler(h, frame_offset, stack_offset);
-        vm.handler_stack.push(rebased);
+    let frame_offset = resume_base as i64 - frame_base as i64;
+    let stack_offset = (vm.stack_top as i64 - stack_len as i64 - 1) - stack_base as i64;
+
+    // Restore handlers by consuming — mutate in place, no clone
+    for mut h in cont.handler_stack {
+        h.unwind_frame_start = (h.unwind_frame_start as i64 + frame_offset) as usize;
+        h.unwind_stack_start = (h.unwind_stack_start as i64 + stack_offset) as usize;
+        h.capture_frame_start = (h.capture_frame_start as i64 + frame_offset) as usize;
+        h.capture_stack_start = (h.capture_stack_start as i64 + stack_offset) as usize;
+        vm.handler_stack.push(h);
     }
-    for d in &cont.handler_dispatch_stack {
-        let rebased = rebase_handler_dispatch(d, frame_offset);
-        vm.handler_dispatch_stack.push(rebased);
+    for mut d in cont.handler_dispatch_stack {
+        d.dispatch_frame = (d.dispatch_frame as i64 + frame_offset) as usize;
+        vm.handler_dispatch_stack.push(d);
     }
 
     // Run — user-handler effects are dispatched inline by PERFORM.
@@ -380,6 +388,18 @@ pub(crate) fn resume_continuation(
     result
 }
 
+/// Resume a continuation from Rust (fallback: borrows continuation, must clone).
+#[allow(dead_code)]
+pub(crate) fn resume_continuation(
+    vm: &mut VM,
+    cont: &VMContinuation,
+    value: Value,
+) -> Result<Value, VMSignal> {
+    // Clone and delegate to the owned version
+    resume_continuation_owned(vm, cont.clone(), value)
+}
+
+#[allow(dead_code)]
 fn rebase_handler(h: &VMHandlerFrame, frame_offset: i64, stack_offset: i64) -> VMHandlerFrame {
     VMHandlerFrame {
         handlers: h.handlers.clone(),
@@ -395,6 +415,7 @@ fn rebase_handler(h: &VMHandlerFrame, frame_offset: i64, stack_offset: i64) -> V
 
 // --- Effect handler helpers ---
 
+#[allow(dead_code)]
 fn rebase_handler_dispatch(d: &HandlerDispatch, frame_offset: i64) -> HandlerDispatch {
     HandlerDispatch {
         dispatch_frame: (d.dispatch_frame as i64 + frame_offset) as usize,
@@ -585,6 +606,10 @@ fn default_make_err(msg: &str) -> Value {
 
 fn try_default_handler(vm: &mut VM, op_name: &str, args: &[Value]) -> Option<Value> {
     match op_name {
+        "fiber-self" => {
+            let pid = vm.current_pid?;
+            Some(Value::object(VMObject::Pid(pid)))
+        }
         "print" => {
             let msg = args.first().cloned().unwrap_or_else(Value::nil);
             let text = format_value_unquoted(&msg);
@@ -1670,8 +1695,11 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
             Op::Perform => {
                 // SAFETY: operand is a valid constant index
-                let op_name = match unsafe { &*constants.add(inst.operand as usize) } {
-                    ConstantValue::String(s) => s.clone(),
+                // Borrow effect name from the constant pool — avoids a String clone per perform.
+                // Only allocate an owned String when building EffectSignal (scheduler path) or
+                // error messages.
+                let op_name_ref: &str = match unsafe { &*constants.add(inst.operand as usize) } {
+                    ConstantValue::String(s) => s.as_str(),
                     _ => {
                         vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
@@ -1692,7 +1720,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     if vm.handler_stack[i]
                         .handlers
                         .iter()
-                        .any(|e| e.op_name == op_name)
+                        .any(|e| e.op_name == op_name_ref)
                     {
                         found = Some(i);
                         break;
@@ -1701,15 +1729,34 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                 if let Some(handler_idx) = found {
                     let is_scheduler = vm.handler_stack[handler_idx].is_scheduler;
+
+                    // Fast-path: synchronous effects under the scheduler.
+                    // These can be executed inline without continuation capture,
+                    // avoiding the expensive capture → unwind → signal → resume cycle.
+                    if is_scheduler {
+                        if let Some(result) = try_default_handler(vm, op_name_ref, &args) {
+                            vm.push(result);
+                            continue;
+                        }
+                    }
+
                     let handler_id = vm.handler_stack[handler_idx].id;
                     let capture_frame_start = vm.handler_stack[handler_idx].capture_frame_start;
                     let capture_stack_start = vm.handler_stack[handler_idx].capture_stack_start;
                     let unwind_fc = vm.handler_stack[handler_idx].unwind_frame_start;
                     let unwind_st = vm.handler_stack[handler_idx].unwind_stack_start;
 
-                    // Extract handler data BEFORE unwinding (needed for user handler dispatch)
-                    let handler_entries = vm.handler_stack[handler_idx].handlers.clone();
-                    let return_handler = vm.handler_stack[handler_idx].return_handler.clone();
+                    // Extract handler data BEFORE unwinding — only needed for user handler
+                    // CPS dispatch. The scheduler path never uses these, so skip the
+                    // expensive clone (25 HandlerEntry with String + Closure each).
+                    let (handler_entries, return_handler) = if is_scheduler {
+                        (Vec::new(), None)
+                    } else {
+                        (
+                            vm.handler_stack[handler_idx].handlers.clone(),
+                            vm.handler_stack[handler_idx].return_handler.clone(),
+                        )
+                    };
 
                     // Save current frame
                     vm.frames[frame_idx].ip = ip;
@@ -1769,9 +1816,11 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         .retain(|d| d.dispatch_frame < capture_frame_start);
 
                     if is_scheduler {
-                        // Scheduler handler: propagate via EffectSignal (existing path)
+                        // Scheduler handler: propagate via EffectSignal (existing path).
+                        // Only allocate the owned String here — the hot path above
+                        // used a borrowed &str from the constant pool.
                         return Err(VMSignal::Effect(EffectSignal {
-                            op_name,
+                            op_name: op_name_ref.to_string(),
                             args,
                             continuation: cont_value,
                             target_handler_id: handler_id,
@@ -1782,7 +1831,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     // Find the matching handler clause
                     let clause = handler_entries
                         .iter()
-                        .find(|e| e.op_name == op_name)
+                        .find(|e| e.op_name == op_name_ref)
                         .cloned();
                     let clause = match clause {
                         Some(c) => c,
@@ -1790,7 +1839,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             // Should not happen — we found the handler by name
                             return Err(VMSignal::Error(VMError::runtime(format!(
                                 "Handler clause not found for effect: {}",
-                                op_name
+                                op_name_ref
                             ))));
                         }
                     };
@@ -1841,9 +1890,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 }
 
                 // No user handler found — try default handlers
-                if let Some(result) = try_default_handler(vm, &op_name, &args) {
+                if let Some(result) = try_default_handler(vm, op_name_ref, &args) {
                     vm.push(result);
-                } else if op_name == "throw" {
+                } else if op_name_ref == "throw" {
                     // Better error message for unhandled throw
                     let msg = args
                         .first()
@@ -1857,7 +1906,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 } else {
                     vm.frames[frame_idx].ip = ip;
                     return Err(VMSignal::Error(vm.vm_error(
-                        format!("Unhandled effect: {}", op_name),
+                        format!("Unhandled effect: {}", op_name_ref),
                         &vm.frames[frame_idx],
                     )));
                 }
@@ -1867,8 +1916,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let value = vm.pop();
                 let cont_val = vm.pop();
 
-                let cont = match cont_val.as_object() {
-                    Some(VMObject::Continuation(c)) => c,
+                // Check type and get continuation ID for one-shot enforcement
+                let cont_id = match cont_val.as_object() {
+                    Some(VMObject::Continuation(c)) => c.id,
                     _ => {
                         vm.frames[frame_idx].ip = ip;
                         return Err(VMSignal::Error(
@@ -1878,7 +1928,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 };
 
                 // Enforce one-shot semantics via VM-level tracking (works across Arc aliases)
-                if !vm.resumed_continuations.insert(cont.id) {
+                if !vm.resumed_continuations.insert(cont_id) {
                     vm.frames[frame_idx].ip = ip;
                     return Err(VMSignal::Error(vm.vm_error(
                         "Continuation already resumed (one-shot)",
@@ -1886,7 +1936,20 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     )));
                 }
 
-                let cont_data = (**cont).clone();
+                // Try to take ownership of the continuation (avoids deep clone
+                // when this is the sole reference — the common case for one-shot
+                // continuations).
+                let cont_data = match cont_val.try_take_object() {
+                    Ok(VMObject::Continuation(boxed)) => *boxed,
+                    Ok(_) => unreachable!("checked Continuation above"),
+                    Err(val) => {
+                        // Fallback: refcount > 1, must clone
+                        match val.as_object() {
+                            Some(VMObject::Continuation(c)) => (**c).clone(),
+                            _ => unreachable!("checked Continuation above"),
+                        }
+                    }
+                };
 
                 // Update the current (top) handler frame's capture/unwind points
                 // so future PERFORMs capture from the right place.
@@ -1898,37 +1961,40 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     top_handler.unwind_stack_start = vm.stack_top;
                 }
 
-                // Restore continuation frames on top of current frames
+                // Save metadata before consuming
+                let cont_stack_len = cont_data.stack.len();
+                let cont_frame_base = cont_data.frame_base;
+                let cont_stack_base = cont_data.stack_base;
+
+                // Restore continuation frames on top of current frames (consuming — no clone)
                 let resume_base = vm.frame_count;
-                for f in &cont_data.frames {
-                    vm.push_frame(CallFrame {
-                        closure: f.closure.clone(),
-                        ip: f.ip,
-                        locals: f.locals.clone(),
-                        open_upvalues: f.open_upvalues.clone(),
-                    });
+                for f in cont_data.frames {
+                    vm.push_frame(f);
                 }
 
-                // Restore continuation stack + push resume value
-                for v in &cont_data.stack {
-                    vm.push(v.clone());
+                // Restore continuation stack + push resume value (consuming — no clone)
+                for v in cont_data.stack {
+                    vm.push(v);
                 }
                 vm.push(value);
 
                 // Restore nested handlers, rebasing indices
-                let frame_offset = resume_base as i64 - cont_data.frame_base as i64;
-                let stack_offset = (vm.stack_top as i64 - cont_data.stack.len() as i64 - 1)
-                    - cont_data.stack_base as i64;
+                let frame_offset = resume_base as i64 - cont_frame_base as i64;
+                let stack_offset =
+                    (vm.stack_top as i64 - cont_stack_len as i64 - 1) - cont_stack_base as i64;
 
-                for h in &cont_data.handler_stack {
-                    let rebased = rebase_handler(h, frame_offset, stack_offset);
-                    vm.handler_stack.push(rebased);
+                for mut h in cont_data.handler_stack {
+                    h.unwind_frame_start = (h.unwind_frame_start as i64 + frame_offset) as usize;
+                    h.unwind_stack_start = (h.unwind_stack_start as i64 + stack_offset) as usize;
+                    h.capture_frame_start = (h.capture_frame_start as i64 + frame_offset) as usize;
+                    h.capture_stack_start = (h.capture_stack_start as i64 + stack_offset) as usize;
+                    vm.handler_stack.push(h);
                 }
 
                 // Restore handler dispatch markers, rebasing frame offsets
-                for d in &cont_data.handler_dispatch_stack {
-                    let rebased = rebase_handler_dispatch(d, frame_offset);
-                    vm.handler_dispatch_stack.push(rebased);
+                for mut d in cont_data.handler_dispatch_stack {
+                    d.dispatch_frame = (d.dispatch_frame as i64 + frame_offset) as usize;
+                    vm.handler_dispatch_stack.push(d);
                 }
 
                 // CPS dispatch: the resumed continuation runs inline.
