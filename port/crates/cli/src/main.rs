@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
-use marlang_core::ast::Expr;
+use marlang_core::ast::{Expr, expr_to_source, get_symbol_name, list_to_array};
 use marlang_core::intern::Interner;
 use marlang_core::lexer::lex;
 use marlang_core::parser::parse_with_interner;
@@ -41,9 +41,6 @@ enum Command {
     Typecheck {
         /// Path to the .mar file
         file: PathBuf,
-        /// Print inferred types for each top-level expression
-        #[arg(long)]
-        verbose: bool,
     },
     /// Disassemble bytecode
     Disasm {
@@ -179,7 +176,7 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Run { file } => cmd_run(&file),
         Command::Repl => cmd_repl(),
-        Command::Typecheck { file, verbose } => cmd_typecheck(&file, verbose),
+        Command::Typecheck { file } => cmd_typecheck(&file),
         Command::Disasm { file } => cmd_disasm(&file),
         Command::Expand { file, clean } => cmd_expand(&file, clean),
     }
@@ -264,7 +261,7 @@ fn cmd_run(file: &PathBuf) -> ExitCode {
     }
 }
 
-fn cmd_typecheck(file: &PathBuf, verbose: bool) -> ExitCode {
+fn cmd_typecheck(file: &PathBuf) -> ExitCode {
     let source = match fs::read_to_string(file) {
         Ok(s) => s,
         Err(e) => {
@@ -310,13 +307,40 @@ fn cmd_typecheck(file: &PathBuf, verbose: bool) -> ExitCode {
         Some(file.as_path()),
         &type_loader,
     ) {
-        TypeCheckResult::Ok { types, .. } => {
-            if verbose {
-                for (i, ty) in types.iter().enumerate() {
-                    println!("expr {}: {}", i + 1, format_type(ty));
+        TypeCheckResult::Ok { env, types } => {
+            let user_start = expanded.prelude_count;
+            let user_exprs = &expanded.exprs[user_start..];
+            let user_types = &types[user_start..];
+            if let Some(last_expr) = user_exprs.last() {
+                let elements = list_to_array(last_expr);
+                let name = if !elements.is_empty()
+                    && get_symbol_name(elements[0], &interner) == Some("define")
+                    && elements.len() >= 2
+                {
+                    get_symbol_name(elements[1], &interner)
+                } else {
+                    None
+                };
+                match name {
+                    Some(n) => {
+                        let ty = env
+                            .bindings
+                            .get(n)
+                            .map(|s| format_type(&s.ty))
+                            .unwrap_or_else(|| "Unit".to_string());
+                        println!("{} : {}", n, ty);
+                    }
+                    None => {
+                        if let Some(last_ty) = user_types.last() {
+                            println!(
+                                "{} : {}",
+                                expr_to_source(last_expr, &interner),
+                                format_type(last_ty)
+                            );
+                        }
+                    }
                 }
             }
-            println!("Type check passed.");
             ExitCode::SUCCESS
         }
         TypeCheckResult::Err { error } => {

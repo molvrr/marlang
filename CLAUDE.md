@@ -8,8 +8,7 @@ cargo build --release -p marlang-cli
 
 # Or run directly via cargo
 cargo run -p marlang-cli -- run file.mar           # Run a file
-cargo run -p marlang-cli -- typecheck file.mar     # Type check only
-cargo run -p marlang-cli -- typecheck file.mar --verbose  # Show inferred types
+cargo run -p marlang-cli -- typecheck file.mar     # Type check (prints last expression's type)
 cargo run -p marlang-cli -- disasm file.mar        # Disassemble bytecode
 cargo run -p marlang-cli -- expand file.mar        # Show macro-expanded source
 cargo run -p marlang-cli -- expand file.mar --clean # Expanded source without hygiene marks

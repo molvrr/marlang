@@ -1,3 +1,15 @@
+- [ ] Exhaustiveness check for strings
+- [ ] Cleanup code
+- [ ] JIT
+- [ ] Cross process messaging
+- [ ] Check if qualified import polutes global env
+- [ ] What happens to builtin handlers if there's another operation with the same name which belongs to another effect
+- [ ] stdlib: persistent data structures
+- [ ] stdlib: synchronization primitives
+- [ ] stdlib: add bytewise operators
+- [ ] stdlib: add byte manipulation functions
+- [ ] parse error filename, line number and column
+- [x] Typecheck --verbose should only show last expression type with expression name if there's one and the type info, not every top-level expression
 - [x] Deprecate typescript version
 - [x] Rewrite CLAUDE.md with only needed info
 - [x] Do we actually need typeclasses? — No. Removed in favor of OCaml-style operator split.
@@ -5,16 +17,7 @@
 - [x] Rewrite stdlib to not call perform directly, only if call it if there's no wrapper available
 - [x] Macro expansion cli subcommand
 - [x] Can we override builtin effect handlers?
-- [ ] Rewrite examples to not call perform directly, only call it if there's no wrapper available
-- [ ] Exhaustiveness check for strings
-- [ ] Cleanup code
-- [ ] JIT
-- [ ] Cross process messaging
-- [ ] Typecheck --verbose should only show last expression type with expression name if there's one and the type info, not every top-level expression
-- [ ] Check if qualified import polutes global env
-- [ ] What happens to builtin handlers if there's another operation with the same name which belongs to another effect
-- [ ] stdlib: persistent data structures
-- [ ] stdlib: synchronization primitives
+- [x] Rewrite examples to not call perform directly, only call it if there's no wrapper available
 
 # Errors to look into
 ```lisp
