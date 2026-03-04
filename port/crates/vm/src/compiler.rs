@@ -662,10 +662,10 @@ impl<'a> Compiler<'a> {
                     } else if sym == ks.resume {
                         return self.compile_resume(&elements, line);
                     } else if sym == ks.import {
-                        return Err(CompileError::new(
-                            "import is not yet supported in the VM",
-                            line,
-                        ));
+                        // Imports are handled by the module system in run_program_from_exprs;
+                        // when compiling directly (e.g. disasm), just emit nil.
+                        self.emit_constant(ConstantValue::Nil, line);
+                        return Ok(());
                     } else if sym == ks.ffi_lib {
                         return self.compile_ffi_lib(&elements, line);
                     } else if sym == ks.quote {
@@ -1304,8 +1304,9 @@ impl<'a> Compiler<'a> {
             self.compile_expr(arg_expr, false)?;
         }
 
-        let op_name = self.interner.resolve(op_sym).to_string();
-        let name_idx = self.add_constant(ConstantValue::String(op_name));
+        // Parse qualified name (e.g., "io/print") or bare name ("print")
+        let full_name = self.interner.resolve(op_sym).to_string();
+        let name_idx = self.add_constant(ConstantValue::String(full_name));
         self.emit_op2(Op::Perform, line, name_idx, arg_exprs.len() as u32);
         Ok(())
     }
@@ -1323,6 +1324,7 @@ impl<'a> Compiler<'a> {
 
         // Parse and compile handler clauses
         struct HandlerInfo {
+            effect_name_idx: u32,
             op_name_idx: u32,
             proto_idx: u32,
             arity: u8,
@@ -1402,8 +1404,18 @@ impl<'a> Compiler<'a> {
                 };
 
                 let parent_scope = self.snapshot_scope();
-                let op_name_str = self.interner.resolve(op_sym).to_string();
-                let handler_name = format!("<handler:{}>", op_name_str);
+                let full_name = self.interner.resolve(op_sym).to_string();
+
+                // Parse qualified name (e.g., "io/IO/print") or bare name ("print")
+                // Use rsplit_once to handle effect names with slashes (e.g., "io/IO")
+                let (effect_name, op_name) = if let Some((eff, op)) = full_name.rsplit_once('/') {
+                    (eff.to_string(), op.to_string())
+                } else {
+                    // For unqualified names, use empty string as effect name
+                    // (matches any effect at runtime)
+                    (String::new(), full_name.clone())
+                };
+                let handler_name = format!("<handler:{}>", full_name);
                 let mut fn_compiler = Compiler::new(
                     &handler_name,
                     self.interner,
@@ -1431,9 +1443,11 @@ impl<'a> Compiler<'a> {
                     module_id: self.module_id,
                 };
 
-                let op_name_idx = self.add_constant(ConstantValue::String(op_name_str));
+                let effect_name_idx = self.add_constant(ConstantValue::String(effect_name));
+                let op_name_idx = self.add_constant(ConstantValue::String(op_name));
                 let proto_idx = self.add_constant(ConstantValue::Prototype(proto));
                 handler_infos.push(HandlerInfo {
+                    effect_name_idx,
                     op_name_idx,
                     proto_idx,
                     arity,
@@ -1471,8 +1485,8 @@ impl<'a> Compiler<'a> {
             .iter()
             .map(|h| {
                 format!(
-                    "{{\"opNameIdx\":{},\"protoIdx\":{},\"arity\":{}}}",
-                    h.op_name_idx, h.proto_idx, h.arity
+                    "{{\"effectNameIdx\":{},\"opNameIdx\":{},\"protoIdx\":{},\"arity\":{}}}",
+                    h.effect_name_idx, h.op_name_idx, h.proto_idx, h.arity
                 )
             })
             .collect();

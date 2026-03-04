@@ -1841,10 +1841,34 @@ fn infer_perform(
         span: Some(elements[1].span()),
     })?;
 
-    let (effect, op) = lookup_effect_op(env, op_name).ok_or(TypeError::UndefinedVariable {
-        name: format!("effect operation '{op_name}' (declare with (effect EffectName ({op_name} : ArgType -> ResultType)))"),
-        span: Some(elements[1].span()),
-    })?;
+    let op_name_str = op_name.to_string();
+    let (effect, op) = if let Some((effect_name, op_name_only)) = op_name_str.rsplit_once('/') {
+        let effect_decl = lookup_effect(env, effect_name).ok_or(TypeError::UndefinedVariable {
+            name: format!("effect '{effect_name}' (not found)"),
+            span: Some(elements[1].span()),
+        })?;
+        let op = lookup_effect_op_in_effect(env, effect_name, op_name_only).ok_or(
+            TypeError::UndefinedVariable {
+                name: format!("effect operation '{op_name}' in effect '{effect_name}'"),
+                span: Some(elements[1].span()),
+            },
+        )?;
+        (effect_decl, op)
+    } else {
+        let possible_effects = find_effects_with_op(env, op_name);
+        if possible_effects.len() > 1 {
+            return Err(TypeError::AmbiguousEffectOperation {
+                op_name: op_name.to_string(),
+                effects: possible_effects.clone(),
+                suggestion: format!("({}/{})", possible_effects[0], op_name),
+                span: Some(elements[1].span()),
+            });
+        }
+        lookup_effect_op(env, op_name).ok_or(TypeError::UndefinedVariable {
+            name: format!("effect operation '{op_name}' (declare with (effect EffectName ({op_name} : ArgType -> ResultType)))"),
+            span: Some(elements[1].span()),
+        })?
+    };
 
     let arg_exprs = &elements[2..];
     let mut subst = empty_subst();
@@ -1987,16 +2011,46 @@ fn infer_handle(
                 }
 
                 // Effect handler
-                let op_info = lookup_effect_op(env, op_name).ok_or(TypeError::UndefinedVariable {
-                    name: format!("effect operation '{op_name}' in handler (declare with (effect EffectName ({op_name} : ArgType -> ResultType)))"),
-                    span: Some(pattern_elements[0].span()),
-                })?;
+                let op_name_str = op_name.to_string();
+                let (effect_name, op_name_only) = if let Some((e, o)) = op_name_str.rsplit_once('/')
+                {
+                    (e.to_string(), o.to_string())
+                } else {
+                    let possible_effects = find_effects_with_op(env, op_name);
+                    if possible_effects.len() > 1 {
+                        return Err(TypeError::AmbiguousEffectOperation {
+                            op_name: op_name.to_string(),
+                            effects: possible_effects.clone(),
+                            suggestion: format!("({}/{})", possible_effects[0], op_name),
+                            span: Some(pattern_elements[0].span()),
+                        });
+                    }
+                    let (effect, _op) = lookup_effect_op(env, op_name).ok_or(TypeError::UndefinedVariable {
+                        name: format!("effect operation '{op_name}' in handler (declare with (effect EffectName ({op_name} : ArgType -> ResultType)))"),
+                        span: Some(pattern_elements[0].span()),
+                    })?;
+                    (effect.name.clone(), op_name.to_string())
+                };
+
+                let op_info = lookup_effect_op_in_effect(env, &effect_name, &op_name_only).ok_or(
+                    TypeError::UndefinedVariable {
+                        name: format!(
+                            "effect operation '{op_name_only}' in effect '{effect_name}'"
+                        ),
+                        span: Some(pattern_elements[0].span()),
+                    },
+                )?;
+                let _effect_decl =
+                    lookup_effect(env, &effect_name).ok_or(TypeError::UndefinedVariable {
+                        name: format!("effect '{effect_name}' not found"),
+                        span: Some(pattern_elements[0].span()),
+                    })?;
 
                 // Track which operations are handled per effect
                 handled_ops_by_effect
-                    .entry(op_info.0.name.clone())
+                    .entry(effect_name.clone())
                     .or_default()
-                    .push(op_name.to_string());
+                    .push(op_name_only);
 
                 let mut handler_env = apply_subst_env(&subst, env);
                 let arg_patterns = &pattern_elements[1..pattern_elements.len().saturating_sub(1)];
@@ -2005,13 +2059,13 @@ fn infer_handle(
                 // Bind arguments
                 for (i, arg_p) in arg_patterns.iter().enumerate() {
                     if let Some(arg_name) = get_symbol(arg_p, interner) {
-                        if i < op_info.1.params.len() {
+                        if i < op_info.params.len() {
                             handler_env = extend_env(
                                 &handler_env,
                                 arg_name,
                                 TypeScheme {
                                     quantified_vars: vec![],
-                                    ty: op_info.1.params[i].clone(),
+                                    ty: op_info.params[i].clone(),
                                 },
                             );
                         }
@@ -2022,7 +2076,7 @@ fn infer_handle(
                 if let Some(cont_p) = continuation_pattern {
                     if let Some(k_name) = get_symbol(cont_p, interner) {
                         let k_type = type_arrow(
-                            vec![op_info.1.result.clone()],
+                            vec![op_info.result.clone()],
                             apply_subst(&subst, &body_result.ty),
                         );
                         handler_env = extend_env(
@@ -2056,6 +2110,7 @@ fn infer_handle(
 
     // Check exhaustiveness: if any operation from an effect is handled,
     // ALL operations from that effect must be handled.
+
     for (effect_name, handled_op_names) in &handled_ops_by_effect {
         if let Some(effect_decl) = lookup_effect(env, effect_name) {
             let all_op_names: Vec<&str> = effect_decl

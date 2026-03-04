@@ -563,17 +563,13 @@ fn disasm_nested_prototype() {
     assert!(output.contains("=== <lambda> ==="));
 }
 
-// ===== Import Error =====
+// ===== Import compiles to nil =====
 
 #[test]
-fn import_fails() {
-    let interner = Interner::new();
-    let tokens = lex("(import \"std:io\" as io)", &interner).expect("lex failed");
-    let exprs = parse(&tokens).expect("parse failed");
-    let result = compile_program(&exprs, &interner);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.message.contains("import"));
+fn import_compiles_to_nil() {
+    let (chunk, _) = compile_source("(import \"std:io\" as io)");
+    // Import should compile successfully (emits nil), not error
+    assert!(find_op(&chunk, Op::PushConst));
 }
 
 // ===== Compile Program =====
@@ -1523,6 +1519,39 @@ fn exec_return_handler_with_perform() {
            ((get k) -> (resume k 10))
            ((return x) -> (* x 2)))",
         20.0,
+    );
+}
+
+#[test]
+fn exec_qualified_effect_handler() {
+    // Test qualified effect names: EffectName/opName
+    assert_num(
+        "(handle
+           (perform MyEffect/my-op 42)
+           ((MyEffect/my-op val k) -> (resume k (+ val 1))))",
+        43.0,
+    );
+}
+
+#[test]
+fn exec_qualified_effect_handler_string() {
+    // Test qualified effect handler returning string
+    assert_str(
+        "(handle
+           (perform MyIO/print \"hello\")
+           ((MyIO/print msg k) -> (resume k \"handled\")))",
+        "handled",
+    );
+}
+
+#[test]
+fn exec_qualified_and_unqualified_mixed() {
+    // Unqualified handler should still work (backward compatibility)
+    assert_num(
+        "(handle
+           (perform get)
+           ((get k) -> (resume k 100)))",
+        100.0,
     );
 }
 

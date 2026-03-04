@@ -193,6 +193,7 @@ pub struct CallFrame {
 /// An entry in a handler frame mapping an effect operation to its handler closure.
 #[derive(Debug, Clone)]
 pub struct HandlerEntry {
+    pub effect_name: String,
     pub op_name: String,
     pub closure: Closure,
     pub arity: u8,

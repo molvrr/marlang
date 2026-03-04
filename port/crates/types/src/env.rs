@@ -311,6 +311,36 @@ pub fn lookup_effect_op(env: &TypeEnv, op_name: &str) -> Option<(EffectDeclarati
     None
 }
 
+pub fn lookup_effect_op_in_effect(
+    env: &TypeEnv,
+    effect_name: &str,
+    op_name: &str,
+) -> Option<EffectOp> {
+    let effect = lookup_effect(env, effect_name)?;
+    effect
+        .operations
+        .iter()
+        .find(|op| op.name == op_name)
+        .cloned()
+}
+
+pub fn find_effects_with_op(env: &TypeEnv, op_name: &str) -> Vec<String> {
+    let mut effect_names = Vec::new();
+    let mut current: Option<&TypeEnv> = Some(env);
+    while let Some(e) = current {
+        for (name, effect) in &e.effects {
+            if effect.operations.iter().any(|op| op.name == op_name) {
+                if !effect_names.contains(name) {
+                    effect_names.push(name.clone());
+                }
+            }
+        }
+        current = e.parent.as_deref();
+    }
+    effect_names.sort();
+    effect_names
+}
+
 // ===== Define operations =====
 
 pub fn define_data_type(env: &TypeEnv, dt: DataType) -> TypeEnv {

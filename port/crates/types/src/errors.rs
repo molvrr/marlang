@@ -56,6 +56,12 @@ pub enum TypeError {
         missing_ops: Vec<String>,
         span: Option<Span>,
     },
+    AmbiguousEffectOperation {
+        op_name: String,
+        effects: Vec<String>,
+        suggestion: String,
+        span: Option<Span>,
+    },
     MissingTypeAnnotation {
         name: String,
         span: Option<Span>,
@@ -183,6 +189,19 @@ pub fn format_error(err: &TypeError) -> String {
                 missing_ops.join(", ")
             )
         }
+        TypeError::AmbiguousEffectOperation {
+            op_name,
+            effects,
+            suggestion,
+            ..
+        } => {
+            format!(
+                "Ambiguous effect operation '{}' - found in multiple effects: {}. Use qualified name like {}",
+                op_name,
+                effects.join(", "),
+                suggestion
+            )
+        }
         TypeError::MissingTypeAnnotation { name, .. } => {
             format!("Missing type annotation for top-level definition: {name}")
         }
@@ -215,6 +234,7 @@ pub fn error_span(err: &TypeError) -> Option<Span> {
         | TypeError::PatternTypeMismatch { span, .. }
         | TypeError::NonExhaustivePatterns { span, .. }
         | TypeError::NonExhaustiveHandlers { span, .. }
+        | TypeError::AmbiguousEffectOperation { span, .. }
         | TypeError::MissingTypeAnnotation { span, .. }
         | TypeError::InvalidTypeAnnotation { span, .. }
         | TypeError::CyclicTypeAlias { span, .. }

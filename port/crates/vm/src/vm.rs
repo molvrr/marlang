@@ -476,6 +476,7 @@ struct HandlerDescriptor {
 }
 
 struct HandlerClauseDescriptor {
+    effect_name_idx: u32,
     op_name_idx: u32,
     proto_idx: u32,
     arity: u8,
@@ -540,10 +541,12 @@ fn parse_handler_clause(json: &str) -> Result<HandlerClauseDescriptor, String> {
         return Err("expected handler clause object".to_string());
     }
     let inner = &json[1..json.len() - 1];
+    let effect_name_idx = extract_number(inner, "effectNameIdx")? as u32;
     let op_name_idx = extract_number(inner, "opNameIdx")? as u32;
     let proto_idx = extract_number(inner, "protoIdx")? as u32;
     let arity = extract_number(inner, "arity")? as u8;
     Ok(HandlerClauseDescriptor {
+        effect_name_idx,
         op_name_idx,
         proto_idx,
         arity,
@@ -1600,6 +1603,15 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 // Create handler clause closures
                 let mut handler_entries = Vec::new();
                 for h in &descriptor.handlers {
+                    let effect_name = match unsafe { &*constants.add(h.effect_name_idx as usize) } {
+                        ConstantValue::String(s) => s.clone(),
+                        _ => {
+                            vm.frames[frame_idx].ip = ip;
+                            return Err(VMSignal::Error(
+                                vm.vm_error("Invalid handler clause", &vm.frames[frame_idx]),
+                            ));
+                        }
+                    };
                     let op_name = match unsafe { &*constants.add(h.op_name_idx as usize) } {
                         ConstantValue::String(s) => s.clone(),
                         _ => {
@@ -1619,6 +1631,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         }
                     };
                     handler_entries.push(HandlerEntry {
+                        effect_name,
                         op_name,
                         closure: create_closure_from_proto(&mut vm.frames[frame_idx], proto),
                         arity: h.arity,
@@ -1714,14 +1727,27 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     args[i] = vm.pop();
                 }
 
+                // Parse the performed operation name (could be "effectName/opName" or just "opName")
+                // Use rsplit_once to handle effect names with slashes (e.g., "io/IO")
+                let (performed_effect, performed_op) =
+                    if let Some((eff, op)) = op_name_ref.rsplit_once('/') {
+                        (eff.to_string(), op.to_string())
+                    } else {
+                        (String::new(), op_name_ref.to_string())
+                    };
+
                 // Walk handler stack to find a matching handler
                 let mut found = None;
                 for i in (0..vm.handler_stack.len()).rev() {
-                    if vm.handler_stack[i]
-                        .handlers
-                        .iter()
-                        .any(|e| e.op_name == op_name_ref)
-                    {
+                    if vm.handler_stack[i].handlers.iter().any(|e| {
+                        // If handler has no effect name (unqualified), match any effect's op
+                        // If handler has effect name (qualified), match both effect and op
+                        if e.effect_name.is_empty() {
+                            e.op_name == performed_op
+                        } else {
+                            e.effect_name == performed_effect && e.op_name == performed_op
+                        }
+                    }) {
                         found = Some(i);
                         break;
                     }
@@ -1831,7 +1857,13 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     // Find the matching handler clause
                     let clause = handler_entries
                         .iter()
-                        .find(|e| e.op_name == op_name_ref)
+                        .find(|e| {
+                            if e.effect_name.is_empty() {
+                                e.op_name == performed_op
+                            } else {
+                                e.effect_name == performed_effect && e.op_name == performed_op
+                            }
+                        })
                         .cloned();
                     let clause = match clause {
                         Some(c) => c,

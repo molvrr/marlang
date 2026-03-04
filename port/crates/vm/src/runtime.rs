@@ -339,6 +339,7 @@ fn install_handler_frame(vm: &mut VM) {
     let entries: Vec<HandlerEntry> = HANDLED_EFFECTS
         .iter()
         .map(|name| HandlerEntry {
+            effect_name: String::new(),
             op_name: name.to_string(),
             closure: dummy.clone(),
             arity: 1,
