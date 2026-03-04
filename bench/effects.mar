@@ -1,4 +1,7 @@
 ; Effect-heavy benchmark: many perform/resume cycles
+(effect Tick
+  (tick (-> Unit Int)))
+
 (define loop (lambda (n acc)
   (if (= n 0)
     acc
