@@ -603,6 +603,24 @@ fn default_make_err(msg: &str) -> Value {
     })
 }
 
+/// Fast-path handler for effects that can be resolved inline without
+/// continuation capture. Only used for effects that don't depend on
+/// scheduler-level shared state (e.g. shared captured_output in the
+/// parallel scheduler). IO effects (print, println, read-file, etc.)
+/// are intentionally excluded here so they propagate to the scheduler,
+/// which correctly handles both single-threaded and multi-threaded contexts.
+fn try_fast_path_handler(vm: &mut VM, op_name: &str, _args: &[Value]) -> Option<Value> {
+    match op_name {
+        "fiber-self" => {
+            let pid = vm.current_pid?;
+            Some(Value::object(VMObject::Pid(pid)))
+        }
+        _ => None,
+    }
+}
+
+/// Default handler for effects when no user handler is found (outside any
+/// scheduler context). This is the fallback for top-level programs.
 fn try_default_handler(vm: &mut VM, op_name: &str, args: &[Value]) -> Option<Value> {
     match op_name {
         "fiber-self" => {
@@ -1751,8 +1769,10 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     // Fast-path: synchronous effects under the scheduler.
                     // These can be executed inline without continuation capture,
                     // avoiding the expensive capture → unwind → signal → resume cycle.
+                    // Only effects that don't depend on scheduler-level shared state
+                    // (like shared captured_output) are handled here.
                     if is_scheduler
-                        && let Some(result) = try_default_handler(vm, op_name_ref, &args)
+                        && let Some(result) = try_fast_path_handler(vm, op_name_ref, &args)
                     {
                         vm.push(result);
                         continue;
