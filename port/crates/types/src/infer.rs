@@ -6,8 +6,90 @@ use crate::unify::*;
 use marlang_core::ast::{self, Expr, LispValue};
 use marlang_core::intern::Interner;
 use marlang_core::span::Span;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+// ===== Inference Session =====
+
+/// Bundles the interner with an optional context collector for LSP features.
+///
+/// This replaces the bare `&Interner` parameter throughout the inference engine.
+/// When `context` is `None` (the default for CLI usage), there is zero overhead.
+/// When `Some`, the inference engine records type information, definitions, and
+/// references for hover and go-to-definition support.
+pub struct InferSession<'a> {
+    pub interner: &'a Interner,
+    pub context: Option<&'a RefCell<InferContext>>,
+}
+
+impl<'a> InferSession<'a> {
+    /// Create a session without context collection (CLI usage).
+    pub fn new(interner: &'a Interner) -> Self {
+        Self {
+            interner,
+            context: None,
+        }
+    }
+
+    /// Create a session with context collection (LSP usage).
+    pub fn with_context(interner: &'a Interner, context: &'a RefCell<InferContext>) -> Self {
+        Self {
+            interner,
+            context: Some(context),
+        }
+    }
+
+    /// Record a type for an expression span, if context collection is active.
+    fn record_type(&self, span: Span, ty: &Type) {
+        if let Some(ctx) = &self.context {
+            ctx.borrow_mut().type_map.push((span, ty.clone()));
+        }
+    }
+
+    /// Record a definition site, if context collection is active.
+    fn record_definition(&self, name: &str, span: Span) {
+        if let Some(ctx) = &self.context {
+            ctx.borrow_mut().definitions.push((name.to_string(), span));
+        }
+    }
+
+    /// Record a reference to a name, if context collection is active.
+    fn record_reference(&self, name: &str, span: Span) {
+        if let Some(ctx) = &self.context {
+            ctx.borrow_mut().references.push((span, name.to_string()));
+        }
+    }
+}
+
+/// Collected type information from a type-checking pass.
+///
+/// Used by the LSP for hover (type_map) and go-to-definition (definitions/references).
+pub struct InferContext {
+    /// Every inferred expression: span -> type.
+    pub type_map: Vec<(Span, Type)>,
+    /// Definition sites: (name, span). Recorded in program order.
+    /// For scoped definitions (lambda params, let bindings), later entries shadow earlier ones.
+    pub definitions: Vec<(String, Span)>,
+    /// Reference sites: (use_span, name). Recorded when a variable/constructor/effect-op is resolved.
+    pub references: Vec<(Span, String)>,
+}
+
+impl InferContext {
+    pub fn new() -> Self {
+        Self {
+            type_map: Vec::new(),
+            definitions: Vec::new(),
+            references: Vec::new(),
+        }
+    }
+}
+
+impl Default for InferContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ===== Hygiene mark stripping =====
 
@@ -134,7 +216,7 @@ fn get_define_annotation(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Opt
 fn infer_body_with_defines(
     env: &TypeEnv,
     body_exprs: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<(Substitution, Type, EffectRow), TypeError> {
     if body_exprs.is_empty() {
         return Ok((empty_subst(), t_unit(), effect_row_empty()));
@@ -143,7 +225,7 @@ fn infer_body_with_defines(
     // Count leading defines
     let mut num_defines = 0;
     for expr in body_exprs {
-        if is_define_form(expr, interner).is_some() {
+        if is_define_form(expr, session.interner).is_some() {
             num_defines += 1;
         } else {
             break;
@@ -152,7 +234,7 @@ fn infer_body_with_defines(
 
     if num_defines == 0 {
         // No leading defines — fall through to normal sequential inference
-        return infer_body_sequence(env, body_exprs, interner);
+        return infer_body_sequence(env, body_exprs, session);
     }
 
     // Phase 1: Collect define names and create placeholders
@@ -163,8 +245,10 @@ fn infer_body_with_defines(
     let mut define_env = env.clone();
 
     for &def_expr in define_exprs {
-        let name = is_define_form(def_expr, interner).unwrap().to_string();
-        let ann_type = get_define_annotation(def_expr, &define_env, interner);
+        let name = is_define_form(def_expr, session.interner)
+            .unwrap()
+            .to_string();
+        let ann_type = get_define_annotation(def_expr, &define_env, session.interner);
         let placeholder = ann_type.unwrap_or_else(fresh_type_var);
         define_env
             .bindings
@@ -180,7 +264,7 @@ fn infer_body_with_defines(
         let elements = ast::list_to_array(def_expr);
         let value_expr = elements[2];
         let applied_env = apply_subst_env(&subst, &define_env);
-        let result = infer_expr(&applied_env, value_expr, interner)?;
+        let result = infer_expr(&applied_env, value_expr, session)?;
         subst = compose_subst(&result.subst, &subst);
         all_effects = combine_effect_rows(&all_effects, &result.effects);
 
@@ -217,7 +301,7 @@ fn infer_body_with_defines(
     }
 
     let (subst, all_effects, types) =
-        infer_exprs(&final_env, rest_exprs, interner, subst, all_effects)?;
+        infer_exprs(&final_env, rest_exprs, session, subst, all_effects)?;
     let body_type = types.into_iter().last().unwrap_or_else(t_unit);
     Ok((subst, body_type, all_effects))
 }
@@ -226,10 +310,10 @@ fn infer_body_with_defines(
 fn infer_body_sequence(
     env: &TypeEnv,
     exprs: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<(Substitution, Type, EffectRow), TypeError> {
     let (subst, effects, types) =
-        infer_exprs(env, exprs, interner, empty_subst(), effect_row_empty())?;
+        infer_exprs(env, exprs, session, empty_subst(), effect_row_empty())?;
     let last_type = types.into_iter().last().unwrap_or_else(t_unit);
     Ok((subst, last_type, effects))
 }
@@ -246,14 +330,14 @@ fn infer_body_sequence(
 fn infer_exprs(
     env: &TypeEnv,
     exprs: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
     mut subst: Substitution,
     mut effects: EffectRow,
 ) -> Result<(Substitution, EffectRow, Vec<Type>), TypeError> {
     let mut types = Vec::with_capacity(exprs.len());
     for expr in exprs {
         let env_applied = apply_subst_env(&subst, env);
-        let result = infer_expr(&env_applied, expr, interner)?;
+        let result = infer_expr(&env_applied, expr, session)?;
         subst = compose_subst(&result.subst, &subst);
         effects = combine_effect_rows(&effects, &result.effects);
         types.push(result.ty);
@@ -549,29 +633,40 @@ fn parse_pattern(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Patt
 pub fn infer_expr(
     env: &TypeEnv,
     expr: &Expr,
-    interner: &Interner,
+    session: &InferSession,
+) -> Result<InferResult, TypeError> {
+    let span = expr.span();
+    let result = infer_expr_inner(env, expr, session)?;
+    session.record_type(span, &result.ty);
+    Ok(result)
+}
+
+fn infer_expr_inner(
+    env: &TypeEnv,
+    expr: &Expr,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     match expr {
         Expr::Nil(_) => Ok(pure_result(t_unit())),
-        Expr::Atom(value, _) => infer_atom(env, value, expr.span(), interner),
+        Expr::Atom(value, _) => infer_atom(env, value, expr.span(), session),
         Expr::List { .. } => {
             let elements = ast::list_to_array(expr);
             if elements.is_empty() {
                 return Ok(pure_result(t_unit()));
             }
 
-            let first_sym = ast::get_symbol_name(elements[0], interner);
+            let first_sym = ast::get_symbol_name(elements[0], session.interner);
 
             if let Some(sym) = first_sym {
                 match sym {
-                    "define" => return infer_define(env, &elements, interner),
-                    "lambda" => return infer_lambda(env, &elements, interner),
-                    "if" => return infer_if(env, &elements, interner),
-                    "let" => return infer_let(env, &elements, interner),
-                    "begin" => return infer_begin(env, &elements, interner),
-                    "cond" => return infer_cond(env, &elements, interner),
-                    "match" => return infer_match(env, &elements, interner),
-                    "data" => return infer_data_def(env, &elements, interner),
+                    "define" => return infer_define(env, &elements, session),
+                    "lambda" => return infer_lambda(env, &elements, session),
+                    "if" => return infer_if(env, &elements, session),
+                    "let" => return infer_let(env, &elements, session),
+                    "begin" => return infer_begin(env, &elements, session),
+                    "cond" => return infer_cond(env, &elements, session),
+                    "match" => return infer_match(env, &elements, session),
+                    "data" => return infer_data_def(env, &elements, session.interner),
                     "class" | "instance" => {
                         return Err(TypeError::InvalidTypeAnnotation {
                             message: format!("'{}' declarations are not supported", sym),
@@ -585,16 +680,16 @@ pub fn infer_expr(
                         let tv = fresh_type_var();
                         return Ok(pure_result(tv));
                     }
-                    "effect" => return infer_effect_def(env, &elements, interner),
-                    "perform" => return infer_perform(env, &elements, interner),
-                    "handle" => return infer_handle(env, &elements, interner),
-                    "resume" => return infer_resume(env, &elements, interner),
+                    "effect" => return infer_effect_def(env, &elements, session.interner),
+                    "perform" => return infer_perform(env, &elements, session),
+                    "handle" => return infer_handle(env, &elements, session),
+                    "resume" => return infer_resume(env, &elements, session),
                     "import" => return Ok(pure_result(t_unit())),
                     _ => {}
                 }
             }
 
-            infer_application(env, &elements, interner)
+            infer_application(env, &elements, session)
         }
     }
 }
@@ -603,7 +698,7 @@ fn infer_atom(
     env: &TypeEnv,
     value: &LispValue,
     span: Span,
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     match value {
         LispValue::Number(_, is_float) => {
@@ -612,7 +707,7 @@ fn infer_atom(
         }
         LispValue::String(_) => Ok(pure_result(t_string())),
         LispValue::Symbol(sym) => {
-            let name = interner.resolve(*sym);
+            let name = session.interner.resolve(*sym);
             // Boolean literals
             if name == "#t" || name == "#f" {
                 return Ok(pure_result(t_bool()));
@@ -632,6 +727,7 @@ fn infer_atom(
                     span: Some(span),
                 })?;
             let ty = instantiate(&scheme);
+            session.record_reference(strip_marks(name), span);
             Ok(pure_result(ty))
         }
     }
@@ -642,7 +738,7 @@ fn infer_atom(
 fn infer_define(
     env: &TypeEnv,
     elements: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     if elements.len() < 3 {
         return Err(TypeError::ArityMismatch {
@@ -659,16 +755,16 @@ fn infer_define(
     // Check for type annotation: (define (name : Type) value)
     if let Expr::List { .. } = name_expr {
         let name_elements = ast::list_to_array(name_expr);
-        if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
-            let name = ast::get_symbol_name(name_elements[0], interner).ok_or(
+        if name_elements.len() == 3 && is_symbol(name_elements[1], session.interner, ":") {
+            let name = ast::get_symbol_name(name_elements[0], session.interner).ok_or(
                 TypeError::InvalidTypeAnnotation {
                     message: "Expected symbol before :".into(),
                     span: Some(name_elements[0].span()),
                 },
             )?;
 
-            let annotated_type = parse_type_annotation(name_elements[2], env, interner)?;
-            let value_result = infer_expr(env, value_expr, interner)?;
+            let annotated_type = parse_type_annotation(name_elements[2], env, session.interner)?;
+            let value_result = infer_expr(env, value_expr, session)?;
             let unify_subst = unify_with_context(
                 &annotated_type,
                 &value_result.ty,
@@ -685,13 +781,14 @@ fn infer_define(
     }
 
     // Regular define — validate that the name is a symbol
-    let _name =
-        ast::get_symbol_name(name_expr, interner).ok_or(TypeError::InvalidTypeAnnotation {
+    let _name = ast::get_symbol_name(name_expr, session.interner).ok_or(
+        TypeError::InvalidTypeAnnotation {
             message: "define expects a symbol name".into(),
             span: Some(elements[1].span()),
-        })?;
+        },
+    )?;
 
-    let result = infer_expr(env, value_expr, interner)?;
+    let result = infer_expr(env, value_expr, session)?;
     Ok(InferResult {
         ty: t_unit(),
         subst: result.subst,
@@ -704,7 +801,7 @@ fn infer_define(
 fn infer_lambda(
     env: &TypeEnv,
     elements: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     if elements.len() < 3 {
         return Err(TypeError::ArityMismatch {
@@ -726,7 +823,7 @@ fn infer_lambda(
     // Detect dot notation: (a b . rest) => param_list = [a, b, ., rest]
     let dot_pos = param_list
         .iter()
-        .position(|p| ast::get_symbol_name(p, interner) == Some("."));
+        .position(|p| ast::get_symbol_name(p, session.interner) == Some("."));
 
     let (required_params, rest_param_expr) = if let Some(pos) = dot_pos {
         if pos + 1 >= param_list.len() {
@@ -750,30 +847,33 @@ fn infer_lambda(
         // Check for annotated param: (x : Int)
         if let Expr::List { .. } = param {
             let param_elements = ast::list_to_array(param);
-            if param_elements.len() == 3 && is_symbol(param_elements[1], interner, ":") {
-                let name = ast::get_symbol_name(param_elements[0], interner).ok_or(
+            if param_elements.len() == 3 && is_symbol(param_elements[1], session.interner, ":") {
+                let name = ast::get_symbol_name(param_elements[0], session.interner).ok_or(
                     TypeError::InvalidTypeAnnotation {
                         message: "Parameter name must be a symbol".into(),
                         span: Some(param_elements[0].span()),
                     },
                 )?;
-                let ty = parse_type_expr(param_elements[2], env, interner)?;
+                let ty = parse_type_expr(param_elements[2], env, session.interner)?;
                 params.push((name.to_string(), ty.clone()));
                 param_env.bindings.insert(name.to_string(), monotype(ty));
+                session.record_definition(name, param_elements[0].span());
                 continue;
             }
         }
 
-        let name =
-            ast::get_symbol_name(param, interner).ok_or(TypeError::InvalidTypeAnnotation {
+        let name = ast::get_symbol_name(param, session.interner).ok_or(
+            TypeError::InvalidTypeAnnotation {
                 message: "Parameter must be a symbol".into(),
                 span: Some(param.span()),
-            })?;
+            },
+        )?;
         let param_type = fresh_type_var();
         params.push((name.to_string(), param_type.clone()));
         param_env
             .bindings
             .insert(name.to_string(), monotype(param_type));
+        session.record_definition(name, param.span());
     }
 
     // Handle rest parameter
@@ -781,14 +881,14 @@ fn infer_lambda(
         // Check for annotated rest param: (rest : Type) — Type is the element type
         let (rest_name, elem_type) = if let Expr::List { .. } = rest_expr {
             let param_elements = ast::list_to_array(rest_expr);
-            if param_elements.len() == 3 && is_symbol(param_elements[1], interner, ":") {
-                let name = ast::get_symbol_name(param_elements[0], interner).ok_or(
+            if param_elements.len() == 3 && is_symbol(param_elements[1], session.interner, ":") {
+                let name = ast::get_symbol_name(param_elements[0], session.interner).ok_or(
                     TypeError::InvalidTypeAnnotation {
                         message: "Rest parameter name must be a symbol".into(),
                         span: Some(param_elements[0].span()),
                     },
                 )?;
-                let ty = parse_type_expr(param_elements[2], env, interner)?;
+                let ty = parse_type_expr(param_elements[2], env, session.interner)?;
                 (name, ty)
             } else {
                 return Err(TypeError::InvalidTypeAnnotation {
@@ -797,7 +897,7 @@ fn infer_lambda(
                 });
             }
         } else {
-            let name = ast::get_symbol_name(rest_expr, interner).ok_or(
+            let name = ast::get_symbol_name(rest_expr, session.interner).ok_or(
                 TypeError::InvalidTypeAnnotation {
                     message: "Rest parameter must be a symbol".into(),
                     span: Some(rest_expr.span()),
@@ -817,7 +917,7 @@ fn infer_lambda(
     // Infer body with letrec semantics for leading defines.
     // Determine which body expressions to process (unwrap a single begin if present).
     let effective_body: Vec<&Expr> = if body_exprs.len() == 1 {
-        if let Some("begin") = get_first_symbol(body_exprs[0], interner) {
+        if let Some("begin") = get_first_symbol(body_exprs[0], session.interner) {
             let begin_elements = ast::list_to_array(body_exprs[0]);
             begin_elements[1..].to_vec()
         } else {
@@ -828,7 +928,7 @@ fn infer_lambda(
     };
 
     let (body_subst, body_type, body_effects) =
-        infer_body_with_defines(&param_env, &effective_body, interner)?;
+        infer_body_with_defines(&param_env, &effective_body, session)?;
 
     let mut param_types: Vec<Type> = params
         .iter()
@@ -859,7 +959,7 @@ fn infer_lambda(
 fn infer_if(
     env: &TypeEnv,
     elements: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     if elements.len() < 3 || elements.len() > 4 {
         return Err(TypeError::ArityMismatch {
@@ -871,18 +971,18 @@ fn infer_if(
     }
 
     let if_span = elements[0].span();
-    let cond_result = infer_expr(env, elements[1], interner)?;
+    let cond_result = infer_expr(env, elements[1], session)?;
     let cond_unify = unify_with_context(&cond_result.ty, &t_bool(), "if condition")
         .map_err(|e| e.with_span_if_missing(if_span))?;
     let s1 = compose_subst(&cond_unify, &cond_result.subst);
     let env1 = apply_subst_env(&s1, env);
 
-    let then_result = infer_expr(&env1, elements[2], interner)?;
+    let then_result = infer_expr(&env1, elements[2], session)?;
     let s2 = compose_subst(&then_result.subst, &s1);
 
     if elements.len() == 4 {
         let env2 = apply_subst_env(&s2, env);
-        let else_result = infer_expr(&env2, elements[3], interner)?;
+        let else_result = infer_expr(&env2, elements[3], session)?;
         let s3 = compose_subst(&else_result.subst, &s2);
 
         let then_type = apply_subst(&s3, &then_result.ty);
@@ -916,7 +1016,7 @@ fn infer_if(
 fn infer_let(
     env: &TypeEnv,
     elements: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     if elements.len() < 3 {
         return Err(TypeError::ArityMismatch {
@@ -952,15 +1052,16 @@ fn infer_let(
 
         if let Expr::List { .. } = name_expr {
             let name_elements = ast::list_to_array(name_expr);
-            if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
-                let n = ast::get_symbol_name(name_elements[0], interner).ok_or(
+            if name_elements.len() == 3 && is_symbol(name_elements[1], session.interner, ":") {
+                let n = ast::get_symbol_name(name_elements[0], session.interner).ok_or(
                     TypeError::InvalidTypeAnnotation {
                         message: "Expected symbol before :".into(),
                         span: Some(name_elements[0].span()),
                     },
                 )?;
                 name = n.to_string();
-                annotated_type = Some(parse_type_expr(name_elements[2], env, interner)?);
+                annotated_type = Some(parse_type_expr(name_elements[2], env, session.interner)?);
+                session.record_definition(&name, name_elements[0].span());
             } else {
                 return Err(TypeError::InvalidTypeAnnotation {
                     message: "Invalid let binding name".into(),
@@ -968,17 +1069,18 @@ fn infer_let(
                 });
             }
         } else {
-            let n = ast::get_symbol_name(name_expr, interner).ok_or(
+            let n = ast::get_symbol_name(name_expr, session.interner).ok_or(
                 TypeError::InvalidTypeAnnotation {
                     message: "let binding name must be a symbol".into(),
                     span: Some(name_expr.span()),
                 },
             )?;
             name = n.to_string();
+            session.record_definition(&name, name_expr.span());
         }
 
         let env_for_value = apply_subst_env(&subst, &let_env);
-        let value_result = infer_expr(&env_for_value, value_expr, interner)?;
+        let value_result = infer_expr(&env_for_value, value_expr, session)?;
 
         subst = compose_subst(&value_result.subst, &subst);
         all_effects = combine_effect_rows(&all_effects, &value_result.effects);
@@ -1001,7 +1103,7 @@ fn infer_let(
 
     // Infer body
     let (subst, all_effects, types) =
-        infer_exprs(&let_env, body_exprs, interner, subst, all_effects)?;
+        infer_exprs(&let_env, body_exprs, session, subst, all_effects)?;
     let body_type = types.into_iter().last().unwrap_or_else(t_unit);
 
     Ok(InferResult {
@@ -1016,7 +1118,7 @@ fn infer_let(
 fn infer_begin(
     env: &TypeEnv,
     elements: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     let body_exprs: Vec<&Expr> = elements[1..].to_vec();
 
@@ -1024,7 +1126,7 @@ fn infer_begin(
         return Ok(pure_result(t_unit()));
     }
 
-    let (subst, last_type, all_effects) = infer_body_with_defines(env, &body_exprs, interner)?;
+    let (subst, last_type, all_effects) = infer_body_with_defines(env, &body_exprs, session)?;
 
     Ok(InferResult {
         ty: apply_subst(&subst, &last_type),
@@ -1038,7 +1140,7 @@ fn infer_begin(
 fn infer_cond(
     env: &TypeEnv,
     elements: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     let clauses = &elements[1..];
     if clauses.is_empty() {
@@ -1061,9 +1163,9 @@ fn infer_cond(
         let test_expr = clause[0];
         let result_expr = clause[1];
 
-        if !is_symbol(test_expr, interner, "else") {
+        if !is_symbol(test_expr, session.interner, "else") {
             let test_env = apply_subst_env(&subst, env);
-            let test_result = infer_expr(&test_env, test_expr, interner)?;
+            let test_result = infer_expr(&test_env, test_expr, session)?;
             let test_unify = unify_with_context(&test_result.ty, &t_bool(), "cond test")
                 .map_err(|e| e.with_span_if_missing(test_expr.span()))?;
             subst = compose_subst(&test_unify, &compose_subst(&test_result.subst, &subst));
@@ -1071,7 +1173,7 @@ fn infer_cond(
         }
 
         let result_env = apply_subst_env(&subst, env);
-        let expr_result = infer_expr(&result_env, result_expr, interner)?;
+        let expr_result = infer_expr(&result_env, result_expr, session)?;
         subst = compose_subst(&expr_result.subst, &subst);
         all_effects = combine_effect_rows(&all_effects, &expr_result.effects);
 
@@ -1156,7 +1258,7 @@ fn check_exhaustiveness(
 fn infer_match(
     env: &TypeEnv,
     elements: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     if elements.len() < 3 {
         return Err(TypeError::ArityMismatch {
@@ -1170,7 +1272,7 @@ fn infer_match(
     let scrutinee_expr = elements[1];
     let branches = &elements[2..];
 
-    let scrutinee_result = infer_expr(env, scrutinee_expr, interner)?;
+    let scrutinee_result = infer_expr(env, scrutinee_expr, session)?;
     let mut subst = scrutinee_result.subst;
     let mut scrutinee_type = scrutinee_result.ty;
     let mut result_type: Option<Type> = None;
@@ -1189,7 +1291,7 @@ fn infer_match(
         let pattern_expr = branch_elements[0];
         let body_expr = branch_elements[1];
 
-        let pattern = parse_pattern(pattern_expr, env, interner)?;
+        let pattern = parse_pattern(pattern_expr, env, session.interner)?;
         parsed_patterns.push(pattern.clone());
 
         let pattern_check = infer_pattern(
@@ -1215,7 +1317,7 @@ fn infer_match(
                 .insert(name.to_string(), monotype(apply_subst(&subst, ty)));
         }
 
-        let body_result = infer_expr(&branch_env, body_expr, interner)?;
+        let body_result = infer_expr(&branch_env, body_expr, session)?;
         subst = compose_subst(&body_result.subst, &subst);
         all_effects = combine_effect_rows(&all_effects, &body_result.effects);
 
@@ -1361,7 +1463,7 @@ fn infer_variadic_arith(
     op_name: &str,
     arg_exprs: &[&Expr],
     op_span: Span,
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     let min_args =
         variadic_arith_min_args(op_name).expect("infer_variadic_arith called with non-arith op");
@@ -1380,7 +1482,7 @@ fn infer_variadic_arith(
     }
 
     let (mut subst, all_effects, arg_types) =
-        infer_exprs(env, arg_exprs, interner, empty_subst(), effect_row_empty())?;
+        infer_exprs(env, arg_exprs, session, empty_subst(), effect_row_empty())?;
 
     let mut unified_type = apply_subst(&subst, &arg_types[0]);
     for (i, at) in arg_types.iter().enumerate().skip(1) {
@@ -1413,7 +1515,7 @@ fn infer_ffi_application(
     fn_name: &str,
     arg_exprs: &[&Expr],
     op_span: Span,
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     // ffi-call requires a foreign declaration for type checking
     if fn_name == "ffi-call" {
@@ -1426,7 +1528,7 @@ fn infer_ffi_application(
             });
         }
 
-        let lib_name = ast::get_symbol_name(arg_exprs[0], interner).ok_or_else(|| {
+        let lib_name = ast::get_symbol_name(arg_exprs[0], session.interner).ok_or_else(|| {
             TypeError::InvalidTypeAnnotation {
                 message: "ffi-call first argument must be a library variable".into(),
                 span: Some(arg_exprs[0].span()),
@@ -1475,7 +1577,7 @@ fn infer_ffi_application(
 
         // Infer all args (lib, fn-name, then call args)
         let (mut subst, all_effects, all_arg_types) =
-            infer_exprs(env, arg_exprs, interner, empty_subst(), effect_row_empty())?;
+            infer_exprs(env, arg_exprs, session, empty_subst(), effect_row_empty())?;
 
         // Unify each call arg type with its declared param type
         let call_arg_types = &all_arg_types[2..]; // skip lib and fn-name
@@ -1498,14 +1600,14 @@ fn infer_ffi_application(
 
     // Non-ffi-call variadic functions: struct-new, struct-get, struct-set, list
     let (mut subst, all_effects, arg_types) =
-        infer_exprs(env, arg_exprs, interner, empty_subst(), effect_row_empty())?;
+        infer_exprs(env, arg_exprs, session, empty_subst(), effect_row_empty())?;
 
     let result_type = match fn_name {
         "struct-new" => {
             // (struct-new StructDef val1 val2 ...)
             // First arg is the struct def, remaining are field values
             if !arg_exprs.is_empty() {
-                if let Some(sym_name) = ast::get_symbol_name(arg_exprs[0], interner) {
+                if let Some(sym_name) = ast::get_symbol_name(arg_exprs[0], session.interner) {
                     if let Some(info) = lookup_ffi_struct_info(env, sym_name) {
                         let value_args = &arg_types[1..]; // skip struct def arg
                         if value_args.len() != info.fields.len() {
@@ -1621,25 +1723,25 @@ fn infer_ffi_application(
 fn infer_application(
     env: &TypeEnv,
     elements: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     let fn_expr = elements[0];
     let arg_exprs = &elements[1..];
 
     // Check for variadic arithmetic
-    if let Some(fn_name) = ast::get_symbol_name(fn_expr, interner) {
+    if let Some(fn_name) = ast::get_symbol_name(fn_expr, session.interner) {
         if variadic_arith_min_args(fn_name).is_some() {
-            return infer_variadic_arith(env, fn_name, arg_exprs, fn_expr.span(), interner);
+            return infer_variadic_arith(env, fn_name, arg_exprs, fn_expr.span(), session);
         }
         if FFI_VARIADIC_FUNCTIONS.contains(&fn_name) {
-            return infer_ffi_application(env, fn_name, arg_exprs, fn_expr.span(), interner);
+            return infer_ffi_application(env, fn_name, arg_exprs, fn_expr.span(), session);
         }
     }
 
-    let fn_result = infer_expr(env, fn_expr, interner)?;
+    let fn_result = infer_expr(env, fn_expr, session)?;
 
     let (subst, mut all_effects, arg_types) =
-        infer_exprs(env, arg_exprs, interner, fn_result.subst, fn_result.effects)?;
+        infer_exprs(env, arg_exprs, session, fn_result.subst, fn_result.effects)?;
 
     let result_type = fresh_type_var();
     let fresh_eff_var = fresh_effect_row_var();
@@ -1769,7 +1871,7 @@ fn infer_effect_def(
 fn infer_perform(
     env: &TypeEnv,
     elements: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     if elements.len() < 2 {
         return Err(TypeError::ArityMismatch {
@@ -1780,11 +1882,12 @@ fn infer_perform(
         });
     }
 
-    let op_name =
-        ast::get_symbol_name(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
+    let op_name = ast::get_symbol_name(elements[1], session.interner).ok_or(
+        TypeError::InvalidTypeAnnotation {
             message: "perform operation name must be a symbol".into(),
             span: Some(elements[1].span()),
-        })?;
+        },
+    )?;
 
     let op_name_str = op_name.to_string();
     let (effect, op) = if let Some((effect_name, op_name_only)) = op_name_str.rsplit_once('/') {
@@ -1817,7 +1920,7 @@ fn infer_perform(
 
     let arg_exprs = &elements[2..];
     let (mut subst, mut all_effects, arg_types) =
-        infer_exprs(env, arg_exprs, interner, empty_subst(), effect_row_empty())?;
+        infer_exprs(env, arg_exprs, session, empty_subst(), effect_row_empty())?;
 
     // Allow zero-arg perform on thunk-typed ops: (perform op) when op has params=[Unit]
     let is_implicit_unit_thunk =
@@ -1942,7 +2045,7 @@ fn remove_handled_effects(
 fn infer_handle(
     env: &TypeEnv,
     elements: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     if elements.len() < 2 {
         return Err(TypeError::ArityMismatch {
@@ -1954,7 +2057,7 @@ fn infer_handle(
     }
 
     let body_expr = elements[1];
-    let body_result = infer_expr(env, body_expr, interner)?;
+    let body_result = infer_expr(env, body_expr, session)?;
 
     let mut subst = body_result.subst.clone();
     let mut result_type: Option<Type> = None;
@@ -1968,7 +2071,7 @@ fn infer_handle(
                 span: Some(clause.span()),
             });
         }
-        if !is_symbol(clause_elements[1], interner, "->") {
+        if !is_symbol(clause_elements[1], session.interner, "->") {
             return Err(TypeError::InvalidTypeAnnotation {
                 message: "handle clause must be ((pattern) -> body)".into(),
                 span: Some(clause_elements[1].span()),
@@ -1986,7 +2089,7 @@ fn infer_handle(
             });
         }
 
-        let Some(op_name) = ast::get_symbol_name(pattern_elements[0], interner) else {
+        let Some(op_name) = ast::get_symbol_name(pattern_elements[0], session.interner) else {
             continue;
         };
 
@@ -1994,14 +2097,15 @@ fn infer_handle(
             // Return handler — bind the return variable and infer the body
             let mut handler_env = apply_subst_env(&subst, env);
             if pattern_elements.len() >= 2
-                && let Some(return_var_name) = ast::get_symbol_name(pattern_elements[1], interner)
+                && let Some(return_var_name) =
+                    ast::get_symbol_name(pattern_elements[1], session.interner)
             {
                 handler_env.bindings.insert(
                     return_var_name.to_string(),
                     monotype(apply_subst(&subst, &body_result.ty)),
                 );
             }
-            let handler_result = infer_expr(&handler_env, body, interner)?;
+            let handler_result = infer_expr(&handler_env, body, session)?;
             subst = compose_subst(&handler_result.subst, &subst);
             let handler_type = apply_subst(&subst, &handler_result.ty);
             unify_branch(
@@ -2040,7 +2144,7 @@ fn infer_handle(
         let mut handler_env = apply_subst_env(&subst, env);
         let arg_patterns = &pattern_elements[1..pattern_elements.len().saturating_sub(1)];
         for (i, arg_p) in arg_patterns.iter().enumerate() {
-            if let Some(arg_name) = ast::get_symbol_name(arg_p, interner)
+            if let Some(arg_name) = ast::get_symbol_name(arg_p, session.interner)
                 && i < op_info.params.len()
             {
                 handler_env
@@ -2049,7 +2153,7 @@ fn infer_handle(
             }
         }
         if let Some(cont_p) = pattern_elements.last()
-            && let Some(k_name) = ast::get_symbol_name(cont_p, interner)
+            && let Some(k_name) = ast::get_symbol_name(cont_p, session.interner)
         {
             let k_type = type_arrow(
                 vec![op_info.result.clone()],
@@ -2060,7 +2164,7 @@ fn infer_handle(
                 .insert(k_name.to_string(), monotype(k_type));
         }
 
-        let handler_result = infer_expr(&handler_env, body, interner)?;
+        let handler_result = infer_expr(&handler_env, body, session)?;
         subst = compose_subst(&handler_result.subst, &subst);
         let handler_type = apply_subst(&subst, &handler_result.ty);
         unify_branch(
@@ -2087,7 +2191,7 @@ fn infer_handle(
 fn infer_resume(
     env: &TypeEnv,
     elements: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<InferResult, TypeError> {
     if elements.len() != 3 {
         return Err(TypeError::ArityMismatch {
@@ -2098,12 +2202,12 @@ fn infer_resume(
         });
     }
 
-    let cont_result = infer_expr(env, elements[1], interner)?;
+    let cont_result = infer_expr(env, elements[1], session)?;
     let mut subst = cont_result.subst;
     let mut all_effects = cont_result.effects;
 
     let value_env = apply_subst_env(&subst, env);
-    let value_result = infer_expr(&value_env, elements[2], interner)?;
+    let value_result = infer_expr(&value_env, elements[2], session)?;
     subst = compose_subst(&value_result.subst, &subst);
     all_effects = combine_effect_rows(&all_effects, &value_result.effects);
 
@@ -2272,25 +2376,27 @@ fn process_define(
     env: &TypeEnv,
     elements: &[&Expr],
     current_subst: &Substitution,
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<(TypeEnv, Substitution), TypeError> {
     let name_expr = elements[1];
     let value_expr = elements[2];
 
     let name: String;
     let mut annotated_type: Option<Type> = None;
+    let name_span: Span;
 
     if let Expr::List { .. } = name_expr {
         let name_elements = ast::list_to_array(name_expr);
-        if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
-            name = ast::get_symbol_name(name_elements[0], interner)
+        if name_elements.len() == 3 && is_symbol(name_elements[1], session.interner, ":") {
+            name = ast::get_symbol_name(name_elements[0], session.interner)
                 .ok_or(TypeError::InvalidTypeAnnotation {
                     message: "Expected symbol before :".into(),
                     span: Some(name_elements[0].span()),
                 })?
                 .to_string();
+            name_span = name_elements[0].span();
 
-            let ty = parse_type_annotation(name_elements[2], env, interner)?;
+            let ty = parse_type_annotation(name_elements[2], env, session.interner)?;
             annotated_type = Some(ty);
         } else {
             return Err(TypeError::InvalidTypeAnnotation {
@@ -2299,20 +2405,23 @@ fn process_define(
             });
         }
     } else {
-        name = ast::get_symbol_name(name_expr, interner)
+        name = ast::get_symbol_name(name_expr, session.interner)
             .ok_or(TypeError::InvalidTypeAnnotation {
                 message: "define expects a symbol name".into(),
                 span: Some(elements[1].span()),
             })?
             .to_string();
+        name_span = name_expr.span();
     }
+
+    session.record_definition(&name, name_span);
 
     // Add placeholder for recursive functions
     let placeholder_type = annotated_type.clone().unwrap_or_else(fresh_type_var);
     let infer_env = extend_env(env, &name, monotype(placeholder_type));
 
     let applied_env = apply_subst_env(current_subst, &infer_env);
-    let value_result = infer_expr(&applied_env, value_expr, interner)?;
+    let value_result = infer_expr(&applied_env, value_expr, session)?;
 
     let mut subst = compose_subst(&value_result.subst, current_subst);
     let mut value_type = value_result.ty;
@@ -2644,7 +2753,8 @@ pub fn infer_program(
     exprs: &[Expr],
     interner: &Interner,
 ) -> Result<(TypeEnv, Vec<Type>), TypeError> {
-    infer_program_inner(env, exprs, interner, None, None, None)
+    let session = InferSession::new(interner);
+    infer_program_inner(env, exprs, &session, None, None, None)
 }
 
 /// Type-check a program with module/import support.
@@ -2656,13 +2766,26 @@ pub fn infer_program_with_context(
     loader: &dyn TypeModuleLoader,
     cache: &TypeModuleCache,
 ) -> Result<(TypeEnv, Vec<Type>), TypeError> {
-    infer_program_inner(env, exprs, interner, file_path, Some(loader), Some(cache))
+    let session = InferSession::new(interner);
+    infer_program_inner(env, exprs, &session, file_path, Some(loader), Some(cache))
+}
+
+/// Type-check a program with module/import support and an InferSession (for LSP context collection).
+pub fn infer_program_with_session(
+    env: &TypeEnv,
+    exprs: &[Expr],
+    session: &InferSession<'_>,
+    file_path: Option<&Path>,
+    loader: &dyn TypeModuleLoader,
+    cache: &TypeModuleCache,
+) -> Result<(TypeEnv, Vec<Type>), TypeError> {
+    infer_program_inner(env, exprs, session, file_path, Some(loader), Some(cache))
 }
 
 fn infer_program_inner(
     env: &TypeEnv,
     exprs: &[Expr],
-    interner: &Interner,
+    session: &InferSession,
     file_path: Option<&Path>,
     loader: Option<&dyn TypeModuleLoader>,
     cache: Option<&TypeModuleCache>,
@@ -2675,22 +2798,22 @@ fn infer_program_inner(
         if let Expr::List { .. } = expr {
             let elements = ast::list_to_array(expr);
             if !elements.is_empty() {
-                let first_sym = ast::get_symbol_name(elements[0], interner);
+                let first_sym = ast::get_symbol_name(elements[0], session.interner);
 
                 if first_sym == Some("data") {
-                    current_env = process_data_def(&current_env, &elements, interner)?;
+                    current_env = process_data_def(&current_env, &elements, session.interner)?;
                     types.push(t_unit());
                     continue;
                 }
 
                 if first_sym == Some("define") && elements.len() >= 3 {
                     // Check if this define is binding an ffi-struct call
-                    if let Some(info) = try_extract_ffi_struct_info(elements[2], interner) {
+                    if let Some(info) = try_extract_ffi_struct_info(elements[2], session.interner) {
                         let name = info.name.clone();
                         register_ffi_struct_type(&mut current_env, &name, info);
                     }
                     let (new_env, new_subst) =
-                        process_define(&current_env, &elements, &global_subst, interner)?;
+                        process_define(&current_env, &elements, &global_subst, session)?;
                     current_env = new_env;
                     global_subst = new_subst;
                     types.push(t_unit());
@@ -2698,25 +2821,25 @@ fn infer_program_inner(
                 }
 
                 if first_sym == Some("declare") && elements.len() >= 3 {
-                    current_env = process_declare(&current_env, &elements, interner)?;
+                    current_env = process_declare(&current_env, &elements, session.interner)?;
                     types.push(t_unit());
                     continue;
                 }
 
                 if first_sym == Some("effect") && elements.len() >= 2 {
-                    current_env = process_effect_def(&current_env, &elements, interner)?;
+                    current_env = process_effect_def(&current_env, &elements, session.interner)?;
                     types.push(t_unit());
                     continue;
                 }
 
                 if first_sym == Some("foreign") && elements.len() >= 2 {
-                    current_env = process_foreign_def(&current_env, &elements, interner)?;
+                    current_env = process_foreign_def(&current_env, &elements, session.interner)?;
                     types.push(t_unit());
                     continue;
                 }
 
                 if first_sym == Some("foreign-lib") && elements.len() >= 3 {
-                    current_env = process_ffi_lib_def(&current_env, &elements, interner)?;
+                    current_env = process_ffi_lib_def(&current_env, &elements, session.interner)?;
                     types.push(t_unit());
                     continue;
                 }
@@ -2726,7 +2849,7 @@ fn infer_program_inner(
                         current_env = process_import(
                             &current_env,
                             &elements,
-                            interner,
+                            session,
                             file_path,
                             loader,
                             cache,
@@ -2741,7 +2864,7 @@ fn infer_program_inner(
 
         // Regular expression
         let applied_env = apply_subst_env(&global_subst, &current_env);
-        let result = infer_expr(&applied_env, expr, interner)?;
+        let result = infer_expr(&applied_env, expr, session)?;
 
         global_subst = compose_subst(&result.subst, &global_subst);
         types.push(apply_subst(&global_subst, &result.ty));
@@ -2817,15 +2940,16 @@ fn parse_import_form(
 fn process_import(
     env: &TypeEnv,
     elements: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
     file_path: Option<&Path>,
     loader: &dyn TypeModuleLoader,
     cache: &TypeModuleCache,
 ) -> Result<TypeEnv, TypeError> {
-    let (path_str, form) = parse_import_form(elements, interner)?;
+    let (path_str, form) = parse_import_form(elements, session.interner)?;
 
     // Resolve and load module
-    let (module_exprs, resolved_path) = loader.resolve_and_load(&path_str, file_path, interner)?;
+    let (module_exprs, resolved_path) =
+        loader.resolve_and_load(&path_str, file_path, session.interner)?;
 
     // Check cache
     match cache.get_state(&resolved_path) {
@@ -2858,7 +2982,7 @@ fn process_import(
     let (module_env, _) = infer_program_inner(
         env,
         &module_exprs,
-        interner,
+        session,
         Some(&resolved_path),
         Some(loader),
         Some(cache),

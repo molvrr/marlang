@@ -1,7 +1,10 @@
 use crate::ast::{Type, reset_effect_row_var_counter, reset_type_var_counter};
 use crate::env::{TypeEnv, empty_env};
 use crate::errors::TypeError;
-use crate::infer::{infer_program, infer_program_with_context};
+use crate::infer::{
+    InferContext, InferSession, infer_program, infer_program_with_context,
+    infer_program_with_session,
+};
 use marlang_core::ast::Expr;
 use marlang_core::intern::Interner;
 use std::cell::RefCell;
@@ -114,5 +117,27 @@ pub fn type_check_with_modules(
     let cache = TypeModuleCache::new();
     let (env, types) =
         infer_program_with_context(&env, exprs, interner, file_path, loader, &cache)?;
+    Ok(TypeCheckOutput { env, types })
+}
+
+/// Type check with module/import support and context collection (LSP usage).
+///
+/// Like `type_check_with_modules`, but also populates the provided `InferContext`
+/// with type information, definitions, and references for hover and go-to-definition.
+pub fn type_check_with_context(
+    exprs: &[Expr],
+    interner: &Interner,
+    file_path: Option<&Path>,
+    loader: &dyn TypeModuleLoader,
+    context: &RefCell<InferContext>,
+) -> Result<TypeCheckOutput, TypeError> {
+    reset_type_var_counter();
+    reset_effect_row_var_counter();
+
+    let env = empty_env();
+    let cache = TypeModuleCache::new();
+    let session = InferSession::with_context(interner, context);
+    let (env, types) =
+        infer_program_with_session(&env, exprs, &session, file_path, loader, &cache)?;
     Ok(TypeCheckOutput { env, types })
 }

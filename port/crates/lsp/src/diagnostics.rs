@@ -3,10 +3,12 @@ use marlang_core::intern::Interner;
 use marlang_core::lexer::{LexError, lex};
 use marlang_core::parser::{ParseError, parse_with_interner};
 use marlang_core::span::{LineMap, Span};
-use marlang_types::checker::{TypeModuleLoader, type_check_with_modules};
+use marlang_types::checker::{TypeModuleLoader, type_check_with_context};
 use marlang_types::errors::{TypeError, error_span, format_error};
+use marlang_types::infer::InferContext;
 use marlang_vm::errors::VMError;
 use marlang_vm::modules::{ModuleLoader, expand_macros};
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
@@ -189,12 +191,24 @@ impl TypeModuleLoader for LspModuleLoader {
     }
 }
 
+// ===== Check Result =====
+
+/// The result of a full document check, including diagnostics and optional context.
+pub struct CheckResult {
+    /// LSP diagnostics (errors) found during checking.
+    pub diagnostics: Vec<Diagnostic>,
+    /// InferContext populated during type checking (only when type check succeeds).
+    /// Contains type_map, definitions, and references for hover/go-to-definition.
+    pub context: Option<InferContext>,
+}
+
 // ===== Main check pipeline =====
 
 /// Run the full diagnostics pipeline on a document's source text.
 ///
-/// Returns a list of LSP diagnostics. An empty list means no errors.
-pub fn check_document(source: &str, file_path: Option<&Path>) -> Vec<Diagnostic> {
+/// Returns a `CheckResult` with diagnostics and, on success, the `InferContext`
+/// for hover and go-to-definition.
+pub fn check_document(source: &str, file_path: Option<&Path>) -> CheckResult {
     let line_map = LineMap::new(source);
     let interner = Interner::new();
     let loader = ModuleLoader::new();
@@ -202,25 +216,60 @@ pub fn check_document(source: &str, file_path: Option<&Path>) -> Vec<Diagnostic>
     // Stage 1: Lex
     let tokens = match lex(source, &interner) {
         Ok(t) => t,
-        Err(e) => return vec![lex_error_to_diagnostic(&line_map, &e)],
+        Err(e) => {
+            return CheckResult {
+                diagnostics: vec![lex_error_to_diagnostic(&line_map, &e)],
+                context: None,
+            };
+        }
     };
 
     // Stage 2: Parse
     let exprs = match parse_with_interner(&tokens, &interner) {
         Ok(e) => e,
-        Err(e) => return vec![parse_error_to_diagnostic(&line_map, &e)],
+        Err(e) => {
+            return CheckResult {
+                diagnostics: vec![parse_error_to_diagnostic(&line_map, &e)],
+                context: None,
+            };
+        }
     };
 
     // Stage 3: Macro expand
     let expanded = match expand_macros(&interner, &exprs, file_path, &loader) {
         Ok(e) => e,
-        Err(e) => return vec![vm_error_to_diagnostic(&line_map, &e)],
+        Err(e) => {
+            return CheckResult {
+                diagnostics: vec![vm_error_to_diagnostic(&line_map, &e)],
+                context: None,
+            };
+        }
     };
 
-    // Stage 4: Type check
+    // Stage 4: Type check with context collection
+    let context = RefCell::new(InferContext::new());
     let type_loader = LspModuleLoader::new(&loader);
-    match type_check_with_modules(&expanded.exprs, &interner, file_path, &type_loader) {
-        Ok(_) => vec![],
-        Err(e) => vec![type_error_to_diagnostic(&line_map, &e)],
+    match type_check_with_context(
+        &expanded.exprs,
+        &interner,
+        file_path,
+        &type_loader,
+        &context,
+    ) {
+        Ok(_) => {
+            let context = context.into_inner();
+            CheckResult {
+                diagnostics: vec![],
+                context: Some(context),
+            }
+        }
+        Err(e) => {
+            // Even on type error, we have partial context from before the error
+            let context = context.into_inner();
+            CheckResult {
+                diagnostics: vec![type_error_to_diagnostic(&line_map, &e)],
+                context: Some(context),
+            }
+        }
     }
 }

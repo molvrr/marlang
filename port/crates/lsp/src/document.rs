@@ -1,4 +1,7 @@
+use crate::diagnostics::CheckResult;
 use dashmap::DashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use tower_lsp::lsp_types::Url;
 
 /// Tracks the state of all open documents in the editor.
@@ -9,6 +12,8 @@ pub struct DocumentState {
 struct DocumentData {
     source: String,
     version: i32,
+    /// Cached result from the last successful check pipeline run.
+    last_check: Arc<RwLock<Option<CheckResult>>>,
 }
 
 impl DocumentState {
@@ -25,6 +30,7 @@ impl DocumentState {
             DocumentData {
                 source: text,
                 version,
+                last_check: Arc::new(RwLock::new(None)),
             },
         );
     }
@@ -47,5 +53,12 @@ impl DocumentState {
         self.documents
             .get(uri)
             .map(|entry| (entry.source.clone(), entry.version))
+    }
+
+    /// Get a handle to the cached check result for a document.
+    pub fn get_check_result(&self, uri: &Url) -> Option<Arc<RwLock<Option<CheckResult>>>> {
+        self.documents
+            .get(uri)
+            .map(|entry| entry.last_check.clone())
     }
 }

@@ -1,6 +1,8 @@
 mod backend;
+mod definition;
 mod diagnostics;
 mod document;
+mod hover;
 
 use crate::backend::MarlangBackend;
 use tower_lsp::{LspService, Server};

@@ -1,6 +1,9 @@
+use crate::definition::find_definition;
 use crate::diagnostics::check_document;
 use crate::document::DocumentState;
+use crate::hover::{span_to_range, type_at_position};
 use dashmap::DashMap;
+use marlang_core::span::LineMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,6 +51,7 @@ impl MarlangBackend {
         let check_uri = uri.clone();
         let cancel = Arc::new(Notify::new());
         let cancel_clone = cancel.clone();
+        let doc_check_handle = self.documents.get_check_result(&uri);
 
         let handle = tokio::spawn(async move {
             // Wait for the debounce period, but bail if cancelled
@@ -58,14 +62,23 @@ impl MarlangBackend {
 
             // Run the check on a blocking thread (the pipeline is synchronous)
             let file_path = uri_to_path(&check_uri);
-            let diagnostics =
+            let result =
                 tokio::task::spawn_blocking(move || check_document(&source, file_path.as_deref()))
-                    .await
-                    .unwrap_or_default();
+                    .await;
 
-            client
-                .publish_diagnostics(check_uri, diagnostics, Some(version))
-                .await;
+            if let Ok(check_result) = result {
+                let diagnostics = check_result.diagnostics.clone();
+
+                // Cache the check result for hover/go-to-definition
+                if let Some(handle) = doc_check_handle {
+                    let mut lock = handle.write().await;
+                    *lock = Some(check_result);
+                }
+
+                client
+                    .publish_diagnostics(check_uri, diagnostics, Some(version))
+                    .await;
+            }
         });
 
         self.pending.insert(uri, PendingCheck { handle, cancel });
@@ -81,17 +94,27 @@ impl MarlangBackend {
 
         let client = self.client.clone();
         let check_uri = uri.clone();
+        let doc_check_handle = self.documents.get_check_result(&uri);
 
         tokio::spawn(async move {
             let file_path = uri_to_path(&check_uri);
-            let diagnostics =
+            let result =
                 tokio::task::spawn_blocking(move || check_document(&source, file_path.as_deref()))
-                    .await
-                    .unwrap_or_default();
+                    .await;
 
-            client
-                .publish_diagnostics(check_uri, diagnostics, Some(version))
-                .await;
+            if let Ok(check_result) = result {
+                let diagnostics = check_result.diagnostics.clone();
+
+                // Cache the check result
+                if let Some(handle) = doc_check_handle {
+                    let mut lock = handle.write().await;
+                    *lock = Some(check_result);
+                }
+
+                client
+                    .publish_diagnostics(check_uri, diagnostics, Some(version))
+                    .await;
+            }
         });
     }
 }
@@ -116,6 +139,8 @@ impl LanguageServer for MarlangBackend {
                         ..Default::default()
                     },
                 )),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -174,5 +199,85 @@ impl LanguageServer for MarlangBackend {
 
         // Clear diagnostics for the closed document
         self.client.publish_diagnostics(uri, vec![], None).await;
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        // Get the cached check result and document source
+        let check_handle = match self.documents.get_check_result(uri) {
+            Some(h) => h,
+            None => return Ok(None),
+        };
+        let (source, _) = match self.documents.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let lock = check_handle.read().await;
+        let check_result = match lock.as_ref() {
+            Some(cr) => cr,
+            None => return Ok(None),
+        };
+
+        let context = match &check_result.context {
+            Some(ctx) => ctx,
+            None => return Ok(None),
+        };
+
+        let type_str = match type_at_position(context, &source, position) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        Ok(Some(Hover {
+            contents: HoverContents::Scalar(MarkedString::LanguageString(LanguageString {
+                language: "marlang".to_string(),
+                value: type_str,
+            })),
+            range: None,
+        }))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = &params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let check_handle = match self.documents.get_check_result(uri) {
+            Some(h) => h,
+            None => return Ok(None),
+        };
+        let (source, _) = match self.documents.get(uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let lock = check_handle.read().await;
+        let check_result = match lock.as_ref() {
+            Some(cr) => cr,
+            None => return Ok(None),
+        };
+
+        let context = match &check_result.context {
+            Some(ctx) => ctx,
+            None => return Ok(None),
+        };
+
+        let def_span = match find_definition(context, &source, position) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let line_map = LineMap::new(&source);
+        let range = span_to_range(&line_map, def_span);
+
+        Ok(Some(GotoDefinitionResponse::Scalar(Location {
+            uri: uri.clone(),
+            range,
+        })))
     }
 }
