@@ -189,6 +189,10 @@ struct Compiler<'a> {
     /// True when `prescan_body_defines` has run for this compiler scope
     /// (i.e. user-written lambda).  Used to reject non-leading defines.
     did_prescan: bool,
+    /// When set, the next `compile_lambda` call uses this as the function name
+    /// instead of `"<lambda>"`. Set by `compile_define` and `compile_let` when
+    /// the value expression is a lambda, so stack traces show meaningful names.
+    pending_lambda_name: Option<String>,
 }
 
 impl<'a> Compiler<'a> {
@@ -215,6 +219,7 @@ impl<'a> Compiler<'a> {
             known_effect_ops,
             module_id,
             did_prescan: false,
+            pending_lambda_name: None,
         }
     }
 
@@ -535,6 +540,20 @@ impl<'a> Compiler<'a> {
         None
     }
 
+    /// Check if an expression is a `(lambda ...)` form.
+    fn is_lambda_expr(&self, expr: &Expr) -> bool {
+        if let Expr::List { .. } = expr {
+            let elements = ast::list_to_array(expr);
+            if let Some(first) = elements.first()
+                && let Some(sym) = Self::get_symbol(first)
+                && sym == self.known_symbols.lambda
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Check if we're inside a function body (not at the top level).
     fn is_inside_function(&self) -> bool {
         self.enclosing.is_some()
@@ -719,6 +738,12 @@ impl<'a> Compiler<'a> {
             return Err(CompileError::new("define expects 2 arguments", line));
         }
         let name = self.get_define_name(elements[1])?;
+
+        // If the value is a lambda, propagate the define name to the prototype
+        // so stack traces show meaningful function names instead of "<lambda>".
+        if self.is_lambda_expr(elements[2]) {
+            self.pending_lambda_name = Some(self.interner.resolve(name).to_string());
+        }
         self.compile_expr(elements[2], false)?;
 
         // If inside a function and the name was pre-allocated as a local, use SetLocal
@@ -801,10 +826,15 @@ impl<'a> Compiler<'a> {
 
         let body_exprs: Vec<&Expr> = elements[2..].to_vec();
 
-        // Create child compiler
+        // Create child compiler — use a pending name from define/let if available,
+        // otherwise fall back to "<lambda>".
+        let fn_name = self
+            .pending_lambda_name
+            .take()
+            .unwrap_or_else(|| "<lambda>".to_string());
         let parent_scope = self.snapshot_scope();
         let mut fn_compiler = Compiler::new(
-            "<lambda>",
+            &fn_name,
             self.interner,
             self.known_symbols,
             Some(parent_scope),
@@ -837,7 +867,7 @@ impl<'a> Compiler<'a> {
 
         // Create prototype — arity is the number of REQUIRED params
         let proto = FunctionPrototype {
-            name: "<lambda>".to_string(),
+            name: fn_name,
             arity: required_params.len() as u8,
             is_variadic,
             upvalues: fn_compiler.upvalues,
@@ -900,6 +930,10 @@ impl<'a> Compiler<'a> {
                 return Err(CompileError::new("let binding must be (name value)", line));
             }
             let name = self.get_param_name(pair[0])?;
+            // If the value is a lambda, propagate the let-binding name to the prototype
+            if self.is_lambda_expr(pair[1]) {
+                self.pending_lambda_name = Some(self.interner.resolve(name).to_string());
+            }
             self.compile_expr(pair[1], false)?;
             let slot = self.add_local(name);
             self.emit_op(Op::SetLocal, line, slot);

@@ -32,7 +32,7 @@
 - [ ] first class handler values
 - [ ] multi shot continuations?
 - [ ] Look into miette
-- [ ] when a program crashes we don't have stacktraces
+- [x] when a program crashes we don't have stacktraces
 - [x] stdlib: parser combinators
 - [x] mar disasm when importing something doesn't work
 - [x] Suggestion for disambiguating same operation name for effect handler isn't deterministic

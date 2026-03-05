@@ -1156,7 +1156,16 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             vm.pop(); // pop callee
 
                             vm.frames[frame_idx].ip = ip;
-                            let result = func(vm, &args).map_err(VMSignal::Error)?;
+                            let result = func(vm, &args).map_err(|mut e| {
+                                // Enrich builtin errors with stack trace and source location
+                                if e.stack_trace.is_empty() {
+                                    e.stack_trace = vm.capture_stack_trace(&vm.frames[frame_idx]);
+                                    if e.line == 0 {
+                                        e.line = e.stack_trace.first().map(|s| s.line).unwrap_or(0);
+                                    }
+                                }
+                                VMSignal::Error(e)
+                            })?;
                             cache_frame!(); // builtins may modify VM state
                             vm.push(result);
                         }
@@ -1226,7 +1235,17 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             };
                             let registry = crate::ffi::STRUCT_REGISTRY.lock().unwrap();
                             let result = crate::ffi::ffi_call(&lib, &fn_name, &args, &registry)
-                                .map_err(VMSignal::Error)?;
+                                .map_err(|mut e| {
+                                    if e.stack_trace.is_empty() {
+                                        e.stack_trace =
+                                            vm.capture_stack_trace(&vm.frames[frame_idx]);
+                                        if e.line == 0 {
+                                            e.line =
+                                                e.stack_trace.first().map(|s| s.line).unwrap_or(0);
+                                        }
+                                    }
+                                    VMSignal::Error(e)
+                                })?;
                             cache_frame!();
                             vm.push(result);
                         }
@@ -1316,7 +1335,15 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             vm.pop(); // pop callee
 
                             vm.frames[frame_idx].ip = ip;
-                            let result = func(vm, &args).map_err(VMSignal::Error)?;
+                            let result = func(vm, &args).map_err(|mut e| {
+                                if e.stack_trace.is_empty() {
+                                    e.stack_trace = vm.capture_stack_trace(&vm.frames[frame_idx]);
+                                    if e.line == 0 {
+                                        e.line = e.stack_trace.first().map(|s| s.line).unwrap_or(0);
+                                    }
+                                }
+                                VMSignal::Error(e)
+                            })?;
 
                             vm.frame_count -= 1;
                             if vm.frame_count <= base_frame_count {
@@ -1402,7 +1429,17 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             };
                             let registry = crate::ffi::STRUCT_REGISTRY.lock().unwrap();
                             let result = crate::ffi::ffi_call(&lib, &fn_name, &args, &registry)
-                                .map_err(VMSignal::Error)?;
+                                .map_err(|mut e| {
+                                    if e.stack_trace.is_empty() {
+                                        e.stack_trace =
+                                            vm.capture_stack_trace(&vm.frames[frame_idx]);
+                                        if e.line == 0 {
+                                            e.line =
+                                                e.stack_trace.first().map(|s| s.line).unwrap_or(0);
+                                        }
+                                    }
+                                    VMSignal::Error(e)
+                                })?;
 
                             vm.frame_count -= 1;
                             if vm.frame_count <= base_frame_count {

@@ -110,6 +110,8 @@ struct BlockedReceiver {
 enum ExitReason {
     Normal,
     Crash(String),
+    /// Like Crash but preserves the full VMError for the main fiber.
+    CrashWithTrace(VMError),
 }
 
 // ---------------------------------------------------------------------------
@@ -1629,6 +1631,7 @@ fn handle_fiber_exit(
     let reason_str = match &reason {
         ExitReason::Normal => "normal".to_string(),
         ExitReason::Crash(msg) => msg.clone(),
+        ExitReason::CrashWithTrace(e) => e.message.clone(),
     };
 
     // Notify monitors: deliver (Down pid reason) messages
@@ -2233,6 +2236,7 @@ fn scheduler_loop(
     main_body: Option<&Closure>,
 ) {
     let mut main_result = Value::nil();
+    let mut main_error: Option<VMError> = None;
 
     // If this is scheduler 0, run the main fiber first
     if is_main && let Some(body) = main_body {
@@ -2248,23 +2252,13 @@ fn scheduler_loop(
             }
             Err(VMSignal::Effect(signal)) => {
                 if let Err(e) = handle_effect(sched, shared, vm, signal) {
-                    handle_fiber_exit(
-                        sched,
-                        shared,
-                        vm,
-                        main_pid,
-                        ExitReason::Crash(e.message.clone()),
-                    );
+                    main_error = Some(e.clone());
+                    handle_fiber_exit(sched, shared, vm, main_pid, ExitReason::CrashWithTrace(e));
                 }
             }
             Err(VMSignal::Error(e)) => {
-                handle_fiber_exit(
-                    sched,
-                    shared,
-                    vm,
-                    main_pid,
-                    ExitReason::Crash(e.message.clone()),
-                );
+                main_error = Some(e.clone());
+                handle_fiber_exit(sched, shared, vm, main_pid, ExitReason::CrashWithTrace(e));
             }
         }
     }
@@ -2321,13 +2315,10 @@ fn scheduler_loop(
                         if !vm.handler_stack.is_empty() {
                             remove_handler_frame(vm);
                         }
-                        handle_fiber_exit(
-                            sched,
-                            shared,
-                            vm,
-                            pid,
-                            ExitReason::Crash(e.message.clone()),
-                        );
+                        if pid == 0 {
+                            main_error = Some(e.clone());
+                        }
+                        handle_fiber_exit(sched, shared, vm, pid, ExitReason::CrashWithTrace(e));
                     }
                 }
                 Err(VMSignal::Error(e)) => {
@@ -2337,14 +2328,21 @@ fn scheduler_loop(
                     if !vm.handler_stack.is_empty() {
                         remove_handler_frame(vm);
                     }
-                    handle_fiber_exit(sched, shared, vm, pid, ExitReason::Crash(e.message.clone()));
+                    if pid == 0 {
+                        main_error = Some(e.clone());
+                    }
+                    handle_fiber_exit(sched, shared, vm, pid, ExitReason::CrashWithTrace(e));
                 }
             }
 
             // Check for shutdown after each fiber
             if shared.shutdown.load(Ordering::Acquire) {
                 if is_main && let Some(ref sender) = result_sender {
-                    let _ = sender.send(Ok(main_result.clone()));
+                    let _ = sender.send(
+                        main_error
+                            .take()
+                            .map_or_else(|| Ok(main_result.clone()), Err),
+                    );
                 }
                 return;
             }
@@ -2358,7 +2356,11 @@ fn scheduler_loop(
         // 4. Check termination
         if check_termination(shared) {
             if is_main && let Some(ref sender) = result_sender {
-                let _ = sender.send(Ok(main_result.clone()));
+                let _ = sender.send(
+                    main_error
+                        .take()
+                        .map_or_else(|| Ok(main_result.clone()), Err),
+                );
             }
             return;
         }
@@ -2375,7 +2377,11 @@ fn scheduler_loop(
                 if process_single_message(sched, shared, vm, msg) {
                     // Shutdown requested
                     if is_main && let Some(ref sender) = result_sender {
-                        let _ = sender.send(Ok(main_result.clone()));
+                        let _ = sender.send(
+                            main_error
+                                .take()
+                                .map_or_else(|| Ok(main_result.clone()), Err),
+                        );
                     }
                     return;
                 }
@@ -2384,7 +2390,11 @@ fn scheduler_loop(
                 shared.idle_count.fetch_sub(1, Ordering::AcqRel);
                 if check_termination(shared) {
                     if is_main && let Some(ref sender) = result_sender {
-                        let _ = sender.send(Ok(main_result.clone()));
+                        let _ = sender.send(
+                            main_error
+                                .take()
+                                .map_or_else(|| Ok(main_result.clone()), Err),
+                        );
                     }
                     return;
                 }
@@ -2392,7 +2402,11 @@ fn scheduler_loop(
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                 shared.idle_count.fetch_sub(1, Ordering::AcqRel);
                 if is_main && let Some(ref sender) = result_sender {
-                    let _ = sender.send(Ok(main_result.clone()));
+                    let _ = sender.send(
+                        main_error
+                            .take()
+                            .map_or_else(|| Ok(main_result.clone()), Err),
+                    );
                 }
                 return;
             }

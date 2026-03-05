@@ -68,6 +68,8 @@ struct BlockedReceiver {
 enum ExitReason {
     Normal,
     Crash(String),
+    /// Like Crash but preserves the full VMError for the main fiber.
+    CrashWithTrace(VMError),
 }
 
 struct SchedulerState {
@@ -205,6 +207,7 @@ fn handle_fiber_exit(state: &mut SchedulerState, vm: &mut VM, pid: FiberId, reas
     let reason_str = match &reason {
         ExitReason::Normal => "normal".to_string(),
         ExitReason::Crash(msg) => msg.clone(),
+        ExitReason::CrashWithTrace(e) => e.message.clone(),
     };
 
     // Notify monitors: deliver (Down pid reason)
@@ -744,6 +747,7 @@ pub fn run_fibers(vm: &mut VM, body: &Closure) -> Result<Value, VMError> {
     };
 
     let mut main_result = Value::nil();
+    let mut main_error: Option<VMError> = None;
 
     // Run main fiber (PID 0)
     vm.current_pid = Some(0);
@@ -759,8 +763,9 @@ pub fn run_fibers(vm: &mut VM, body: &Closure) -> Result<Value, VMError> {
             handle_effect(&mut state, vm, signal)?;
         }
         Err(VMSignal::Error(e)) => {
-            // Main fiber crashed
-            handle_fiber_exit(&mut state, vm, 0, ExitReason::Crash(e.message.clone()));
+            // Main fiber crashed — preserve the full error for return
+            handle_fiber_exit(&mut state, vm, 0, ExitReason::CrashWithTrace(e.clone()));
+            main_error = Some(e);
         }
     }
 
@@ -837,7 +842,10 @@ pub fn run_fibers(vm: &mut VM, body: &Closure) -> Result<Value, VMError> {
                     if !vm.handler_stack.is_empty() {
                         remove_handler_frame(vm);
                     }
-                    handle_fiber_exit(&mut state, vm, pid, ExitReason::Crash(e.message.clone()));
+                    if pid == 0 {
+                        main_error = Some(e.clone());
+                    }
+                    handle_fiber_exit(&mut state, vm, pid, ExitReason::CrashWithTrace(e));
                 }
             }
             Err(VMSignal::Error(e)) => {
@@ -848,11 +856,17 @@ pub fn run_fibers(vm: &mut VM, body: &Closure) -> Result<Value, VMError> {
                 if !vm.handler_stack.is_empty() {
                     remove_handler_frame(vm);
                 }
-                handle_fiber_exit(&mut state, vm, pid, ExitReason::Crash(e.message.clone()));
+                if pid == 0 {
+                    main_error = Some(e.clone());
+                }
+                handle_fiber_exit(&mut state, vm, pid, ExitReason::CrashWithTrace(e));
             }
         }
     }
 
     vm.current_pid = None;
+    if let Some(e) = main_error {
+        return Err(e);
+    }
     Ok(main_result)
 }
