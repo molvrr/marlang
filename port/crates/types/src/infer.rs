@@ -2114,6 +2114,7 @@ fn infer_handle(
     let mut subst = body_result.subst.clone();
     let mut result_type: Option<Type> = None;
     let mut handled_ops_by_effect: HashMap<String, Vec<String>> = HashMap::new();
+    let mut has_return_handler = false;
 
     for clause in &elements[2..] {
         let clause_elements = ast::list_to_array(clause);
@@ -2147,6 +2148,7 @@ fn infer_handle(
 
         if op_name == "return" {
             // Return handler — bind the return variable and infer the body
+            has_return_handler = true;
             let mut handler_env = apply_subst_env(&subst, env);
             if pattern_elements.len() >= 2
                 && let Some(return_var_name) =
@@ -2225,6 +2227,19 @@ fn infer_handle(
             handler_type,
             "handler return types",
             None,
+        )?;
+    }
+
+    // Without a return handler, the body's value passes through unchanged when no
+    // effect is performed, so the body type must unify with the handler arms' types.
+    if !has_return_handler {
+        let body_type = apply_subst(&subst, &body_result.ty);
+        unify_branch(
+            &mut result_type,
+            &mut subst,
+            body_type,
+            "handle body and handler return types",
+            Some(body_expr.span()),
         )?;
     }
 

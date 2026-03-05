@@ -1,4 +1,4 @@
-- [ ] remove nan boxing
+- [ ] LSP: fix go-to definition bindings introduced through pattern matching
 - [ ] match on ADTs (Option, List, etc.) doesn't work inside defmacro bodies.
       The expansion VM compiles each prelude expression independently via
       compile_program, which starts with an empty known_constructors set.
@@ -41,6 +41,7 @@
 - [ ] LSP: workspace-wide features
 - [ ] ADTs with effect anotations on fields
 - [ ] existential types
+- [x] remove nan boxing
 - [x] Cleanup code
 - [x] when a program crashes we don't have stacktraces
 - [x] stdlib: parser combinators
