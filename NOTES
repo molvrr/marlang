@@ -23,7 +23,6 @@
 - [ ] Remove NIL:   self.emit_constant(ConstantValue::Nil, line);
 - [ ] Cross process messaging
 - [ ] stdlib: json
-- [x] stdlib: parser combinators
 - [ ] stdlib: persistent data structures
 - [ ] stdlib: synchronization primitives
 - [ ] stdlib: add bytewise operators
@@ -32,6 +31,9 @@
 - [ ] mutable references
 - [ ] first class handler values
 - [ ] multi shot continuations?
+- [ ] Look into miette
+- [ ] when a program crashes we don't have stacktraces
+- [x] stdlib: parser combinators
 - [x] mar disasm when importing something doesn't work
 - [x] Suggestion for disambiguating same operation name for effect handler isn't deterministic
         Maybe we should order effects somehow, so we aways suggest the same operation?
@@ -56,16 +58,3 @@
 - [x] Macro expansion cli subcommand
 - [x] Can we override builtin effect handlers?
 - [x] Rewrite examples to not call perform directly, only call it if there's no wrapper available
-
-# Errors to look into
-```lisp
-(import "std:io" as io)
-
-(define main (lambda ()
-  (io/println "Mateus")))
-
-(handle (main))
-```
-Runtime error: Compile error: [line 76] Compile error: handle expects an expression and handler clauses
-
-Doesn't say relevant file, and conflates runtime error and compile error

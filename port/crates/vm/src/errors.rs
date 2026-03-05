@@ -114,3 +114,52 @@ impl fmt::Display for VMError {
 }
 
 impl std::error::Error for VMError {}
+
+/// Errors that can occur during program execution: either a compile error
+/// (during expression-level compilation) or a runtime VM error.
+/// Keeping them distinct lets callers format each with proper location info.
+#[derive(Debug, Clone)]
+pub enum ProgramError {
+    Compile(CompileError),
+    Runtime(VMError),
+}
+
+impl ProgramError {
+    pub fn format_with_location(&self, line_map: &LineMap, filename: &str) -> String {
+        match self {
+            ProgramError::Compile(e) => e.format_with_location(line_map, filename),
+            ProgramError::Runtime(e) => e.format_with_location(line_map, filename),
+        }
+    }
+
+    /// Access the underlying error message.
+    pub fn message(&self) -> &str {
+        match self {
+            ProgramError::Compile(e) => &e.message,
+            ProgramError::Runtime(e) => &e.message,
+        }
+    }
+}
+
+impl fmt::Display for ProgramError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProgramError::Compile(e) => write!(f, "{}", e),
+            ProgramError::Runtime(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl std::error::Error for ProgramError {}
+
+impl From<CompileError> for ProgramError {
+    fn from(e: CompileError) -> Self {
+        ProgramError::Compile(e)
+    }
+}
+
+impl From<VMError> for ProgramError {
+    fn from(e: VMError) -> Self {
+        ProgramError::Runtime(e)
+    }
+}

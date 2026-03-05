@@ -1,6 +1,6 @@
 use crate::bytecode::ModuleId;
 use crate::compiler::compile_expr_with_context;
-use crate::errors::VMError;
+use crate::errors::{ProgramError, VMError};
 use crate::expand::MacroExpander;
 use crate::value::Value;
 use crate::vm::{VM, interpret};
@@ -150,7 +150,7 @@ pub fn run_program(
     file_path: Option<&Path>,
     loader: &mut ModuleLoader,
     interner: &Interner,
-) -> Result<Value, VMError> {
+) -> Result<Value, ProgramError> {
     let tokens =
         lex(source, interner).map_err(|e| VMError::runtime(format!("Lex error: {}", e)))?;
     let exprs = parse_with_interner(&tokens, interner)
@@ -227,7 +227,7 @@ pub fn run_program_from_exprs(
     file_path: Option<&Path>,
     loader: &mut ModuleLoader,
     interner: &Interner,
-) -> Result<Value, VMError> {
+) -> Result<Value, ProgramError> {
     if exprs.is_empty() {
         return Ok(Value::nil());
     }
@@ -261,8 +261,7 @@ pub fn run_program_from_exprs(
                 &known_constructors,
                 &known_effect_ops,
                 vm.current_module,
-            )
-            .map_err(|e| VMError::runtime(format!("Compile error: {}", e)))?;
+            )?;
 
             // Update knowledge from this expression
             known_constructors = result.known_constructors;
@@ -357,7 +356,7 @@ fn handle_import(
     interner: &Interner,
     known_constructors: &mut HashSet<Symbol>,
     as_sym: Symbol,
-) -> Result<(), VMError> {
+) -> Result<(), ProgramError> {
     let elements = ast::list_to_array(expr);
     let (path_str, form) = parse_import_form(&elements, interner, as_sym)?;
 
@@ -371,7 +370,8 @@ fn handle_import(
                 return Err(VMError::runtime(format!(
                     "Circular dependency detected: {}",
                     resolved.display()
-                )));
+                ))
+                .into());
             }
             ModuleState::Loaded { globals, module_id } => {
                 let globals = globals.clone();

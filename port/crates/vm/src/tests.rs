@@ -2,7 +2,7 @@ use crate::builtins::register_builtins;
 use crate::bytecode::{Chunk, ConstantValue, Op};
 use crate::compiler::{compile, compile_program};
 use crate::debug::disassemble;
-use crate::errors::VMError;
+use crate::errors::ProgramError;
 use crate::expand::MacroExpander;
 use crate::modules::{ModuleLoader, expand_macros, run_program, run_program_from_exprs};
 use crate::object::VMObject;
@@ -604,7 +604,7 @@ fn compile_single_expr() {
 // ===== Execution Tests (Phase 4) =====================================
 // =====================================================================
 
-fn eval(source: &str) -> Result<Value, VMError> {
+fn eval(source: &str) -> Result<Value, ProgramError> {
     let interner = Interner::new();
     let tokens = lex(source, &interner).expect("lex failed");
     let exprs = parse(&tokens).expect("parse failed");
@@ -627,7 +627,7 @@ fn eval_to_string(source: &str) -> String {
     format_value(&eval(source).expect("eval failed"))
 }
 
-fn eval_with_output(source: &str) -> (Result<Value, VMError>, String) {
+fn eval_with_output(source: &str) -> (Result<Value, ProgramError>, String) {
     let interner = Interner::new();
     let tokens = lex(source, &interner).expect("lex failed");
     let exprs = parse(&tokens).expect("parse failed");
@@ -709,10 +709,10 @@ fn assert_error(source: &str, substring: &str) {
     let result = eval(source);
     match result {
         Err(e) => assert!(
-            e.message.contains(substring),
+            e.message().contains(substring),
             "expected error containing '{}', got: {}",
             substring,
-            e.message
+            e.message()
         ),
         Ok(v) => panic!(
             "expected error containing '{}', but got: {:?}",
@@ -1985,7 +1985,7 @@ fn fixtures_dir() -> PathBuf {
         .join("modules")
 }
 
-fn eval_with_modules(source: &str, file_path: &str) -> Result<Value, VMError> {
+fn eval_with_modules(source: &str, file_path: &str) -> Result<Value, ProgramError> {
     let interner = Interner::new();
     let mut vm = VM::new();
     register_builtins(&mut vm);
@@ -1999,7 +1999,7 @@ fn eval_with_virtual_modules(
     source: &str,
     file_path: &str,
     virtual_modules: Vec<(&str, &str)>,
-) -> Result<Value, VMError> {
+) -> Result<Value, ProgramError> {
     let interner = Interner::new();
     let mut vm = VM::new();
     register_builtins(&mut vm);
@@ -2015,7 +2015,10 @@ fn eval_with_virtual_modules(
 }
 
 #[allow(dead_code)]
-fn eval_modules_with_output(source: &str, file_path: &str) -> (Result<Value, VMError>, String) {
+fn eval_modules_with_output(
+    source: &str,
+    file_path: &str,
+) -> (Result<Value, ProgramError>, String) {
     let interner = Interner::new();
     let mut vm = VM::new();
     register_builtins(&mut vm);
@@ -2053,10 +2056,10 @@ fn assert_module_error(source: &str, file_path: &str, substring: &str) {
     let result = eval_with_modules(source, file_path);
     match result {
         Err(e) => assert!(
-            e.message.contains(substring),
+            e.message().contains(substring),
             "expected error containing '{}', got: {}",
             substring,
-            e.message
+            e.message()
         ),
         Ok(v) => panic!(
             "expected error containing '{}', but got: {:?}",
@@ -2193,9 +2196,9 @@ fn module_qualified_no_unqualified_leak() {
     );
     match result {
         Err(e) => assert!(
-            e.message.contains("Undefined variable"),
+            e.message().contains("Undefined variable"),
             "expected 'Undefined variable' error, got: {}",
-            e.message
+            e.message()
         ),
         Ok(v) => panic!(
             "expected error (unqualified 'compute' should not be visible), got: {:?}",
@@ -2293,9 +2296,9 @@ fn module_import_no_file_context() {
     );
     match result {
         Err(e) => assert!(
-            e.message.contains("file context"),
+            e.message().contains("file context"),
             "expected 'file context' error, got: {}",
-            e.message
+            e.message()
         ),
         Ok(v) => panic!("expected error, got: {:?}", format_value(&v)),
     }
@@ -4334,7 +4337,7 @@ fn tcp_single_threaded_rejects() {
         result.is_err(),
         "expected error for TCP in single-threaded scheduler"
     );
-    let err_msg = result.unwrap_err().message;
+    let err_msg = result.unwrap_err().message().to_owned();
     assert!(
         err_msg.contains("multi-threaded"),
         "error message: {}",
