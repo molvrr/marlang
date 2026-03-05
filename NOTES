@@ -1,4 +1,3 @@
-- [ ] LSP: fix go-to definition bindings introduced through pattern matching
 - [ ] match on ADTs (Option, List, etc.) doesn't work inside defmacro bodies.
       The expansion VM compiles each prelude expression independently via
       compile_program, which starts with an empty known_constructors set.
@@ -8,7 +7,6 @@
       constructors, causing (Some 5) to match the None branch.
       Workaround: avoid match on Option/List inside macros; use string-contains,
       nil?, car/cdr, etc. instead.
-- [ ] equal? broken for Char — values_equal in vm.rs doesn't handle the Char case,
       falls through to false. Chars are NaN-boxed but aren't numbers, bools, nil,
       or objects. Workaround: compare via (= (char-code a) (char-code b)).
 - [ ] Inner define doesn't capture enclosing lambda parameters — closures created
@@ -39,33 +37,7 @@
 - [ ] LSP: rename
 - [ ] LSP: diagnostics for imported modules
 - [ ] LSP: workspace-wide features
+- [ ] LSP: fix go-to definition bindings introduced through pattern matching
 - [ ] ADTs with effect anotations on fields
 - [ ] existential types
-- [x] remove nan boxing
-- [x] Cleanup code
-- [x] when a program crashes we don't have stacktraces
-- [x] stdlib: parser combinators
-- [x] mar disasm when importing something doesn't work
-- [x] Suggestion for disambiguating same operation name for effect handler isn't deterministic
-        Maybe we should order effects somehow, so we aways suggest the same operation?
-- [x] What happens to builtin handlers if there's another operation with the same name which belongs to another effect
-        Example below has inconsistent results when run multiple times. Sometimes it handles MyIO, sometimes it triggers the exhaustiveness check for io/IO
-        ```lisp
-        (import "std:io" as io)
-
-        (effect MyIO
-          (print (-> Unit String)))
-
-        (handle (perform println "oii")
-          ((print m k) -> "Oiii"))
-        ```
-- [x] Check if qualified import polutes global env
-- [x] Typecheck --verbose should only show last expression type with expression name if there's one and the type info, not every top-level expression
-- [x] Deprecate typescript version
-- [x] Rewrite CLAUDE.md with only needed info
-- [x] Do we actually need typeclasses? — No. Removed in favor of OCaml-style operator split.
-- [x] Exhaustiveness check effect handler
-- [x] Rewrite stdlib to not call perform directly, only if call it if there's no wrapper available
-- [x] Macro expansion cli subcommand
-- [x] Can we override builtin effect handlers?
-- [x] Rewrite examples to not call perform directly, only call it if there's no wrapper available
+- [x] equal? broken for Char — values_equal in vm.rs doesn't handle the Char case,

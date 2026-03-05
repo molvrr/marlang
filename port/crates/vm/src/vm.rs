@@ -2126,6 +2126,10 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
             || matches!(obj, VMObject::AdtValue { tag, fields } if tag == "Nil" && fields.is_empty());
     }
 
+    if let (Some(ba), Some(bb)) = (a.as_char(), b.as_char()) {
+        return ba == bb;
+    }
+
     false
 }
 
