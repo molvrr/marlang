@@ -135,7 +135,8 @@
 
 ; Number/string conversion
 (declare number->string (-> Float String))
-(declare __try-string->number (-> String (Option Float)))
+(declare __try-string->int (-> String (Option Int)))
+(declare __try-string->float (-> String (Option Float)))
 
 ; Concurrency
 (declare run-fibers (-> (-> Unit {| e} a) a))
@@ -181,11 +182,17 @@
 ; Throw an exception with a message. Wrapper around (perform throw msg).
 (define raise (lambda (msg) (perform throw msg)))
 
-; string->number: parses a string to a Float, throws on failure
-(define string->number (lambda (s)
-  (match (__try-string->number s)
+; string->int: parses a string to an Int, throws on failure
+(define string->int (lambda (s)
+  (match (__try-string->int s)
     ((Some n) n)
-    (None (raise (string-append "string->number: invalid number: " s))))))
+    (None (raise (string-append "string->int: invalid integer: " s))))))
+
+; string->float: parses a string to a Float, throws on failure
+(define string->float (lambda (s)
+  (match (__try-string->float s)
+    ((Some n) n)
+    (None (raise (string-append "string->float: invalid float: " s))))))
 
 (define not (lambda (x) (if x #f #t)))
 (define cons (lambda (h t) (Cons h t)))

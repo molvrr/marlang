@@ -9,35 +9,47 @@ type BuiltinFn = fn(&mut VM, &[Value]) -> Result<Value, VMError>;
 /// Type alias for the builtin registration function.
 type RegisterFn = fn(&mut VM, &str, BuiltinFn);
 
-/// Register a unary numeric builtin: extracts one f64, applies `$op`, returns Value::number.
-macro_rules! unary_num {
+/// Register a unary int builtin: extracts one i64, applies `$op`, returns Value::int.
+/// Type checker guarantees the argument is Int, so we use unchecked extraction.
+macro_rules! unary_int {
     ($vm:expr, $builtin:ident, $name:expr, $op:expr) => {
         $builtin($vm, $name, |_vm, args| {
-            if args.len() != 1 {
-                return Err(VMError::runtime(concat!($name, " expects one number")));
-            }
-            let n = args[0]
-                .as_number()
-                .ok_or_else(|| VMError::runtime(concat!($name, " expects a number")))?;
-            Ok(Value::number($op(n)))
+            debug_assert!(args.len() == 1, concat!($name, " expects one integer"));
+            Ok(Value::int($op(args[0].get_int())))
         });
     };
 }
 
-/// Register a binary numeric comparison: extracts two f64, applies `$op`, returns Value::boolean.
-macro_rules! bin_num_cmp {
+/// Register a unary float builtin: extracts one f64, applies `$op`, returns Value::float.
+/// Type checker guarantees the argument is Float.
+macro_rules! unary_float {
     ($vm:expr, $builtin:ident, $name:expr, $op:expr) => {
         $builtin($vm, $name, |_vm, args| {
-            if args.len() != 2 {
-                return Err(VMError::runtime(concat!($name, " expects two numbers")));
-            }
-            let a = args[0]
-                .as_number()
-                .ok_or_else(|| VMError::runtime(concat!($name, " expects two numbers")))?;
-            let b = args[1]
-                .as_number()
-                .ok_or_else(|| VMError::runtime(concat!($name, " expects two numbers")))?;
-            Ok(Value::boolean($op(a, b)))
+            debug_assert!(args.len() == 1, concat!($name, " expects one float"));
+            Ok(Value::float($op(args[0].get_float())))
+        });
+    };
+}
+
+/// Register a binary int comparison: extracts two i64, applies `$op`, returns Value::boolean.
+macro_rules! bin_int_cmp {
+    ($vm:expr, $builtin:ident, $name:expr, $op:expr) => {
+        $builtin($vm, $name, |_vm, args| {
+            debug_assert!(args.len() == 2, concat!($name, " expects two integers"));
+            Ok(Value::boolean($op(args[0].get_int(), args[1].get_int())))
+        });
+    };
+}
+
+/// Register a binary float comparison: extracts two f64, applies `$op`, returns Value::boolean.
+macro_rules! bin_float_cmp {
+    ($vm:expr, $builtin:ident, $name:expr, $op:expr) => {
+        $builtin($vm, $name, |_vm, args| {
+            debug_assert!(args.len() == 2, concat!($name, " expects two floats"));
+            Ok(Value::boolean($op(
+                args[0].get_float(),
+                args[1].get_float(),
+            )))
         });
     };
 }
@@ -60,17 +72,12 @@ macro_rules! bin_str_cmp {
     };
 }
 
-/// Register a unary numeric predicate: extracts one f64, applies `$pred`, returns Value::boolean.
-macro_rules! unary_num_pred {
+/// Register a unary float predicate: extracts one f64, applies `$pred`, returns Value::boolean.
+macro_rules! unary_float_pred {
     ($vm:expr, $builtin:ident, $name:expr, $pred:expr) => {
         $builtin($vm, $name, |_vm, args| {
-            if args.len() != 1 {
-                return Err(VMError::runtime(concat!($name, " expects one number")));
-            }
-            let n = args[0]
-                .as_number()
-                .ok_or_else(|| VMError::runtime(concat!($name, " expects a number")))?;
-            Ok(Value::boolean($pred(n)))
+            debug_assert!(args.len() == 1, concat!($name, " expects one float"));
+            Ok(Value::boolean($pred(args[0].get_float())))
         });
     };
 }
@@ -91,20 +98,22 @@ macro_rules! unary_str_transform {
     };
 }
 
-/// Register a binary numeric op: extracts two f64, applies `$op`, returns Value::number.
-macro_rules! bin_num_op {
+/// Register a binary int op: extracts two i64, applies `$op`, returns Value::int.
+macro_rules! bin_int_op {
     ($vm:expr, $builtin:ident, $name:expr, $op:expr) => {
         $builtin($vm, $name, |_vm, args| {
-            if args.len() != 2 {
-                return Err(VMError::runtime(concat!($name, " expects two numbers")));
-            }
-            let a = args[0]
-                .as_number()
-                .ok_or_else(|| VMError::runtime(concat!($name, " expects numbers")))?;
-            let b = args[1]
-                .as_number()
-                .ok_or_else(|| VMError::runtime(concat!($name, " expects numbers")))?;
-            Ok(Value::number($op(a, b)))
+            debug_assert!(args.len() == 2, concat!($name, " expects two integers"));
+            Ok(Value::int($op(args[0].get_int(), args[1].get_int())))
+        });
+    };
+}
+
+/// Register a binary float op: extracts two f64, applies `$op`, returns Value::float.
+macro_rules! bin_float_op {
+    ($vm:expr, $builtin:ident, $name:expr, $op:expr) => {
+        $builtin($vm, $name, |_vm, args| {
+            debug_assert!(args.len() == 2, concat!($name, " expects two floats"));
+            Ok(Value::float($op(args[0].get_float(), args[1].get_float())))
         });
     };
 }
@@ -162,142 +171,121 @@ pub fn register_builtins(vm: &mut VM) {
         );
     }
 
-    // Variadic arithmetic (for non-binary calls)
+    // Variadic integer arithmetic (for non-binary calls, e.g. (+ 1 2 3))
     builtin(vm, "+", |_vm, args| {
-        let mut sum = 0.0_f64;
+        let mut sum: i64 = 0;
         for a in args {
-            match a.as_number() {
-                Some(n) => sum += n,
-                None => return Err(VMError::runtime("+ expects numbers")),
-            }
+            sum = sum.wrapping_add(a.get_int());
         }
-        Ok(Value::number(sum))
+        Ok(Value::int(sum))
     });
 
     builtin(vm, "-", |_vm, args| {
-        if args.is_empty() {
-            return Err(VMError::runtime("- expects at least one argument"));
-        }
-        let first = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("- expects numbers"))?;
+        debug_assert!(!args.is_empty(), "- expects at least one argument");
+        let first = args[0].get_int();
         if args.len() == 1 {
-            return Ok(Value::number(-first));
+            return Ok(Value::int(first.wrapping_neg()));
         }
         let mut result = first;
         for a in &args[1..] {
-            result -= a
-                .as_number()
-                .ok_or_else(|| VMError::runtime("- expects numbers"))?;
+            result = result.wrapping_sub(a.get_int());
         }
-        Ok(Value::number(result))
+        Ok(Value::int(result))
     });
 
     builtin(vm, "*", |_vm, args| {
-        let mut product = 1.0_f64;
+        let mut product: i64 = 1;
         for a in args {
-            match a.as_number() {
-                Some(n) => product *= n,
-                None => return Err(VMError::runtime("* expects numbers")),
-            }
+            product = product.wrapping_mul(a.get_int());
         }
-        Ok(Value::number(product))
+        Ok(Value::int(product))
     });
 
     builtin(vm, "/", |_vm, args| {
-        if args.len() < 2 {
-            return Err(VMError::runtime("/ expects at least two arguments"));
-        }
-        let first = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("/ expects numbers"))?;
-        let mut result = first;
+        debug_assert!(args.len() >= 2, "/ expects at least two arguments");
+        let mut result = args[0].get_int();
         for a in &args[1..] {
-            result /= a
-                .as_number()
-                .ok_or_else(|| VMError::runtime("/ expects numbers"))?;
+            let divisor = a.get_int();
+            if divisor == 0 {
+                return Err(VMError::runtime("Division by zero"));
+            }
+            result = result.wrapping_div(divisor);
         }
-        Ok(Value::number(result))
+        Ok(Value::int(result))
     });
 
-    unary_num!(vm, builtin, "negate", |n: f64| -n);
+    unary_int!(vm, builtin, "negate", |n: i64| n.wrapping_neg());
 
-    // Comparison (for non-binary calls)
-    bin_num_cmp!(vm, builtin, "<", |a: f64, b: f64| a < b);
-    bin_num_cmp!(vm, builtin, ">", |a: f64, b: f64| a > b);
-    bin_num_cmp!(vm, builtin, "=", |a: f64, b: f64| a == b);
-    bin_num_cmp!(vm, builtin, "<=", |a: f64, b: f64| a <= b);
-    bin_num_cmp!(vm, builtin, ">=", |a: f64, b: f64| a >= b);
+    // Integer comparison (for non-binary calls)
+    bin_int_cmp!(vm, builtin, "<", |a: i64, b: i64| a < b);
+    bin_int_cmp!(vm, builtin, ">", |a: i64, b: i64| a > b);
+    bin_int_cmp!(vm, builtin, "=", |a: i64, b: i64| a == b);
+    bin_int_cmp!(vm, builtin, "<=", |a: i64, b: i64| a <= b);
+    bin_int_cmp!(vm, builtin, ">=", |a: i64, b: i64| a >= b);
 
-    // Float arithmetic (same runtime behavior — everything is f64)
+    // Variadic float arithmetic
     builtin(vm, "+.", |_vm, args| {
         let mut sum = 0.0_f64;
         for a in args {
-            match a.as_number() {
-                Some(n) => sum += n,
-                None => return Err(VMError::runtime("+. expects numbers")),
-            }
+            sum += a.get_float();
         }
-        Ok(Value::number(sum))
+        Ok(Value::float(sum))
     });
 
     builtin(vm, "-.", |_vm, args| {
-        if args.is_empty() {
-            return Err(VMError::runtime("-. expects at least one argument"));
-        }
-        let first = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("-. expects numbers"))?;
+        debug_assert!(!args.is_empty(), "-. expects at least one argument");
+        let first = args[0].get_float();
         if args.len() == 1 {
-            return Ok(Value::number(-first));
+            return Ok(Value::float(-first));
         }
         let mut result = first;
         for a in &args[1..] {
-            result -= a
-                .as_number()
-                .ok_or_else(|| VMError::runtime("-. expects numbers"))?;
+            result -= a.get_float();
         }
-        Ok(Value::number(result))
+        Ok(Value::float(result))
     });
 
     builtin(vm, "*.", |_vm, args| {
         let mut product = 1.0_f64;
         for a in args {
-            match a.as_number() {
-                Some(n) => product *= n,
-                None => return Err(VMError::runtime("*. expects numbers")),
-            }
+            product *= a.get_float();
         }
-        Ok(Value::number(product))
+        Ok(Value::float(product))
     });
 
     builtin(vm, "/.", |_vm, args| {
-        if args.len() < 2 {
-            return Err(VMError::runtime("/. expects at least two arguments"));
-        }
-        let first = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("/. expects numbers"))?;
-        let mut result = first;
+        debug_assert!(args.len() >= 2, "/. expects at least two arguments");
+        let mut result = args[0].get_float();
         for a in &args[1..] {
-            result /= a
-                .as_number()
-                .ok_or_else(|| VMError::runtime("/. expects numbers"))?;
+            result /= a.get_float();
         }
-        Ok(Value::number(result))
+        Ok(Value::float(result))
     });
 
-    unary_num!(vm, builtin, "negate.", |n: f64| -n);
+    unary_float!(vm, builtin, "negate.", |n: f64| -n);
 
-    // Math builtins
-    bin_num_op!(vm, builtin, "rem", |a: f64, b: f64| a % b);
-    bin_num_op!(vm, builtin, "rem.", |a: f64, b: f64| a % b);
-    bin_num_op!(vm, builtin, "mod", |a: f64, b: f64| ((a % b) + b) % b);
-    bin_num_op!(vm, builtin, "mod.", |a: f64, b: f64| ((a % b) + b) % b);
-    unary_num!(vm, builtin, "abs", f64::abs);
-    unary_num!(vm, builtin, "abs.", f64::abs);
+    // Integer math builtins
+    bin_int_op!(vm, builtin, "rem", |a: i64, b: i64| a % b);
+    bin_int_op!(vm, builtin, "mod", |a: i64, b: i64| ((a % b) + b) % b);
+    unary_int!(vm, builtin, "abs", |n: i64| n.wrapping_abs());
 
-    fn sign(n: f64) -> f64 {
+    fn sign_int(n: i64) -> i64 {
+        if n > 0 {
+            1
+        } else if n < 0 {
+            -1
+        } else {
+            0
+        }
+    }
+    unary_int!(vm, builtin, "sign", sign_int);
+
+    // Float math builtins
+    bin_float_op!(vm, builtin, "rem.", |a: f64, b: f64| a % b);
+    bin_float_op!(vm, builtin, "mod.", |a: f64, b: f64| ((a % b) + b) % b);
+    unary_float!(vm, builtin, "abs.", f64::abs);
+
+    fn sign_float(n: f64) -> f64 {
         if n > 0.0 {
             1.0
         } else if n < 0.0 {
@@ -306,44 +294,55 @@ pub fn register_builtins(vm: &mut VM) {
             0.0
         }
     }
-    unary_num!(vm, builtin, "sign", sign);
-    unary_num!(vm, builtin, "sign.", sign);
+    unary_float!(vm, builtin, "sign.", sign_float);
 
-    // Math builtins — Float functions
-    bin_num_op!(vm, builtin, "pow", f64::powf);
-    unary_num!(vm, builtin, "sqrt", f64::sqrt);
-    unary_num!(vm, builtin, "exp", f64::exp);
-    unary_num!(vm, builtin, "log", f64::ln);
-    unary_num!(vm, builtin, "log10", f64::log10);
-    unary_num!(vm, builtin, "log2", f64::log2);
-    unary_num!(vm, builtin, "sin", f64::sin);
-    unary_num!(vm, builtin, "cos", f64::cos);
-    unary_num!(vm, builtin, "tan", f64::tan);
-    unary_num!(vm, builtin, "asin", f64::asin);
-    unary_num!(vm, builtin, "acos", f64::acos);
-    unary_num!(vm, builtin, "atan", f64::atan);
-    unary_num!(vm, builtin, "sinh", f64::sinh);
-    unary_num!(vm, builtin, "cosh", f64::cosh);
-    unary_num!(vm, builtin, "tanh", f64::tanh);
-    bin_num_op!(vm, builtin, "atan2", f64::atan2);
+    // Math builtins — Float-only functions
+    bin_float_op!(vm, builtin, "pow", f64::powf);
+    unary_float!(vm, builtin, "sqrt", f64::sqrt);
+    unary_float!(vm, builtin, "exp", f64::exp);
+    unary_float!(vm, builtin, "log", f64::ln);
+    unary_float!(vm, builtin, "log10", f64::log10);
+    unary_float!(vm, builtin, "log2", f64::log2);
+    unary_float!(vm, builtin, "sin", f64::sin);
+    unary_float!(vm, builtin, "cos", f64::cos);
+    unary_float!(vm, builtin, "tan", f64::tan);
+    unary_float!(vm, builtin, "asin", f64::asin);
+    unary_float!(vm, builtin, "acos", f64::acos);
+    unary_float!(vm, builtin, "atan", f64::atan);
+    unary_float!(vm, builtin, "sinh", f64::sinh);
+    unary_float!(vm, builtin, "cosh", f64::cosh);
+    unary_float!(vm, builtin, "tanh", f64::tanh);
+    bin_float_op!(vm, builtin, "atan2", f64::atan2);
 
-    // Conversion builtins — Float -> Int
-    unary_num!(vm, builtin, "floor", f64::floor);
-    unary_num!(vm, builtin, "ceil", f64::ceil);
-    unary_num!(vm, builtin, "round", f64::round);
-    unary_num!(vm, builtin, "truncate", f64::trunc);
+    // Conversion builtins — Float -> Int (return Int)
+    builtin(vm, "floor", |_vm, args| {
+        debug_assert!(args.len() == 1);
+        Ok(Value::int(args[0].get_float().floor() as i64))
+    });
+    builtin(vm, "ceil", |_vm, args| {
+        debug_assert!(args.len() == 1);
+        Ok(Value::int(args[0].get_float().ceil() as i64))
+    });
+    builtin(vm, "round", |_vm, args| {
+        debug_assert!(args.len() == 1);
+        Ok(Value::int(args[0].get_float().round() as i64))
+    });
+    builtin(vm, "truncate", |_vm, args| {
+        debug_assert!(args.len() == 1);
+        Ok(Value::int(args[0].get_float().trunc() as i64))
+    });
 
     // Float check builtins
-    unary_num_pred!(vm, builtin, "is-nan", f64::is_nan);
-    unary_num_pred!(vm, builtin, "is-infinite", f64::is_infinite);
-    unary_num_pred!(vm, builtin, "is-finite", f64::is_finite);
+    unary_float_pred!(vm, builtin, "is-nan", f64::is_nan);
+    unary_float_pred!(vm, builtin, "is-infinite", f64::is_infinite);
+    unary_float_pred!(vm, builtin, "is-finite", f64::is_finite);
 
     // Float comparison builtins
-    bin_num_cmp!(vm, builtin, "=.", |a: f64, b: f64| a == b);
-    bin_num_cmp!(vm, builtin, "<.", |a: f64, b: f64| a < b);
-    bin_num_cmp!(vm, builtin, ">.", |a: f64, b: f64| a > b);
-    bin_num_cmp!(vm, builtin, "<=.", |a: f64, b: f64| a <= b);
-    bin_num_cmp!(vm, builtin, ">=.", |a: f64, b: f64| a >= b);
+    bin_float_cmp!(vm, builtin, "=.", |a: f64, b: f64| a == b);
+    bin_float_cmp!(vm, builtin, "<.", |a: f64, b: f64| a < b);
+    bin_float_cmp!(vm, builtin, ">.", |a: f64, b: f64| a > b);
+    bin_float_cmp!(vm, builtin, "<=.", |a: f64, b: f64| a <= b);
+    bin_float_cmp!(vm, builtin, ">=.", |a: f64, b: f64| a >= b);
 
     // String comparison builtins
     bin_str_cmp!(vm, builtin, "string=", |a: &str, b: &str| a == b);
@@ -360,12 +359,10 @@ pub fn register_builtins(vm: &mut VM) {
         Ok(Value::boolean(args[0] == args[1]))
     });
 
-    // Conversion
+    // Conversion: Int -> Float
     builtin(vm, "int->float", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("int->float expects one argument"));
-        }
-        Ok(args[0].clone())
+        debug_assert!(args.len() == 1, "int->float expects one argument");
+        Ok(Value::float(args[0].get_int() as f64))
     });
 
     // List
@@ -389,7 +386,7 @@ pub fn register_builtins(vm: &mut VM) {
         let s = args[0]
             .as_string()
             .ok_or_else(|| VMError::runtime("string-length expects a string"))?;
-        Ok(Value::number(s.len() as f64))
+        Ok(Value::int(s.len() as i64))
     });
 
     builtin(vm, "string-append", |_vm, args| {
@@ -426,10 +423,7 @@ pub fn register_builtins(vm: &mut VM) {
         let s = args[0]
             .as_string()
             .ok_or_else(|| VMError::runtime("string-repeat: first arg must be a string"))?;
-        let n = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("string-repeat: second arg must be a number"))?;
-        let n = n as usize;
+        let n = args[1].get_int() as usize;
         Ok(Value::string(s.repeat(n).as_str()))
     });
 
@@ -466,7 +460,7 @@ pub fn register_builtins(vm: &mut VM) {
                 let char_idx = s[..byte_idx].chars().count();
                 Ok(Value::object(VMObject::AdtValue {
                     tag: "Some".to_string(),
-                    fields: vec![Value::number(char_idx as f64)],
+                    fields: vec![Value::int(char_idx as i64)],
                 }))
             }
             None => Ok(Value::object(VMObject::AdtValue {
@@ -483,14 +477,8 @@ pub fn register_builtins(vm: &mut VM) {
         let s = args[0]
             .as_string()
             .ok_or_else(|| VMError::runtime("string-substring: first arg must be a string"))?;
-        let start = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("string-substring: second arg must be a number"))?
-            as usize;
-        let end = args[2]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("string-substring: third arg must be a number"))?
-            as usize;
+        let start = args[1].get_int() as usize;
+        let end = args[2].get_int() as usize;
         // Work with char indices, not byte indices
         let chars: Vec<char> = s.chars().collect();
         let start = start.min(chars.len());
@@ -506,10 +494,7 @@ pub fn register_builtins(vm: &mut VM) {
         let s = args[0]
             .as_string()
             .ok_or_else(|| VMError::runtime("string-char-at: first arg must be a string"))?;
-        let idx = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("string-char-at: second arg must be a number"))?
-            as usize;
+        let idx = args[1].get_int() as usize;
         match s.chars().nth(idx) {
             Some(c) => Ok(Value::object(VMObject::AdtValue {
                 tag: "Some".to_string(),
@@ -605,10 +590,7 @@ pub fn register_builtins(vm: &mut VM) {
         let s = args[0]
             .as_string()
             .ok_or_else(|| VMError::runtime("string-pad-start: first arg must be a string"))?;
-        let target_len = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("string-pad-start: second arg must be a number"))?
-            as usize;
+        let target_len = args[1].get_int() as usize;
         let pad = args[2]
             .as_string()
             .ok_or_else(|| VMError::runtime("string-pad-start: third arg must be a string"))?;
@@ -637,10 +619,7 @@ pub fn register_builtins(vm: &mut VM) {
         let s = args[0]
             .as_string()
             .ok_or_else(|| VMError::runtime("string-pad-end: first arg must be a string"))?;
-        let target_len = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("string-pad-end: second arg must be a number"))?
-            as usize;
+        let target_len = args[1].get_int() as usize;
         let pad = args[2]
             .as_string()
             .ok_or_else(|| VMError::runtime("string-pad-end: third arg must be a string"))?;
@@ -669,16 +648,14 @@ pub fn register_builtins(vm: &mut VM) {
         let c = args[0]
             .as_char()
             .ok_or_else(|| VMError::runtime("char-code expects a char"))?;
-        Ok(Value::number(c as u32 as f64))
+        Ok(Value::int(c as u32 as i64))
     });
 
     builtin(vm, "char-from-code", |_vm, args| {
         if args.len() != 1 {
             return Err(VMError::runtime("char-from-code expects 1 argument"));
         }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("char-from-code expects a number"))?;
+        let n = args[0].get_int();
         let codepoint = n as u32;
         match char::from_u32(codepoint) {
             Some(c) => Ok(Value::char(c)),
@@ -740,28 +717,50 @@ pub fn register_builtins(vm: &mut VM) {
         if args.len() != 1 {
             return Err(VMError::runtime("number->string expects 1 argument"));
         }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("number->string expects a number"))?;
-        let s = if n == n.trunc() && n.abs() < 1e15 && !n.is_infinite() {
-            format!("{}", n as i64)
-        } else {
+        let s = if let Some(n) = args[0].as_int() {
             format!("{}", n)
+        } else if let Some(n) = args[0].as_float() {
+            if n == n.trunc() && !n.is_infinite() && !n.is_nan() {
+                format!("{:.1}", n)
+            } else {
+                format!("{}", n)
+            }
+        } else {
+            return Err(VMError::runtime("number->string expects a number"));
         };
         Ok(Value::string(s.as_str()))
     });
 
-    builtin(vm, "__try-string->number", |_vm, args| {
+    builtin(vm, "__try-string->int", |_vm, args| {
         if args.len() != 1 {
-            return Err(VMError::runtime("__try-string->number expects 1 argument"));
+            return Err(VMError::runtime("__try-string->int expects 1 argument"));
         }
         let s = args[0]
             .as_string()
-            .ok_or_else(|| VMError::runtime("__try-string->number expects a string"))?;
+            .ok_or_else(|| VMError::runtime("__try-string->int expects a string"))?;
+        match s.parse::<i64>() {
+            Ok(n) => Ok(Value::object(VMObject::AdtValue {
+                tag: "Some".to_string(),
+                fields: vec![Value::int(n)],
+            })),
+            Err(_) => Ok(Value::object(VMObject::AdtValue {
+                tag: "None".to_string(),
+                fields: vec![],
+            })),
+        }
+    });
+
+    builtin(vm, "__try-string->float", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("__try-string->float expects 1 argument"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("__try-string->float expects a string"))?;
         match s.parse::<f64>() {
             Ok(n) => Ok(Value::object(VMObject::AdtValue {
                 tag: "Some".to_string(),
-                fields: vec![Value::number(n)],
+                fields: vec![Value::float(n)],
             })),
             Err(_) => Ok(Value::object(VMObject::AdtValue {
                 tag: "None".to_string(),
@@ -946,7 +945,7 @@ pub fn register_builtins(vm: &mut VM) {
         };
         let threads = args
             .get(1)
-            .and_then(|v| v.as_number())
+            .and_then(|v| v.as_int())
             .map(|n| n as usize)
             .unwrap_or(0);
         let threads = if threads == 0 {
@@ -972,7 +971,7 @@ pub fn register_builtins(vm: &mut VM) {
         // Return pair (result, ms)
         let pair = crate::object::VMObject::AdtValue {
             tag: "MkPair".to_string(),
-            fields: vec![result, crate::value::Value::number(elapsed)],
+            fields: vec![result, crate::value::Value::float(elapsed)],
         };
         Ok(crate::value::Value::object(pair))
     });

@@ -36,11 +36,18 @@ fn count_op(chunk: &Chunk, op: Op) -> usize {
     chunk.code.iter().filter(|inst| inst.op == op).count()
 }
 
-fn find_constant_number(chunk: &Chunk, n: f64) -> bool {
+fn find_constant_int(chunk: &Chunk, n: i64) -> bool {
     chunk
         .constants
         .iter()
-        .any(|c| matches!(c, ConstantValue::Number(v) if *v == n))
+        .any(|c| matches!(c, ConstantValue::Int(v) if *v == n))
+}
+
+fn find_constant_float(chunk: &Chunk, n: f64) -> bool {
+    chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Float(v) if *v == n))
 }
 
 fn find_constant_string(chunk: &Chunk, s: &str) -> bool {
@@ -56,13 +63,13 @@ fn find_constant_string(chunk: &Chunk, s: &str) -> bool {
 fn literal_number() {
     let (chunk, _) = compile_source("42");
     assert!(find_op(&chunk, Op::PushConst));
-    assert!(find_constant_number(&chunk, 42.0));
+    assert!(find_constant_int(&chunk, 42));
 }
 
 #[test]
 fn literal_float() {
     let (chunk, _) = compile_source("3.14");
-    assert!(find_constant_number(&chunk, 3.14));
+    assert!(find_constant_float(&chunk, 3.14));
 }
 
 #[test]
@@ -111,7 +118,7 @@ fn constant_deduplication() {
     let num_count = chunk
         .constants
         .iter()
-        .filter(|c| matches!(c, ConstantValue::Number(n) if *n == 42.0))
+        .filter(|c| matches!(c, ConstantValue::Int(n) if *n == 42))
         .count();
     assert_eq!(num_count, 1, "42 should be deduplicated in constant pool");
 }
@@ -121,43 +128,43 @@ fn constant_deduplication() {
 #[test]
 fn binary_add() {
     let (chunk, _) = compile_source("(+ 1 2)");
-    assert!(find_op(&chunk, Op::Add));
-    assert!(find_constant_number(&chunk, 1.0));
-    assert!(find_constant_number(&chunk, 2.0));
+    assert!(find_op(&chunk, Op::AddInt));
+    assert!(find_constant_int(&chunk, 1));
+    assert!(find_constant_int(&chunk, 2));
 }
 
 #[test]
 fn binary_sub() {
     let (chunk, _) = compile_source("(- 3 1)");
-    assert!(find_op(&chunk, Op::Sub));
+    assert!(find_op(&chunk, Op::SubInt));
 }
 
 #[test]
 fn binary_mul() {
     let (chunk, _) = compile_source("(* 2 3)");
-    assert!(find_op(&chunk, Op::Mul));
+    assert!(find_op(&chunk, Op::MulInt));
 }
 
 #[test]
 fn binary_div() {
     let (chunk, _) = compile_source("(/ 10 2)");
-    assert!(find_op(&chunk, Op::Div));
+    assert!(find_op(&chunk, Op::DivInt));
 }
 
 #[test]
 fn unary_negate() {
     let (chunk, _) = compile_source("(- 5)");
-    assert!(find_op(&chunk, Op::Neg));
-    // Should NOT have Sub
-    assert!(!find_op(&chunk, Op::Sub));
+    assert!(find_op(&chunk, Op::NegInt));
+    // Should NOT have SubInt
+    assert!(!find_op(&chunk, Op::SubInt));
 }
 
 #[test]
 fn nested_arithmetic() {
     let (chunk, _) = compile_source("(+ (* 2 3) (- 10 4))");
-    assert!(find_op(&chunk, Op::Add));
-    assert!(find_op(&chunk, Op::Mul));
-    assert!(find_op(&chunk, Op::Sub));
+    assert!(find_op(&chunk, Op::AddInt));
+    assert!(find_op(&chunk, Op::MulInt));
+    assert!(find_op(&chunk, Op::SubInt));
 }
 
 // ===== Comparisons =====
@@ -171,25 +178,25 @@ fn comparison_eq() {
 #[test]
 fn comparison_lt() {
     let (chunk, _) = compile_source("(< 1 2)");
-    assert!(find_op(&chunk, Op::Lt));
+    assert!(find_op(&chunk, Op::LtInt));
 }
 
 #[test]
 fn comparison_gt() {
     let (chunk, _) = compile_source("(> 2 1)");
-    assert!(find_op(&chunk, Op::Gt));
+    assert!(find_op(&chunk, Op::GtInt));
 }
 
 #[test]
 fn comparison_le() {
     let (chunk, _) = compile_source("(<= 1 2)");
-    assert!(find_op(&chunk, Op::Le));
+    assert!(find_op(&chunk, Op::LeInt));
 }
 
 #[test]
 fn comparison_ge() {
     let (chunk, _) = compile_source("(>= 2 1)");
-    assert!(find_op(&chunk, Op::Ge));
+    assert!(find_op(&chunk, Op::GeInt));
 }
 
 // ===== Control Flow =====
@@ -199,8 +206,8 @@ fn if_then_else() {
     let (chunk, _) = compile_source("(if #t 1 2)");
     assert!(find_op(&chunk, Op::JumpIfFalse));
     assert!(find_op(&chunk, Op::Jump));
-    assert!(find_constant_number(&chunk, 1.0));
-    assert!(find_constant_number(&chunk, 2.0));
+    assert!(find_constant_int(&chunk, 1));
+    assert!(find_constant_int(&chunk, 2));
 }
 
 #[test]
@@ -220,8 +227,8 @@ fn if_no_else() {
 fn cond_basic() {
     let (chunk, _) = compile_source("(cond (#t 1) (else 2))");
     assert!(find_op(&chunk, Op::JumpIfFalse));
-    assert!(find_constant_number(&chunk, 1.0));
-    assert!(find_constant_number(&chunk, 2.0));
+    assert!(find_constant_int(&chunk, 1));
+    assert!(find_constant_int(&chunk, 2));
 }
 
 #[test]
@@ -229,7 +236,7 @@ fn begin_sequence() {
     let (chunk, _) = compile_source("(begin 1 2 3)");
     // Intermediate values are popped
     assert!(count_op(&chunk, Op::Pop) >= 2);
-    assert!(find_constant_number(&chunk, 3.0));
+    assert!(find_constant_int(&chunk, 3));
 }
 
 #[test]
@@ -246,7 +253,7 @@ fn define_global() {
     let (chunk, _) = compile_source("(define x 42)");
     assert!(find_op(&chunk, Op::SetGlobal));
     assert!(find_constant_string(&chunk, "x"));
-    assert!(find_constant_number(&chunk, 42.0));
+    assert!(find_constant_int(&chunk, 42));
 }
 
 #[test]
@@ -273,7 +280,7 @@ fn let_binding() {
 fn let_multiple_bindings() {
     let (chunk, _) = compile_source("(let ((x 1) (y 2)) (+ x y))");
     assert_eq!(count_op(&chunk, Op::SetLocal), 2);
-    assert!(find_op(&chunk, Op::Add));
+    assert!(find_op(&chunk, Op::AddInt));
 }
 
 #[test]
@@ -577,7 +584,7 @@ fn compile_program_multiple_exprs() {
     let (chunk, _) = compile_source("(define x 1) (define y 2) (+ x y)");
     // Should have POP between non-last expressions
     assert!(count_op(&chunk, Op::Pop) >= 2);
-    assert!(find_op(&chunk, Op::Add));
+    assert!(find_op(&chunk, Op::AddInt));
 }
 
 #[test]
@@ -597,7 +604,7 @@ fn compile_single_expr() {
     let chunk = compile(&exprs[0], &interner).expect("compile failed");
     assert!(find_op(&chunk, Op::PushConst));
     assert!(find_op(&chunk, Op::Return));
-    assert!(find_constant_number(&chunk, 42.0));
+    assert!(find_constant_int(&chunk, 42));
 }
 
 // =====================================================================
@@ -649,10 +656,24 @@ fn eval_with_output(source: &str) -> (Result<Value, ProgramError>, String) {
     (result, output)
 }
 
-fn assert_num(source: &str, expected: f64) {
+fn assert_int(source: &str, expected: i64) {
     let val = eval(source).expect(&format!("eval failed for: {}", source));
-    let n = val.as_number().expect(&format!(
-        "expected number, got {:?} for: {}",
+    let n = val.as_int().expect(&format!(
+        "expected int, got {:?} for: {}",
+        format_value(&val),
+        source
+    ));
+    assert_eq!(
+        n, expected,
+        "expected {} but got {} for: {}",
+        expected, n, source
+    );
+}
+
+fn assert_float(source: &str, expected: f64) {
+    let val = eval(source).expect(&format!("eval failed for: {}", source));
+    let n = val.as_float().expect(&format!(
+        "expected float, got {:?} for: {}",
         format_value(&val),
         source
     ));
@@ -726,17 +747,17 @@ fn assert_error(source: &str, substring: &str) {
 
 #[test]
 fn exec_literal_number() {
-    assert_num("42", 42.0);
+    assert_int("42", 42);
 }
 
 #[test]
 fn exec_literal_float() {
-    assert_num("3.14", 3.14);
+    assert_float("3.14", 3.14);
 }
 
 #[test]
 fn exec_literal_zero() {
-    assert_num("0", 0.0);
+    assert_int("0", 0);
 }
 
 #[test]
@@ -763,59 +784,59 @@ fn exec_literal_nil() {
 
 #[test]
 fn exec_add() {
-    assert_num("(+ 1 2)", 3.0);
+    assert_int("(+ 1 2)", 3);
 }
 
 #[test]
 fn exec_sub() {
-    assert_num("(- 10 3)", 7.0);
+    assert_int("(- 10 3)", 7);
 }
 
 #[test]
 fn exec_mul() {
-    assert_num("(* 4 5)", 20.0);
+    assert_int("(* 4 5)", 20);
 }
 
 #[test]
 fn exec_div() {
-    assert_num("(/ 10 2)", 5.0);
+    assert_int("(/ 10 2)", 5);
 }
 
 #[test]
 fn exec_neg() {
-    assert_num("(- 5)", -5.0);
+    assert_int("(- 5)", -5);
 }
 
 #[test]
 fn exec_nested_arithmetic() {
-    assert_num("(+ (* 2 3) (- 10 4))", 12.0);
+    assert_int("(+ (* 2 3) (- 10 4))", 12);
 }
 
 #[test]
 fn exec_variadic_add() {
-    assert_num("(+ 1 2 3 4 5)", 15.0);
+    assert_int("(+ 1 2 3 4 5)", 15);
 }
 
 #[test]
 fn exec_negative_subtraction() {
-    assert_num("(- 3 10)", -7.0);
+    assert_int("(- 3 10)", -7);
 }
 
 #[test]
 fn exec_neg_in_arithmetic() {
-    assert_num("(+ (- 5) 10)", 5.0);
+    assert_int("(+ (- 5) 10)", 5);
 }
 
 #[test]
 fn exec_neg_multiply() {
-    assert_num("(* (- 3) 4)", -12.0);
+    assert_int("(* (- 3) 4)", -12);
 }
 
 // ===== Execution: String concatenation =====
 
 #[test]
 fn exec_string_concat() {
-    assert_str("(+ \"hello\" \" world\")", "hello world");
+    assert_str("(string-append \"hello\" \" world\")", "hello world");
 }
 
 // ===== Execution: Comparison =====
@@ -869,12 +890,12 @@ fn exec_ge() {
 
 #[test]
 fn exec_if_true_branch() {
-    assert_num("(if #t 1 2)", 1.0);
+    assert_int("(if #t 1 2)", 1);
 }
 
 #[test]
 fn exec_if_false_branch() {
-    assert_num("(if #f 1 2)", 2.0);
+    assert_int("(if #f 1 2)", 2);
 }
 
 #[test]
@@ -889,22 +910,22 @@ fn exec_if_complex_condition() {
 
 #[test]
 fn exec_cond() {
-    assert_num("(cond (#f 1) (#t 2) (else 3))", 2.0);
+    assert_int("(cond (#f 1) (#t 2) (else 3))", 2);
 }
 
 #[test]
 fn exec_cond_else() {
-    assert_num("(cond (#f 1) (#f 2) (else 3))", 3.0);
+    assert_int("(cond (#f 1) (#f 2) (else 3))", 3);
 }
 
 #[test]
 fn exec_cond_first_match() {
-    assert_num("(cond ((< 1 2) 10) (else 20))", 10.0);
+    assert_int("(cond ((< 1 2) 10) (else 20))", 10);
 }
 
 #[test]
 fn exec_cond_else_fallback() {
-    assert_num("(cond ((> 1 2) 10) (else 20))", 20.0);
+    assert_int("(cond ((> 1 2) 10) (else 20))", 20);
 }
 
 #[test]
@@ -922,17 +943,17 @@ fn exec_cond_multiple_false() {
 
 #[test]
 fn exec_begin_single() {
-    assert_num("(begin 42)", 42.0);
+    assert_int("(begin 42)", 42);
 }
 
 #[test]
 fn exec_begin_multiple() {
-    assert_num("(begin 1 2 3)", 3.0);
+    assert_int("(begin 1 2 3)", 3);
 }
 
 #[test]
 fn exec_begin_with_defines() {
-    assert_num("(begin (define x 10) (define y 20) (+ x y))", 30.0);
+    assert_int("(begin (define x 10) (define y 20) (+ x y))", 30);
 }
 
 #[test]
@@ -942,7 +963,7 @@ fn exec_begin_returns_last() {
 
 #[test]
 fn exec_begin_nested() {
-    assert_num("(begin (begin 1 2) (begin 3 4))", 4.0);
+    assert_int("(begin (begin 1 2) (begin 3 4))", 4);
 }
 
 #[test]
@@ -954,117 +975,117 @@ fn exec_begin_empty() {
 
 #[test]
 fn exec_define_and_use() {
-    assert_num("(define x 42) x", 42.0);
+    assert_int("(define x 42) x", 42);
 }
 
 #[test]
 fn exec_define_with_expr() {
-    assert_num("(define x (+ 1 2)) x", 3.0);
+    assert_int("(define x (+ 1 2)) x", 3);
 }
 
 #[test]
 fn exec_define_multiple() {
-    assert_num("(define x 10) (+ x 5)", 15.0);
+    assert_int("(define x 10) (+ x 5)", 15);
 }
 
 #[test]
 fn exec_let_basic() {
-    assert_num("(let ((x 10)) x)", 10.0);
+    assert_int("(let ((x 10)) x)", 10);
 }
 
 #[test]
 fn exec_let_multiple() {
-    assert_num("(let ((x 10) (y 20)) (+ x y))", 30.0);
+    assert_int("(let ((x 10) (y 20)) (+ x y))", 30);
 }
 
 #[test]
 fn exec_let_sequential() {
-    assert_num("(let ((x 10) (y (+ x 5))) y)", 15.0);
+    assert_int("(let ((x 10) (y (+ x 5))) y)", 15);
 }
 
 #[test]
 fn exec_let_nested() {
-    assert_num("(let ((x 1)) (let ((y 2)) (+ x y)))", 3.0);
+    assert_int("(let ((x 1)) (let ((y 2)) (+ x y)))", 3);
 }
 
 #[test]
 fn exec_let_shadowing() {
-    assert_num("(let ((x 1)) (let ((x 2)) x))", 2.0);
+    assert_int("(let ((x 1)) (let ((x 2)) x))", 2);
 }
 
 #[test]
 fn exec_let_with_function() {
-    assert_num("(let ((f (lambda (x) (* x 2)))) (f 5))", 10.0);
+    assert_int("(let ((f (lambda (x) (* x 2)))) (f 5))", 10);
 }
 
 #[test]
 fn exec_let_basic_add() {
-    assert_num("(let ((a 1) (b 2)) (+ a b))", 3.0);
+    assert_int("(let ((a 1) (b 2)) (+ a b))", 3);
 }
 
 // ===== Execution: Functions =====
 
 #[test]
 fn exec_simple_lambda() {
-    assert_num("((lambda (x) x) 42)", 42.0);
+    assert_int("((lambda (x) x) 42)", 42);
 }
 
 #[test]
 fn exec_lambda_with_body() {
-    assert_num("((lambda (x y) (+ x y)) 3 4)", 7.0);
+    assert_int("((lambda (x y) (+ x y)) 3 4)", 7);
 }
 
 #[test]
 fn exec_define_function() {
-    assert_num("(define add (lambda (a b) (+ a b))) (add 10 20)", 30.0);
+    assert_int("(define add (lambda (a b) (+ a b))) (add 10 20)", 30);
 }
 
 #[test]
 fn exec_closure() {
-    assert_num(
+    assert_int(
         "(define make-adder (lambda (n) (lambda (x) (+ n x)))) (define add5 (make-adder 5)) (add5 3)",
-        8.0,
+        8,
     );
 }
 
 #[test]
 fn exec_recursive_fib() {
-    assert_num(
+    assert_int(
         "(define fib (lambda (n)
            (if (< n 2)
              n
              (+ (fib (- n 1)) (fib (- n 2))))))
          (fib 10)",
-        55.0,
+        55,
     );
 }
 
 #[test]
 fn exec_factorial() {
-    assert_num(
+    assert_int(
         "(define fact (lambda (n) (if (= n 0) 1 (* n (fact (- n 1)))))) (fact 5)",
-        120.0,
+        120,
     );
 }
 
 #[test]
 fn exec_define_square() {
-    assert_num("(define square (lambda (n) (* n n))) (square 4)", 16.0);
+    assert_int("(define square (lambda (n) (* n n))) (square 4)", 16);
 }
 
 #[test]
 fn exec_closures_make_adder() {
-    assert_num(
+    assert_int(
         "(define make-adder (lambda (n) (lambda (x) (+ n x)))) ((make-adder 5) 10)",
-        15.0,
+        15,
     );
 }
 
 #[test]
 fn exec_begin_in_function_body() {
-    assert_num(
+    assert_int(
         "(define test (lambda () (begin (define a 1) (define b 2) (+ a b)))) (test)",
-        3.0,
+        3,
     );
 }
 
@@ -1073,13 +1094,13 @@ fn exec_begin_in_function_body() {
 #[test]
 fn exec_recursive_local_define() {
     // Recursive define inside a lambda body (the motivating example)
-    assert_num(
+    assert_int(
         "(define outer (lambda ()
            (define count-down (lambda (n)
              (if (= n 0) 0 (count-down (- n 1)))))
            (count-down 5)))
          (outer)",
-        0.0,
+        0,
     );
 }
 
@@ -1115,20 +1136,20 @@ fn exec_mutually_recursive_local_defines_odd() {
 #[test]
 fn exec_simple_local_defines() {
     // Non-recursive defines inside a lambda body
-    assert_num(
+    assert_int(
         "(define f (lambda ()
            (define x 10)
            (define y 20)
            (+ x y)))
          (f)",
-        30.0,
+        30,
     );
 }
 
 #[test]
 fn exec_local_defines_dont_pollute_globals() {
     // Two functions with same-named local defines should be independent
-    assert_num(
+    assert_int(
         "(define f (lambda ()
            (define local-x 42)
            local-x))
@@ -1136,14 +1157,14 @@ fn exec_local_defines_dont_pollute_globals() {
            (define local-x 99)
            local-x))
          (+ (f) (g))",
-        141.0,
+        141,
     );
 }
 
 #[test]
 fn exec_nested_lambda_local_defines() {
     // Nested lambdas each with their own local defines
-    assert_num(
+    assert_int(
         "(define outer (lambda ()
            (define x 10)
            (define inner (lambda ()
@@ -1151,47 +1172,47 @@ fn exec_nested_lambda_local_defines() {
              (+ x y)))
            (inner)))
          (outer)",
-        30.0,
+        30,
     );
 }
 
 #[test]
 fn exec_recursive_local_define_in_begin() {
     // Recursive define inside begin inside lambda
-    assert_num(
+    assert_int(
         "(define test (lambda ()
            (begin
              (define count-down (lambda (n)
                (if (= n 0) 0 (count-down (- n 1)))))
              (count-down 3))))
          (test)",
-        0.0,
+        0,
     );
 }
 
 #[test]
 fn exec_local_define_fibonacci() {
     // Local recursive fibonacci
-    assert_num(
+    assert_int(
         "(define test (lambda ()
            (define fib (lambda (n)
              (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))))
            (fib 10)))
          (test)",
-        55.0,
+        55,
     );
 }
 
 #[test]
 fn exec_local_define_with_closure_capture() {
     // Local define that captures from the enclosing lambda's params
-    assert_num(
+    assert_int(
         "(define make-counter (lambda (start)
            (define step (lambda (n)
              (if (= n 0) start (step (- n 1)))))
            (step 5)))
          (make-counter 42)",
-        42.0,
+        42,
     );
 }
 
@@ -1226,25 +1247,25 @@ fn exec_local_define_after_expr_in_begin_errors() {
 
 #[test]
 fn exec_tco_loop() {
-    assert_num(
+    assert_int(
         "(define loop (lambda (n acc)
            (if (= n 0)
              acc
              (loop (- n 1) (+ acc 1)))))
          (loop 100000 0)",
-        100000.0,
+        100000,
     );
 }
 
 #[test]
 fn exec_tco_fib() {
-    assert_num(
+    assert_int(
         "(define fib-tail (lambda (n a b)
            (if (= n 0)
              a
              (fib-tail (- n 1) b (+ a b)))))
          (fib-tail 30 0 1)",
-        832040.0,
+        832040,
     );
 }
 
@@ -1262,12 +1283,12 @@ fn exec_adt_some() {
 
 #[test]
 fn exec_match_wildcard() {
-    assert_num("(match 42 (_ 1))", 1.0);
+    assert_int("(match 42 (_ 1))", 1);
 }
 
 #[test]
 fn exec_match_variable() {
-    assert_num("(match 42 (x x))", 42.0);
+    assert_int("(match 42 (x x))", 42);
 }
 
 #[test]
@@ -1287,12 +1308,12 @@ fn exec_match_number_literal_3() {
 
 #[test]
 fn exec_match_some() {
-    assert_num("(match (Some 42) ((Some x) x) (None 0))", 42.0);
+    assert_int("(match (Some 42) ((Some x) x) (None 0))", 42);
 }
 
 #[test]
 fn exec_match_none() {
-    assert_num("(match None ((Some x) x) (None 0))", 0.0);
+    assert_int("(match None ((Some x) x) (None 0))", 0);
 }
 
 #[test]
@@ -1375,7 +1396,7 @@ fn exec_not_number() {
 
 #[test]
 fn exec_string_length() {
-    assert_num("(string-length \"hello\")", 5.0);
+    assert_int("(string-length \"hello\")", 5);
 }
 
 #[test]
@@ -1389,27 +1410,27 @@ fn exec_number_to_string() {
 }
 
 #[test]
-fn exec_string_to_number() {
-    assert_num("(string->number \"42\")", 42.0);
+fn exec_string_to_int() {
+    assert_int("(string->int \"42\")", 42);
 }
 
 #[test]
-fn exec_string_to_number_invalid() {
-    // string->number now throws on invalid input via (perform throw ...)
+fn exec_string_to_int_invalid() {
+    // string->int now throws on invalid input via (perform throw ...)
     // With CPS dispatch, unhandled throw gives "Uncaught exception: ..." instead of "Unhandled effect: throw"
     assert_error(
-        "(string->number \"abc\")",
-        "Uncaught exception: string->number: invalid number: abc",
+        "(string->int \"abc\")",
+        "Uncaught exception: string->int: invalid integer: abc",
     );
 }
 
 #[test]
-fn exec_string_to_number_caught() {
-    // string->number throws can be caught with handle
+fn exec_string_to_int_caught() {
+    // string->int throws can be caught with handle
     assert_str(
-        r#"(handle (begin (string->number "abc") "ok")
+        r#"(handle (begin (string->int "abc") "ok")
              ((throw msg k) -> msg))"#,
-        "string->number: invalid number: abc",
+        "string->int: invalid integer: abc",
     );
 }
 
@@ -1417,117 +1438,117 @@ fn exec_string_to_number_caught() {
 
 #[test]
 fn exec_handle_returns_body() {
-    assert_num(
+    assert_int(
         "(handle 42
            ((op k) -> 0))",
-        42.0,
+        42,
     );
 }
 
 #[test]
 fn exec_handle_with_return_handler() {
-    assert_num(
+    assert_int(
         "(handle 42
            ((return x) -> (+ x 1)))",
-        43.0,
+        43,
     );
 }
 
 #[test]
 fn exec_simple_perform_and_handle() {
-    assert_num(
+    assert_int(
         "(handle
            (+ 1 (perform get))
            ((get k) -> (resume k 10)))",
-        11.0,
+        11,
     );
 }
 
 #[test]
 fn exec_perform_with_argument() {
-    assert_num(
+    assert_int(
         "(handle
            (perform put 42)
            ((put x k) -> x))",
-        42.0,
+        42,
     );
 }
 
 #[test]
 fn exec_handler_not_resuming() {
-    assert_num(
+    assert_int(
         "(handle
            (begin
              (perform abort)
              100)
            ((abort k) -> 0))",
-        0.0,
+        0,
     );
 }
 
 #[test]
 fn exec_multiple_performs() {
-    assert_num(
+    assert_int(
         "(handle
            (+ (perform get) (perform get))
            ((get k) -> (resume k 5)))",
-        10.0,
+        10,
     );
 }
 
 #[test]
 fn exec_perform_in_function() {
-    assert_num(
+    assert_int(
         "(define double (lambda (x) (* x 2)))
          (handle
            (double (perform get))
            ((get k) -> (resume k 7)))",
-        14.0,
+        14,
     );
 }
 
 #[test]
 fn exec_conditional_with_perform() {
-    assert_num(
+    assert_int(
         "(handle
            (if (perform ask)
              100
              0)
            ((ask k) -> (resume k #t)))",
-        100.0,
+        100,
     );
 }
 
 #[test]
 fn exec_perform_in_let() {
-    assert_num(
+    assert_int(
         "(handle
            (let ((x (perform get)))
              (* x x))
            ((get k) -> (resume k 4)))",
-        16.0,
+        16,
     );
 }
 
 #[test]
 fn exec_return_handler_with_perform() {
-    assert_num(
+    assert_int(
         "(handle
            (perform get)
            ((get k) -> (resume k 10))
            ((return x) -> (* x 2)))",
-        20.0,
+        20,
     );
 }
 
 #[test]
 fn exec_qualified_effect_handler() {
     // Test qualified effect names: EffectName/opName
-    assert_num(
+    assert_int(
         "(handle
            (perform MyEffect/my-op 42)
            ((MyEffect/my-op val k) -> (resume k (+ val 1))))",
-        43.0,
+        43,
     );
 }
 
@@ -1545,33 +1566,33 @@ fn exec_qualified_effect_handler_string() {
 #[test]
 fn exec_qualified_and_unqualified_mixed() {
     // Unqualified handler should still work (backward compatibility)
-    assert_num(
+    assert_int(
         "(handle
            (perform get)
            ((get k) -> (resume k 100)))",
-        100.0,
+        100,
     );
 }
 
 #[test]
 fn exec_nested_handlers() {
-    assert_num(
+    assert_int(
         "(handle
            (handle
              (+ (perform get) (perform inc))
              ((get k) -> (resume k 5)))
            ((inc k) -> (resume k 1)))",
-        6.0,
+        6,
     );
 }
 
 #[test]
 fn exec_handler_no_continuation_param() {
-    assert_num(
+    assert_int(
         "(handle
            (begin (perform log) 42)
            ((log k) -> 0))",
-        0.0,
+        0,
     );
 }
 
@@ -1632,22 +1653,22 @@ fn exec_type_nil() {
 
 #[test]
 fn exec_float_add() {
-    assert_num("(+. 2.5 3.0)", 5.5);
+    assert_float("(+. 2.5 3.0)", 5.5);
 }
 
 #[test]
 fn exec_float_mul() {
-    assert_num("(*. 2.0 3.0)", 6.0);
+    assert_float("(*. 2.0 3.0)", 6.0);
 }
 
 #[test]
 fn exec_float_sub() {
-    assert_num("(-. 10.0 3.0)", 7.0);
+    assert_float("(-. 10.0 3.0)", 7.0);
 }
 
 #[test]
 fn exec_float_div() {
-    assert_num("(/. 10.0 2.0)", 5.0);
+    assert_float("(/. 10.0 2.0)", 5.0);
 }
 
 // ===== Execution: Polymorphic equality =====
@@ -1666,7 +1687,7 @@ fn exec_equal_false() {
 
 #[test]
 fn exec_int_to_float() {
-    assert_num("(int->float 42)", 42.0);
+    assert_float("(int->float 42)", 42.0);
 }
 
 // ===== Execution: String comparison =====
@@ -1712,13 +1733,13 @@ fn exec_map_function() {
 
 #[test]
 fn exec_fold_function() {
-    assert_num(
+    assert_int(
         "(define fold (lambda (f acc lst)
            (match lst
              (Nil acc)
              ((Cons x rest) (fold f (f acc x) rest)))))
          (fold (lambda (acc x) (+ acc x)) 0 (Cons 1 (Cons 2 (Cons 3 Nil))))",
-        6.0,
+        6,
     );
 }
 
@@ -1734,10 +1755,10 @@ fn exec_mutual_recursion() {
 
 #[test]
 fn exec_higher_order() {
-    assert_num(
+    assert_int(
         "(define apply-twice (lambda (f x) (f (f x))))
          (apply-twice (lambda (x) (+ x 1)) 5)",
-        7.0,
+        7,
     );
 }
 
@@ -1746,7 +1767,7 @@ fn exec_higher_order() {
 #[test]
 fn exec_stateful_counter() {
     // A counter that increments on each `tick` and returns final count
-    assert_num(
+    assert_int(
         "(handle
            (begin
              (perform tick)
@@ -1755,7 +1776,7 @@ fn exec_stateful_counter() {
              (perform done))
            ((tick k) -> (+ 1 (resume k nil)))
            ((done k) -> 0))",
-        3.0,
+        3,
     );
 }
 
@@ -1777,14 +1798,14 @@ fn exec_effect_abort() {
 
 #[test]
 fn exec_effect_state() {
-    assert_num(
+    assert_int(
         "(handle
            (begin
              (perform put 10)
              (+ (perform get) 5))
            ((get k) -> (resume k 10))
            ((put v k) -> (resume k nil)))",
-        15.0,
+        15,
     );
 }
 
@@ -1797,7 +1818,7 @@ fn exec_mkpair() {
 
 #[test]
 fn exec_match_mkpair() {
-    assert_num("(match (MkPair 3 4) ((MkPair a b) (+ a b)))", 7.0);
+    assert_int("(match (MkPair 3 4) ((MkPair a b) (+ a b)))", 7);
 }
 
 // ===== Execution: Ok/Err =====
@@ -1814,12 +1835,12 @@ fn exec_err() {
 
 #[test]
 fn exec_match_result() {
-    assert_num("(match (Ok 10) ((Ok v) v) ((Err e) 0))", 10.0);
+    assert_int("(match (Ok 10) ((Ok v) v) ((Err e) 0))", 10);
 }
 
 #[test]
 fn exec_match_err() {
-    assert_num("(match (Err \"fail\") ((Ok v) v) ((Err e) 0))", 0.0);
+    assert_int("(match (Err \"fail\") ((Ok v) v) ((Err e) 0))", 0);
 }
 
 // ===== One-shot continuation enforcement =====
@@ -1870,11 +1891,11 @@ fn cps_handle_throw_with_println() {
 #[test]
 fn cps_deep_handler_recatch() {
     // Deep handler semantics: handler re-catches effects from resumed continuations
-    assert_num(
+    assert_int(
         "(handle
            (+ (perform get) (perform get))
            ((get k) -> (resume k 10)))",
-        20.0,
+        20,
     );
 }
 
@@ -1901,13 +1922,13 @@ fn cps_throw_caught_by_user_handler() {
 #[test]
 fn cps_nested_handlers_inner_catches() {
     // Nested handlers: inner handler catches its effect, outer is unaffected
-    assert_num(
+    assert_int(
         "(handle
            (handle
              (+ (perform get) 1)
              ((get k) -> (resume k 100)))
            ((get k) -> (resume k 0)))",
-        101.0,
+        101,
     );
 }
 
@@ -1927,13 +1948,13 @@ fn cps_nested_handlers_outer_catches() {
 #[test]
 fn cps_nested_handlers_propagation() {
     // Effect not handled by inner handler propagates to outer
-    assert_num(
+    assert_int(
         "(handle
            (handle
              (perform get)
              ((put v k) -> (resume k nil)))
            ((get k) -> (resume k 42)))",
-        42.0,
+        42,
     );
 }
 
@@ -1956,7 +1977,7 @@ fn cps_handler_with_io_in_clause() {
 #[test]
 fn cps_stateful_counter() {
     // Accumulation via handler wrapping (key correctness test for deep semantics)
-    assert_num(
+    assert_int(
         "(handle
            (begin
              (perform tick)
@@ -1965,7 +1986,7 @@ fn cps_stateful_counter() {
              (perform get-count))
            ((tick k) -> (resume k nil))
            ((get-count k) -> (resume k 3)))",
-        3.0,
+        3,
     );
 }
 
@@ -2031,12 +2052,22 @@ fn eval_modules_with_output(
     (result, output)
 }
 
-fn assert_module_num(source: &str, file_path: &str, expected: f64) {
+fn assert_module_int(source: &str, file_path: &str, expected: i64) {
     let val = eval_with_modules(source, file_path)
         .expect(&format!("eval failed for module test: {}", source));
     let n = val
-        .as_number()
-        .expect(&format!("expected number, got {:?}", format_value(&val)));
+        .as_int()
+        .expect(&format!("expected int, got {:?}", format_value(&val)));
+    assert_eq!(n, expected, "expected {} but got {}", expected, n);
+}
+
+#[allow(dead_code)]
+fn assert_module_float(source: &str, file_path: &str, expected: f64) {
+    let val = eval_with_modules(source, file_path)
+        .expect(&format!("eval failed for module test: {}", source));
+    let n = val
+        .as_float()
+        .expect(&format!("expected float, got {:?}", format_value(&val)));
     assert!(
         (n - expected).abs() < 1e-10,
         "expected {} but got {}",
@@ -2073,21 +2104,21 @@ fn assert_module_error(source: &str, file_path: &str, substring: &str) {
 
 #[test]
 fn module_import_all_bindings() {
-    assert_module_num(
+    assert_module_int(
         r#"(import "./math.mar")
            (square 5)"#,
         "test.mar",
-        25.0,
+        25,
     );
 }
 
 #[test]
 fn module_import_all_multiple() {
-    assert_module_num(
+    assert_module_int(
         r#"(import "./math.mar")
            (add (square 2) (double 3))"#,
         "test.mar",
-        10.0,
+        10,
     );
 }
 
@@ -2095,21 +2126,21 @@ fn module_import_all_multiple() {
 
 #[test]
 fn module_import_selective() {
-    assert_module_num(
+    assert_module_int(
         r#"(import "./math.mar" (square))
            (square 6)"#,
         "test.mar",
-        36.0,
+        36,
     );
 }
 
 #[test]
 fn module_import_selective_multiple() {
-    assert_module_num(
+    assert_module_int(
         r#"(import "./math.mar" (square double))
            (+ (square 3) (double 4))"#,
         "test.mar",
-        17.0,
+        17,
     );
 }
 
@@ -2126,21 +2157,21 @@ fn module_import_selective_nonexistent() {
 
 #[test]
 fn module_import_qualified() {
-    assert_module_num(
+    assert_module_int(
         r#"(import "./math.mar" as m)
            (m/square 7)"#,
         "test.mar",
-        49.0,
+        49,
     );
 }
 
 #[test]
 fn module_import_qualified_multiple() {
-    assert_module_num(
+    assert_module_int(
         r#"(import "./math.mar" as math)
            (math/add (math/square 2) (math/double 5))"#,
         "test.mar",
-        14.0,
+        14,
     );
 }
 
@@ -2161,8 +2192,8 @@ fn module_qualified_no_namespace_collision() {
         ],
     )
     .expect("namespace collision test failed");
-    let n = val.as_number().expect("expected number");
-    assert!((n - 15.0).abs() < 1e-10, "expected 15 (9 + 6), got {}", n);
+    let n = val.as_int().expect("expected int");
+    assert_eq!(n, 15, "expected 15 (9 + 6), got {}", n);
 }
 
 #[test]
@@ -2180,8 +2211,8 @@ fn module_qualified_internal_cross_reference() {
         )],
     )
     .expect("cross-reference test failed");
-    let n = val.as_number().expect("expected number");
-    assert!((n - 27.0).abs() < 1e-10, "expected 27, got {}", n);
+    let n = val.as_int().expect("expected int");
+    assert_eq!(n, 27, "expected 27, got {}", n);
 }
 
 #[test]
@@ -2211,11 +2242,11 @@ fn module_qualified_no_unqualified_leak() {
 
 #[test]
 fn module_import_auto_extension() {
-    assert_module_num(
+    assert_module_int(
         r#"(import "./math")
            (square 3)"#,
         "test.mar",
-        9.0,
+        9,
     );
 }
 
@@ -2235,12 +2266,12 @@ fn module_import_circular_detection() {
 #[test]
 fn module_import_caching_diamond() {
     // Both test.mar and uses-math.mar import math.mar — should only load once
-    assert_module_num(
+    assert_module_int(
         r#"(import "./math.mar")
            (import "./uses-math.mar")
            (+ (square 2) (quad 2))"#,
         "test.mar",
-        20.0,
+        20,
     );
 }
 
@@ -2260,7 +2291,7 @@ fn module_import_data_types() {
 
 #[test]
 fn module_import_effects() {
-    assert_module_num(
+    assert_module_int(
         r#"(import "./effects.mar")
            (define counter 0)
            (handle
@@ -2270,7 +2301,7 @@ fn module_import_effects() {
                (resume k counter)))
              ((get k) -> (resume k counter)))"#,
         "test.mar",
-        3.0,
+        3,
     );
 }
 
@@ -2314,7 +2345,7 @@ fn module_run_program_basic() {
     let mut loader = ModuleLoader::new();
     let result =
         run_program(&mut vm, "(+ 1 2)", None, &mut loader, &interner).expect("run_program failed");
-    assert_eq!(result.as_number(), Some(3.0));
+    assert_eq!(result.as_int(), Some(3));
 }
 
 #[test]
@@ -2331,7 +2362,7 @@ fn module_run_program_multiple_exprs() {
         &interner,
     )
     .expect("run_program failed");
-    assert_eq!(result.as_number(), Some(30.0));
+    assert_eq!(result.as_int(), Some(30));
 }
 
 #[test]
@@ -2430,7 +2461,7 @@ fn stdlib_option_unwrap_or() {
         &interner,
     )
     .expect("stdlib option test failed");
-    assert_eq!(result.as_number(), Some(141.0));
+    assert_eq!(result.as_int(), Some(141));
 }
 
 #[test]
@@ -2560,7 +2591,7 @@ fn stdlib_result_unwrap_or() {
         &interner,
     )
     .expect("stdlib result test failed");
-    assert_eq!(result.as_number(), Some(109.0));
+    assert_eq!(result.as_int(), Some(109));
 }
 
 #[test]
@@ -2681,7 +2712,7 @@ fn stdlib_codec_parse_nat() {
 #[test]
 fn stdlib_codec_print_nat() {
     assert_eq!(
-        run_codec_test(r#"(show (c/print c/nat 42.0))"#),
+        run_codec_test(r#"(show (c/print c/nat 42))"#),
         r#""(Ok "42")""#
     );
 }
@@ -2705,7 +2736,7 @@ fn stdlib_codec_parse_integer_negative() {
 #[test]
 fn stdlib_codec_print_integer_negative() {
     assert_eq!(
-        run_codec_test(r#"(show (c/print c/integer -7.0))"#),
+        run_codec_test(r#"(show (c/print c/integer -7))"#),
         r#""(Ok "-7")""#
     );
 }
@@ -2911,7 +2942,7 @@ fn ffi_call_cos() {
 (define lib (ffi-open "m" (list (list "cos" (list "f64") "f64"))))
 (ffi-call lib "cos" 0.0)
 "#;
-    assert_num(source, 1.0);
+    assert_float(source, 1.0);
 }
 
 #[cfg(feature = "ffi")]
@@ -2922,7 +2953,7 @@ fn ffi_call_sqrt() {
 (define lib (ffi-open "m" (list (list "sqrt" (list "f64") "f64"))))
 (ffi-call lib "sqrt" 16.0)
 "#;
-    assert_num(source, 4.0);
+    assert_float(source, 4.0);
 }
 
 #[cfg(feature = "ffi")]
@@ -2934,9 +2965,9 @@ fn ffi_multiple_sigs() {
   (list "sin" (list "f64") "f64")
   (list "cos" (list "f64") "f64")
   (list "pow" (list "f64" "f64") "f64"))))
-(+ (+ (ffi-call lib "sin" 0.0) (ffi-call lib "cos" 0.0)) (ffi-call lib "pow" 2.0 3.0))
+(+. (+. (ffi-call lib "sin" 0.0) (ffi-call lib "cos" 0.0)) (ffi-call lib "pow" 2.0 3.0))
 "#;
-    assert_num(source, 9.0);
+    assert_float(source, 9.0);
 }
 
 #[cfg(feature = "ffi")]
@@ -2945,9 +2976,9 @@ fn ffi_struct_roundtrip() {
     let source = r#"
 (define point-def (ffi-struct "Point" (list (list "x" "f64") (list "y" "f64"))))
 (define p (struct-new point-def 3.0 4.0))
-(+ (struct-get p "x") (struct-get p "y"))
+(+. (struct-get p "x") (struct-get p "y"))
 "#;
-    assert_num(source, 7.0);
+    assert_float(source, 7.0);
 }
 
 #[cfg(feature = "ffi")]
@@ -2957,9 +2988,9 @@ fn ffi_struct_set() {
 (define point-def (ffi-struct "Point" (list (list "x" "f64") (list "y" "f64"))))
 (define p (struct-new point-def 1.0 2.0))
 (define p2 (struct-set p "x" 10.0))
-(+ (struct-get p2 "x") (struct-get p2 "y"))
+(+. (struct-get p2 "x") (struct-get p2 "y"))
 "#;
-    assert_num(source, 12.0);
+    assert_float(source, 12.0);
 }
 
 #[cfg(feature = "ffi")]
@@ -2980,7 +3011,7 @@ fn ffi_call_three_args() {
 (define lib (ffi-open "m" (list (list "fma" (list "f64" "f64" "f64") "f64"))))
 (ffi-call lib "fma" 2.0 3.0 4.0)
 "#;
-    assert_num(source, 10.0);
+    assert_float(source, 10.0);
 }
 
 #[cfg(feature = "ffi")]
@@ -3003,7 +3034,7 @@ fn ffi_cstring_arg() {
 (define lib (ffi-open "c" (list (list "strlen" (list "cstring") "u64"))))
 (ffi-call lib "strlen" "hello")
 "#;
-    assert_num(source, 5.0);
+    assert_int(source, 5);
 }
 
 #[cfg(feature = "ffi")]
@@ -3014,7 +3045,7 @@ fn ffi_void_arg_skipped() {
 (define lib (ffi-open "m" (list (list "cos" (list "f64") "f64")
                                 (list "drand48" (list "void") "f64"))))
 (define r (ffi-call lib "drand48"))
-(>= r 0.0)
+(>=. r 0.0)
 "#;
     assert_bool(source, true);
 }
@@ -3027,7 +3058,7 @@ fn ffi_f32_roundtrip() {
 (define lib (ffi-open "m" (list (list "floorf" (list "f32") "f32"))))
 (ffi-call lib "floorf" 3.7)
 "#;
-    assert_num(source, 3.0);
+    assert_float(source, 3.0);
 }
 
 #[cfg(feature = "ffi")]
@@ -3038,7 +3069,7 @@ fn ffi_i32_return() {
 (define lib (ffi-open "c" (list (list "abs" (list "i32") "i32"))))
 (ffi-call lib "abs" -42)
 "#;
-    assert_num(source, 42.0);
+    assert_int(source, 42);
 }
 
 #[cfg(feature = "ffi")]
@@ -3050,7 +3081,7 @@ fn ffi_struct_type_in_parse() {
 (define lib (ffi-open "m" (list (list "cos" (list "f64") "f64"))))
 (ffi-call lib "cos" 0.0)
 "#;
-    assert_num(source, 1.0);
+    assert_float(source, 1.0);
 }
 
 // ===== Concurrency - Fibers =====
@@ -3388,7 +3419,7 @@ fn trap_exit_converts_crash_to_message() {
     (perform fiber-yield)
     (let ((msg (perform actor-receive)))
       (match msg
-        ((Exit pid reason) (perform println (+ "caught: " reason))))))))
+        ((Exit pid reason) (perform println (string-append "caught: " reason))))))))
 "#,
     );
     assert!(result.is_ok());
@@ -3484,11 +3515,11 @@ fn io_concurrent_file_reads() {
 
 #[test]
 fn concurrency_main_result_returned() {
-    assert_num(
+    assert_int(
         r#"
 (run-fibers (lambda () 42))
 "#,
-        42.0,
+        42,
     );
 }
 
@@ -3590,11 +3621,11 @@ fn fiber_crash_isolation() {
 
 #[test]
 fn parallel_main_result_returned() {
-    assert_num(
+    assert_int(
         r#"
 (run-fibers-parallel (lambda () 42) 2)
 "#,
-        42.0,
+        42,
     );
 }
 
@@ -3696,7 +3727,7 @@ fn parallel_actor_send_receive() {
 (run-fibers-parallel (lambda ()
   (let ((worker (perform fiber-spawn (lambda ()
                   (let ((msg (perform actor-receive)))
-                    (perform println (+ "got: " msg)))))))
+                    (perform println (string-append "got: " msg)))))))
     (perform actor-send worker "ping")
     (perform fiber-yield)
     (perform fiber-yield)
@@ -3785,7 +3816,7 @@ fn parallel_monitor_cross_thread() {
     (perform fiber-yield)
     (let ((msg (perform actor-receive)))
       (match msg
-        ((Down pid reason) (perform println (+ "down: " reason))))))) 2)
+        ((Down pid reason) (perform println (string-append "down: " reason))))))) 2)
 "#,
     );
     assert!(result.is_ok());
@@ -3904,7 +3935,7 @@ fn async_io_error() {
 
 #[test]
 fn quote_number() {
-    assert_num("(quote 42)", 42.0);
+    assert_int("(quote 42)", 42);
 }
 
 #[test]
@@ -3939,7 +3970,7 @@ fn quote_nested() {
 
 #[test]
 fn quote_sugar_number() {
-    assert_num("'42", 42.0);
+    assert_int("'42", 42);
 }
 
 #[test]
@@ -3998,8 +4029,8 @@ fn quasiquote_nested_unquote() {
 
 #[test]
 fn cons_car_cdr() {
-    assert_num("(car (cons 1 (cons 2 Nil)))", 1.0);
-    assert_num("(car (cdr (cons 1 (cons 2 Nil))))", 2.0);
+    assert_int("(car (cons 1 (cons 2 Nil)))", 1);
+    assert_int("(car (cdr (cons 1 (cons 2 Nil))))", 2);
 }
 
 #[test]
@@ -4045,13 +4076,13 @@ fn symbol_string_conversion() {
 
 #[test]
 fn defmacro_when() {
-    assert_num(
+    assert_int(
         r#"
 (defmacro when (cond body)
   `(if ,cond ,body nil))
 (when #t 42)
 "#,
-        42.0,
+        42,
     );
 }
 
@@ -4071,19 +4102,19 @@ fn defmacro_when_false() {
 
 #[test]
 fn defmacro_unless() {
-    assert_num(
+    assert_int(
         r#"
 (defmacro unless (cond body)
   `(if ,cond nil ,body))
 (unless #f 99)
 "#,
-        99.0,
+        99,
     );
 }
 
 #[test]
 fn defmacro_nested_expansion() {
-    assert_num(
+    assert_int(
         r#"
 (defmacro when (cond body)
   `(if ,cond ,body nil))
@@ -4091,19 +4122,19 @@ fn defmacro_nested_expansion() {
   `(when (not ,cond) ,body))
 (unless #f 77)
 "#,
-        77.0,
+        77,
     );
 }
 
 #[test]
 fn defmacro_with_splicing() {
-    assert_num(
+    assert_int(
         r#"
 (defmacro my-begin (first rest)
   `(let ((unused ,first)) ,rest))
 (my-begin (+ 1 2) (+ 3 4))
 "#,
-        7.0,
+        7,
     );
 }
 
@@ -4111,7 +4142,7 @@ fn defmacro_with_splicing() {
 fn defmacro_with_data_types() {
     // Macro generates match expressions using user-defined ADTs.
     // The body doesn't reference the pattern variable — it's self-contained.
-    assert_num(
+    assert_int(
         r#"
 (data (MyOpt a) MyNone (MySome a))
 (defmacro is-some (opt)
@@ -4120,7 +4151,7 @@ fn defmacro_with_data_types() {
     (MyNone 0)))
 (is-some (MySome 42))
 "#,
-        1.0,
+        1,
     );
 }
 
@@ -4130,7 +4161,7 @@ fn defmacro_with_data_types() {
 fn macro_hygiene_no_capture() {
     // Macro introduces 'tmp' binding. Caller also has 'tmp'.
     // With hygiene, macro's tmp is distinct from caller's tmp.
-    assert_num(
+    assert_int(
         r#"
 (defmacro my-or (a b)
   `(let ((tmp ,a))
@@ -4138,42 +4169,42 @@ fn macro_hygiene_no_capture() {
 (let ((tmp 42))
   (my-or #f tmp))
 "#,
-        42.0,
+        42,
     );
 }
 
 #[test]
 fn macro_hygiene_nested() {
     // Two expansions of the same macro should have distinct marks
-    assert_num(
+    assert_int(
         r#"
 (defmacro my-or (a b)
   `(let ((tmp ,a))
      (if tmp tmp ,b)))
 (my-or #f (my-or #f 99))
 "#,
-        99.0,
+        99,
     );
 }
 
 #[test]
 fn macro_hygiene_global_ref() {
     // Macro template references a global function — should still resolve
-    assert_num(
+    assert_int(
         r#"
 (define double (lambda (x) (* x 2)))
 (defmacro apply-double (x)
   `(double ,x))
 (apply-double 21)
 "#,
-        42.0,
+        42,
     );
 }
 
 #[test]
 fn macro_hygiene_constructor() {
     // Macro generates match expressions with constructor patterns
-    assert_num(
+    assert_int(
         r#"
 (defmacro unwrap-or (opt default)
   `(match ,opt
@@ -4181,13 +4212,13 @@ fn macro_hygiene_constructor() {
     (None ,default)))
 (unwrap-or (Some 42) 0)
 "#,
-        42.0,
+        42,
     );
 }
 
 #[test]
 fn macro_hygiene_constructor_none() {
-    assert_num(
+    assert_int(
         r#"
 (defmacro unwrap-or (opt default)
   `(match ,opt
@@ -4195,7 +4226,7 @@ fn macro_hygiene_constructor_none() {
     (None ,default)))
 (unwrap-or None 99)
 "#,
-        99.0,
+        99,
     );
 }
 
@@ -4220,7 +4251,7 @@ fn macro_import_basic() {
         )],
     )
     .expect("eval failed");
-    assert_eq!(val.as_number(), Some(42.0));
+    assert_eq!(val.as_int(), Some(42));
 }
 
 #[test]
@@ -4243,7 +4274,7 @@ fn macro_import_hygiene() {
         )],
     )
     .expect("eval failed");
-    assert_eq!(val.as_number(), Some(42.0));
+    assert_eq!(val.as_int(), Some(42));
 }
 
 #[test]
@@ -4274,7 +4305,7 @@ fn macro_import_chain() {
         ],
     )
     .expect("eval failed");
-    assert_eq!(val.as_number(), Some(42.0));
+    assert_eq!(val.as_int(), Some(42));
 }
 
 // ===== Error Cases =====

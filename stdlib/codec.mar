@@ -73,7 +73,8 @@
 ; **Iso a b** — A partial isomorphism (data type defined in this module):
 ;   (data (Iso a b) (MkIso (-> a (Option b)) (-> b (Option a))))
 ;   Used to transform the value type of a codec. For example, iso-chars
-;   converts (List Char) <-> String, and iso-number converts String <-> Float.
+;   converts (List Char) <-> String, iso-int converts String <-> Int,
+;   and iso-float converts String <-> Float.
 ;
 ; **Effects** — ParseState manages input (peek/consume/get-input/set-input).
 ;   PrintState manages output (emit/emit-char). Exception handles failures.
@@ -108,8 +109,8 @@
 ; Common pattern to get a String from many Chars:
 ;   (iso iso-chars (many letter))        ;; Codec String
 ;
-; Common pattern to get a Float from digit chars:
-;   (iso iso-number (iso iso-chars (many1 digit)))  ;; same as `nat`
+; Common pattern to get an Int from digit chars:
+;   (iso iso-int (iso iso-chars (many1 digit)))  ;; same as `nat`
 ;
 ;
 ; ## Syntax vs. Data Codecs
@@ -240,20 +241,19 @@
 ;   lookahead       : Codec a -> Codec a             parse without consuming
 ;   not-followed-by : (-> Unit a) -> Codec Unit      succeed if parser fails
 ;
-; Numeric codecs (these produce Float because iso-number uses
-; __try-string->number which returns Float; show displays whole
-; numbers without a decimal, so (parse nat "42") prints as (Ok 42)):
+; Numeric codecs (these produce Int via iso-int):
 ;   nat-string     : Codec String              digits as string
-;   nat            : Codec Float               natural number (1+ digits)
+;   nat            : Codec Int                 natural number (1+ digits)
 ;   integer-string : Codec String              optional "-" + digits
-;   integer        : Codec Float               signed integer
+;   integer        : Codec Int                 signed integer
 ;
 ; Isomorphisms (Iso a b — used with the `iso` combinator):
 ;   iso-id         : (Iso a a)
 ;   iso-inverse    : (Iso a b) -> (Iso b a)
 ;   iso-compose    : (Iso a b) -> (Iso b c) -> (Iso a c)
 ;   iso-chars      : (Iso (List Char) String)
-;   iso-number     : (Iso String Float)
+;   iso-int        : (Iso String Int)
+;   iso-float      : (Iso String Float)
 ;   iso-cons       : (Iso (Pair a (List a)) (List a))
 ;   iso-nil        : (Iso Unit (List a))
 ;   iso-some       : (Iso a (Option a))
@@ -677,12 +677,22 @@
     (lambda (chars) (Some (chars->string chars)))
     (lambda (s) (Some (string->chars s)))))
 
-; iso-number : Iso String Float
-; String of digits <-> Float number
-(define iso-number
+; iso-int : Iso String Int
+; String of digits <-> Int
+(define iso-int
   (MkIso
     (lambda (s)
-      (match (__try-string->number s)
+      (match (__try-string->int s)
+        ((Some n) (Some n))
+        (None None)))
+    (lambda (n) (Some (show n)))))
+
+; iso-float : Iso String Float
+; String of digits <-> Float
+(define iso-float
+  (MkIso
+    (lambda (s)
+      (match (__try-string->float s)
         ((Some n) (Some n))
         (None None)))
     (lambda (n) (Some (number->string n)))))
@@ -1054,10 +1064,10 @@
 (define nat-string
   (iso iso-chars (many1 digit)))
 
-; nat : Codec Float
+; nat : Codec Int
 ; Parse a natural number.
 (define nat
-  (iso iso-number nat-string))
+  (iso iso-int nat-string))
 
 ; integer-string : Codec String
 ; Parse an integer (optional minus, digits) as a string.
@@ -1081,10 +1091,10 @@
             ((Cons c rest) (begin (perform emit-char c) (go rest))))))
         (go (string->chars s))))))
 
-; integer : Codec Float
+; integer : Codec Int
 ; Parse/print an integer.
 (define integer
-  (iso iso-number integer-string))
+  (iso iso-int integer-string))
 
 ; ============================================================
 ; Lookahead / Negation

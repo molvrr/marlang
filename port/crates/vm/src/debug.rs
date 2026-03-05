@@ -72,7 +72,8 @@ pub fn get_annotation(chunk: &Chunk, inst: &Instruction) -> Option<String> {
 
 fn format_constant(constant: &ConstantValue) -> String {
     match constant {
-        ConstantValue::Number(n) => n.to_string(),
+        ConstantValue::Int(n) => n.to_string(),
+        ConstantValue::Float(n) => format!("{}", n),
         ConstantValue::String(s) => {
             if s.starts_with('\0') {
                 "<special>".to_string()

@@ -12,15 +12,23 @@ use std::collections::{HashMap, HashSet};
 fn binary_op(sym: Symbol, interner: &Interner) -> Option<Op> {
     let name = interner.resolve(sym);
     match name {
-        "+" | "+." => Some(Op::Add),
-        "-" | "-." => Some(Op::Sub),
-        "*" | "*." => Some(Op::Mul),
-        "/" | "/." => Some(Op::Div),
-        "<" | "<." => Some(Op::Lt),
-        ">" | ">." => Some(Op::Gt),
+        "+" => Some(Op::AddInt),
+        "+." => Some(Op::AddFloat),
+        "-" => Some(Op::SubInt),
+        "-." => Some(Op::SubFloat),
+        "*" => Some(Op::MulInt),
+        "*." => Some(Op::MulFloat),
+        "/" => Some(Op::DivInt),
+        "/." => Some(Op::DivFloat),
+        "<" => Some(Op::LtInt),
+        "<." => Some(Op::LtFloat),
+        ">" => Some(Op::GtInt),
+        ">." => Some(Op::GtFloat),
         "=" | "=." | "equal?" => Some(Op::Eq),
-        "<=" | "<=." => Some(Op::Le),
-        ">=" | ">=." => Some(Op::Ge),
+        "<=" => Some(Op::LeInt),
+        "<=." => Some(Op::LeFloat),
+        ">=" => Some(Op::GeInt),
+        ">=." => Some(Op::GeFloat),
         _ => None,
     }
 }
@@ -617,8 +625,12 @@ impl<'a> Compiler<'a> {
 
             // Atom
             Expr::Atom(value, _) => match value {
-                LispValue::Number(n, _) => {
-                    self.emit_constant(ConstantValue::Number(*n), line);
+                LispValue::Number(n, is_float) => {
+                    if *is_float {
+                        self.emit_constant(ConstantValue::Float(*n), line);
+                    } else {
+                        self.emit_constant(ConstantValue::Int(*n as i64), line);
+                    }
                 }
                 LispValue::String(s) => {
                     self.emit_constant(ConstantValue::String(s.to_string()), line);
@@ -710,15 +722,15 @@ impl<'a> Compiler<'a> {
                         return Ok(());
                     }
 
-                    // Unary negate: (- x) or (negate x) or (-. x) or (negate. x)
-                    if (sym == ks.minus
-                        || sym == ks.negate
-                        || sym == ks.minus_dot
-                        || sym == ks.negate_dot)
-                        && elements.len() == 2
-                    {
+                    // Unary negate: (- x) or (negate x) => NegInt; (-. x) or (negate. x) => NegFloat
+                    if (sym == ks.minus || sym == ks.negate) && elements.len() == 2 {
                         self.compile_expr(elements[1], false)?;
-                        self.emit(Op::Neg, line);
+                        self.emit(Op::NegInt, line);
+                        return Ok(());
+                    }
+                    if (sym == ks.minus_dot || sym == ks.negate_dot) && elements.len() == 2 {
+                        self.compile_expr(elements[1], false)?;
+                        self.emit(Op::NegFloat, line);
                         return Ok(());
                     }
                 }
@@ -1113,9 +1125,13 @@ impl<'a> Compiler<'a> {
             }
 
             // Number literal
-            Expr::Atom(LispValue::Number(n, _), _) => {
+            Expr::Atom(LispValue::Number(n, is_float), _) => {
                 self.emit(Op::Dup, line);
-                self.emit_constant(ConstantValue::Number(*n), line);
+                if *is_float {
+                    self.emit_constant(ConstantValue::Float(*n), line);
+                } else {
+                    self.emit_constant(ConstantValue::Int(*n as i64), line);
+                }
                 self.emit(Op::Eq, line);
                 let idx = self.emit_jump(Op::JumpIfFalse, line);
                 self.emit(Op::Pop, line);
@@ -1554,8 +1570,12 @@ impl<'a> Compiler<'a> {
 
     fn compile_quoted_datum(&mut self, expr: &Expr, line: u32) -> Result<(), CompileError> {
         match expr {
-            Expr::Atom(LispValue::Number(n, _), _) => {
-                self.emit_constant(ConstantValue::Number(*n), line);
+            Expr::Atom(LispValue::Number(n, is_float), _) => {
+                if *is_float {
+                    self.emit_constant(ConstantValue::Float(*n), line);
+                } else {
+                    self.emit_constant(ConstantValue::Int(*n as i64), line);
+                }
             }
             Expr::Atom(LispValue::String(s), _) => {
                 self.emit_constant(ConstantValue::String(s.to_string()), line);

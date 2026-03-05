@@ -1,6 +1,4 @@
 /// Opcodes for the Marlang bytecode VM.
-///
-/// Numeric values match the TypeScript VM for cross-reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Op {
@@ -15,20 +13,35 @@ pub enum Op {
     Dup = 7,
     SetUpvalue = 8,
 
-    // Arithmetic (binary: pop 2, push 1)
-    Add = 10,
-    Sub = 11,
-    Mul = 12,
-    Div = 13,
-    Neg = 14, // Unary: pop 1, push 1
+    // Integer arithmetic (binary: pop 2, push 1)
+    AddInt = 10,
+    SubInt = 11,
+    MulInt = 12,
+    DivInt = 13,
+    NegInt = 14, // Unary: pop 1, push 1
 
-    // Comparison (binary: pop 2, push boolean)
+    // Float arithmetic (binary: pop 2, push 1)
+    AddFloat = 15,
+    SubFloat = 16,
+    MulFloat = 17,
+    DivFloat = 18,
+    NegFloat = 19, // Unary: pop 1, push 1
+
+    // Comparison — Eq and Not are polymorphic
     Eq = 20,
-    Lt = 21,
-    Gt = 22,
-    Le = 23,
-    Ge = 24,
-    Not = 25, // Unary boolean not
+    Not = 25,
+
+    // Integer comparison (binary: pop 2, push boolean)
+    LtInt = 21,
+    GtInt = 22,
+    LeInt = 23,
+    GeInt = 24,
+
+    // Float comparison (binary: pop 2, push boolean)
+    LtFloat = 26,
+    GtFloat = 27,
+    LeFloat = 28,
+    GeFloat = 29,
 
     // Control flow
     Jump = 30,
@@ -66,17 +79,26 @@ impl Op {
             Op::SetGlobal => "SET_GLOBAL",
             Op::Pop => "POP",
             Op::Dup => "DUP",
-            Op::Add => "ADD",
-            Op::Sub => "SUB",
-            Op::Mul => "MUL",
-            Op::Div => "DIV",
-            Op::Neg => "NEG",
+            Op::AddInt => "ADD_INT",
+            Op::SubInt => "SUB_INT",
+            Op::MulInt => "MUL_INT",
+            Op::DivInt => "DIV_INT",
+            Op::NegInt => "NEG_INT",
+            Op::AddFloat => "ADD_FLOAT",
+            Op::SubFloat => "SUB_FLOAT",
+            Op::MulFloat => "MUL_FLOAT",
+            Op::DivFloat => "DIV_FLOAT",
+            Op::NegFloat => "NEG_FLOAT",
             Op::Eq => "EQ",
-            Op::Lt => "LT",
-            Op::Gt => "GT",
-            Op::Le => "LE",
-            Op::Ge => "GE",
             Op::Not => "NOT",
+            Op::LtInt => "LT_INT",
+            Op::GtInt => "GT_INT",
+            Op::LeInt => "LE_INT",
+            Op::GeInt => "GE_INT",
+            Op::LtFloat => "LT_FLOAT",
+            Op::GtFloat => "GT_FLOAT",
+            Op::LeFloat => "LE_FLOAT",
+            Op::GeFloat => "GE_FLOAT",
             Op::Jump => "JUMP",
             Op::JumpIfFalse => "JUMP_IF_FALSE",
             Op::Return => "RETURN",
@@ -144,7 +166,8 @@ pub struct FfiSigEntry {
 /// Compile-time constant values stored in a chunk's constant pool.
 #[derive(Debug, Clone)]
 pub enum ConstantValue {
-    Number(f64),
+    Int(i64),
+    Float(f64),
     String(String),
     Boolean(bool),
     Nil,
@@ -162,7 +185,8 @@ impl ConstantValue {
     /// Check equality for constant deduplication.
     pub fn dedup_eq(&self, other: &ConstantValue) -> bool {
         match (self, other) {
-            (ConstantValue::Number(a), ConstantValue::Number(b)) => a == b,
+            (ConstantValue::Int(a), ConstantValue::Int(b)) => a == b,
+            (ConstantValue::Float(a), ConstantValue::Float(b)) => a == b,
             (ConstantValue::String(a), ConstantValue::String(b)) => a == b,
             (ConstantValue::Boolean(a), ConstantValue::Boolean(b)) => a == b,
             (ConstantValue::Nil, ConstantValue::Nil) => true,
@@ -187,7 +211,8 @@ impl ConstantValue {
         use std::sync::Arc;
 
         match self {
-            ConstantValue::Number(n) => Value::number(*n),
+            ConstantValue::Int(n) => Value::int(*n),
+            ConstantValue::Float(n) => Value::float(*n),
             ConstantValue::String(s) => Value::string(s.as_str()),
             ConstantValue::Boolean(b) => Value::boolean(*b),
             ConstantValue::Nil => Value::nil(),

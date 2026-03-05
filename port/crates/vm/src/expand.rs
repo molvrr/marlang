@@ -667,15 +667,9 @@ impl<'a> MacroExpander<'a> {
             }
             Expr::Atom(LispValue::Number(n, is_float), _) => {
                 if *is_float {
-                    // Wrap float literals in a tagged value to preserve the is_float flag
-                    // through the expr→value→expr round-trip, since NaN-boxed f64 cannot
-                    // distinguish 3.0 (float) from 3 (int).
-                    Value::object(VMObject::AdtValue {
-                        tag: "__Float__".to_string(),
-                        fields: vec![Value::number(*n)],
-                    })
+                    Value::float(*n)
                 } else {
-                    Value::number(*n)
+                    Value::int(*n as i64)
                 }
             }
             Expr::Atom(LispValue::String(s), _) => Value::string(s.as_ref()),
@@ -695,9 +689,11 @@ impl<'a> MacroExpander<'a> {
     }
 
     fn value_to_expr(&self, value: &Value, span: Span) -> Result<Expr, MacroError> {
-        if let Some(n) = value.as_number() {
-            let is_float = n != n.trunc() || n.is_infinite() || n.is_nan();
-            return Ok(Expr::Atom(LispValue::Number(n, is_float), span));
+        if let Some(n) = value.as_int() {
+            return Ok(Expr::Atom(LispValue::Number(n as f64, false), span));
+        }
+        if let Some(n) = value.as_float() {
+            return Ok(Expr::Atom(LispValue::Number(n, true), span));
         }
         if value.is_nil() {
             return Ok(Expr::Nil(span));
@@ -722,12 +718,6 @@ impl<'a> MacroExpander<'a> {
             }
             Some(VMObject::String(s)) => {
                 Ok(Expr::Atom(LispValue::String(Arc::from(s.as_ref())), span))
-            }
-            Some(VMObject::AdtValue { tag, fields }) if tag == "__Float__" && fields.len() == 1 => {
-                let n = fields[0]
-                    .as_number()
-                    .ok_or_else(|| MacroError::new("Invalid __Float__ tag: no number"))?;
-                Ok(Expr::Atom(LispValue::Number(n, true), span))
             }
             Some(VMObject::AdtValue { tag, fields }) if tag == "Nil" && fields.is_empty() => {
                 Ok(Expr::Nil(span))

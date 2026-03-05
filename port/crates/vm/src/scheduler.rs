@@ -395,7 +395,7 @@ fn handle_effect(
 
         // --- Layer 1: Channels ---
         "chan-new" => {
-            let capacity = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as usize;
+            let capacity = args.first().and_then(|v| v.as_int()).unwrap_or(0) as usize;
             let id = state.next_channel_id;
             state.next_channel_id += 1;
             state.channels.insert(

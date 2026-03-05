@@ -364,43 +364,43 @@ pub fn ffi_call(
             }
             FfiType::I8 => {
                 let r: i8 = cif.call(code_ptr, &ffi_args);
-                Ok(Value::number(r as f64))
+                Ok(Value::int(r as i64))
             }
             FfiType::U8 => {
                 let r: u8 = cif.call(code_ptr, &ffi_args);
-                Ok(Value::number(r as f64))
+                Ok(Value::int(r as i64))
             }
             FfiType::I16 => {
                 let r: i16 = cif.call(code_ptr, &ffi_args);
-                Ok(Value::number(r as f64))
+                Ok(Value::int(r as i64))
             }
             FfiType::U16 => {
                 let r: u16 = cif.call(code_ptr, &ffi_args);
-                Ok(Value::number(r as f64))
+                Ok(Value::int(r as i64))
             }
             FfiType::I32 => {
                 let r: i32 = cif.call(code_ptr, &ffi_args);
-                Ok(Value::number(r as f64))
+                Ok(Value::int(r as i64))
             }
             FfiType::U32 => {
                 let r: u32 = cif.call(code_ptr, &ffi_args);
-                Ok(Value::number(r as f64))
+                Ok(Value::int(r as i64))
             }
             FfiType::I64 => {
                 let r: i64 = cif.call(code_ptr, &ffi_args);
-                Ok(Value::number(r as f64))
+                Ok(Value::int(r))
             }
             FfiType::U64 => {
                 let r: u64 = cif.call(code_ptr, &ffi_args);
-                Ok(Value::number(r as f64))
+                Ok(Value::int(r as i64))
             }
             FfiType::F32 => {
                 let r: f32 = cif.call(code_ptr, &ffi_args);
-                Ok(Value::number(r as f64))
+                Ok(Value::float(r as f64))
             }
             FfiType::F64 => {
                 let r: f64 = cif.call(code_ptr, &ffi_args);
-                Ok(Value::number(r))
+                Ok(Value::float(r))
             }
             FfiType::Bool => {
                 let r: u8 = cif.call(code_ptr, &ffi_args);
@@ -435,7 +435,7 @@ pub fn ffi_call(
 }
 
 fn value_to_f64(v: &Value, fn_name: &str, arg_idx: usize) -> Result<f64, VMError> {
-    v.as_number().ok_or_else(|| {
+    v.as_number_f64().ok_or_else(|| {
         VMError::runtime(format!(
             "FFI {}: arg {} expected number, got {}",
             fn_name,
@@ -453,7 +453,7 @@ fn value_to_pointer(v: &Value, fn_name: &str, arg_idx: usize) -> Result<u64, VME
         _ => {
             if v.is_nil() {
                 Ok(0)
-            } else if let Some(n) = v.as_number() {
+            } else if let Some(n) = v.as_number_f64() {
                 Ok(n as u64)
             } else {
                 Err(VMError::runtime(format!(
@@ -546,51 +546,122 @@ pub fn write_field(
     field: &FfiStructField,
     value: &Value,
 ) -> Result<(), VMError> {
-    let n = value.as_number().ok_or_else(|| {
-        VMError::runtime(format!(
-            "struct-set: field '{}' expects a number",
-            field.name
-        ))
-    })?;
-
     let offset = field.offset;
     match field.ffi_type {
-        FfiType::I8 => buffer[offset] = n as i8 as u8,
-        FfiType::U8 => buffer[offset] = n as u8,
-        FfiType::Bool => buffer[offset] = if n != 0.0 { 1 } else { 0 },
+        FfiType::I8 => {
+            let n = value.as_number_f64().ok_or_else(|| {
+                VMError::runtime(format!(
+                    "struct-set: field '{}' expects a number",
+                    field.name
+                ))
+            })?;
+            buffer[offset] = n as i8 as u8;
+        }
+        FfiType::U8 => {
+            let n = value.as_number_f64().ok_or_else(|| {
+                VMError::runtime(format!(
+                    "struct-set: field '{}' expects a number",
+                    field.name
+                ))
+            })?;
+            buffer[offset] = n as u8;
+        }
+        FfiType::Bool => {
+            let n = value.as_number_f64().ok_or_else(|| {
+                VMError::runtime(format!(
+                    "struct-set: field '{}' expects a number",
+                    field.name
+                ))
+            })?;
+            buffer[offset] = if n != 0.0 { 1 } else { 0 };
+        }
         FfiType::I16 => {
+            let n = value.as_number_f64().ok_or_else(|| {
+                VMError::runtime(format!(
+                    "struct-set: field '{}' expects a number",
+                    field.name
+                ))
+            })?;
             let bytes = (n as i16).to_ne_bytes();
             buffer[offset..offset + 2].copy_from_slice(&bytes);
         }
         FfiType::U16 => {
+            let n = value.as_number_f64().ok_or_else(|| {
+                VMError::runtime(format!(
+                    "struct-set: field '{}' expects a number",
+                    field.name
+                ))
+            })?;
             let bytes = (n as u16).to_ne_bytes();
             buffer[offset..offset + 2].copy_from_slice(&bytes);
         }
         FfiType::I32 => {
+            let n = value.as_number_f64().ok_or_else(|| {
+                VMError::runtime(format!(
+                    "struct-set: field '{}' expects a number",
+                    field.name
+                ))
+            })?;
             let bytes = (n as i32).to_ne_bytes();
             buffer[offset..offset + 4].copy_from_slice(&bytes);
         }
         FfiType::U32 => {
+            let n = value.as_number_f64().ok_or_else(|| {
+                VMError::runtime(format!(
+                    "struct-set: field '{}' expects a number",
+                    field.name
+                ))
+            })?;
             let bytes = (n as u32).to_ne_bytes();
             buffer[offset..offset + 4].copy_from_slice(&bytes);
         }
         FfiType::F32 => {
+            let n = value.as_number_f64().ok_or_else(|| {
+                VMError::runtime(format!(
+                    "struct-set: field '{}' expects a number",
+                    field.name
+                ))
+            })?;
             let bytes = (n as f32).to_ne_bytes();
             buffer[offset..offset + 4].copy_from_slice(&bytes);
         }
         FfiType::I64 => {
+            let n = value.as_number_f64().ok_or_else(|| {
+                VMError::runtime(format!(
+                    "struct-set: field '{}' expects a number",
+                    field.name
+                ))
+            })?;
             let bytes = (n as i64).to_ne_bytes();
             buffer[offset..offset + 8].copy_from_slice(&bytes);
         }
         FfiType::U64 => {
+            let n = value.as_number_f64().ok_or_else(|| {
+                VMError::runtime(format!(
+                    "struct-set: field '{}' expects a number",
+                    field.name
+                ))
+            })?;
             let bytes = (n as u64).to_ne_bytes();
             buffer[offset..offset + 8].copy_from_slice(&bytes);
         }
         FfiType::F64 => {
+            let n = value.as_number_f64().ok_or_else(|| {
+                VMError::runtime(format!(
+                    "struct-set: field '{}' expects a number",
+                    field.name
+                ))
+            })?;
             let bytes = n.to_ne_bytes();
             buffer[offset..offset + 8].copy_from_slice(&bytes);
         }
         FfiType::Pointer | FfiType::CString => {
+            let n = value.as_number_f64().ok_or_else(|| {
+                VMError::runtime(format!(
+                    "struct-set: field '{}' expects a number",
+                    field.name
+                ))
+            })?;
             let bytes = (n as u64).to_ne_bytes();
             buffer[offset..offset + 8].copy_from_slice(&bytes);
         }
@@ -602,53 +673,53 @@ pub fn write_field(
 pub fn read_field(buffer: &[u8], field: &FfiStructField) -> Value {
     let offset = field.offset;
     match field.ffi_type {
-        FfiType::I8 => Value::number(buffer[offset] as i8 as f64),
-        FfiType::U8 => Value::number(buffer[offset] as f64),
+        FfiType::I8 => Value::int(buffer[offset] as i8 as i64),
+        FfiType::U8 => Value::int(buffer[offset] as i64),
         FfiType::Bool => Value::boolean(buffer[offset] != 0),
         FfiType::I16 => {
             let mut bytes = [0u8; 2];
             bytes.copy_from_slice(&buffer[offset..offset + 2]);
-            Value::number(i16::from_ne_bytes(bytes) as f64)
+            Value::int(i16::from_ne_bytes(bytes) as i64)
         }
         FfiType::U16 => {
             let mut bytes = [0u8; 2];
             bytes.copy_from_slice(&buffer[offset..offset + 2]);
-            Value::number(u16::from_ne_bytes(bytes) as f64)
+            Value::int(u16::from_ne_bytes(bytes) as i64)
         }
         FfiType::I32 => {
             let mut bytes = [0u8; 4];
             bytes.copy_from_slice(&buffer[offset..offset + 4]);
-            Value::number(i32::from_ne_bytes(bytes) as f64)
+            Value::int(i32::from_ne_bytes(bytes) as i64)
         }
         FfiType::U32 => {
             let mut bytes = [0u8; 4];
             bytes.copy_from_slice(&buffer[offset..offset + 4]);
-            Value::number(u32::from_ne_bytes(bytes) as f64)
+            Value::int(u32::from_ne_bytes(bytes) as i64)
         }
         FfiType::F32 => {
             let mut bytes = [0u8; 4];
             bytes.copy_from_slice(&buffer[offset..offset + 4]);
-            Value::number(f32::from_ne_bytes(bytes) as f64)
+            Value::float(f32::from_ne_bytes(bytes) as f64)
         }
         FfiType::I64 => {
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(&buffer[offset..offset + 8]);
-            Value::number(i64::from_ne_bytes(bytes) as f64)
+            Value::int(i64::from_ne_bytes(bytes))
         }
         FfiType::U64 => {
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(&buffer[offset..offset + 8]);
-            Value::number(u64::from_ne_bytes(bytes) as f64)
+            Value::int(u64::from_ne_bytes(bytes) as i64)
         }
         FfiType::F64 => {
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(&buffer[offset..offset + 8]);
-            Value::number(f64::from_ne_bytes(bytes))
+            Value::float(f64::from_ne_bytes(bytes))
         }
         FfiType::Pointer | FfiType::CString => {
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(&buffer[offset..offset + 8]);
-            Value::number(u64::from_ne_bytes(bytes) as f64)
+            Value::int(u64::from_ne_bytes(bytes) as i64)
         }
         FfiType::Void | FfiType::Struct(_) => Value::nil(),
     }

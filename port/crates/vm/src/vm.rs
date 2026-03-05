@@ -854,85 +854,71 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 vm.push(val);
             }
 
-            // --- Arithmetic ---
-            Op::Add => {
+            // --- Integer Arithmetic (type checker guarantees operand types) ---
+            Op::AddInt => {
                 let b = vm.pop();
                 let a = vm.pop();
-                match (a.as_number(), b.as_number()) {
-                    (Some(na), Some(nb)) => vm.push(Value::number(na + nb)),
-                    _ => {
-                        // String concatenation
-                        match (a.as_string(), b.as_string()) {
-                            (Some(sa), Some(sb)) => {
-                                let result = format!("{}{}", sa, sb);
-                                vm.push(Value::string(result.as_str()));
-                            }
-                            _ => {
-                                vm.frames[frame_idx].ip = ip;
-                                return Err(VMSignal::Error(vm.vm_error(
-                                    format!("Cannot add {} and {}", a.kind_name(), b.kind_name()),
-                                    &vm.frames[frame_idx],
-                                )));
-                            }
-                        }
-                    }
-                }
+                vm.push(Value::int(a.get_int().wrapping_add(b.get_int())));
             }
 
-            Op::Sub => {
+            Op::SubInt => {
                 let b = vm.pop();
                 let a = vm.pop();
-                match (a.as_number(), b.as_number()) {
-                    (Some(na), Some(nb)) => vm.push(Value::number(na - nb)),
-                    _ => {
-                        vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(
-                            vm.vm_error("Subtraction requires numbers", &vm.frames[frame_idx]),
-                        ));
-                    }
-                }
+                vm.push(Value::int(a.get_int().wrapping_sub(b.get_int())));
             }
 
-            Op::Mul => {
+            Op::MulInt => {
                 let b = vm.pop();
                 let a = vm.pop();
-                match (a.as_number(), b.as_number()) {
-                    (Some(na), Some(nb)) => vm.push(Value::number(na * nb)),
-                    _ => {
-                        vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(vm.vm_error(
-                            "Multiplication requires numbers",
-                            &vm.frames[frame_idx],
-                        )));
-                    }
-                }
+                vm.push(Value::int(a.get_int().wrapping_mul(b.get_int())));
             }
 
-            Op::Div => {
+            Op::DivInt => {
                 let b = vm.pop();
                 let a = vm.pop();
-                match (a.as_number(), b.as_number()) {
-                    (Some(na), Some(nb)) => vm.push(Value::number(na / nb)),
-                    _ => {
-                        vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(
-                            vm.vm_error("Division requires numbers", &vm.frames[frame_idx]),
-                        ));
-                    }
+                let bv = b.get_int();
+                if bv == 0 {
+                    vm.frames[frame_idx].ip = ip;
+                    return Err(VMSignal::Error(
+                        vm.vm_error("Division by zero", &vm.frames[frame_idx]),
+                    ));
                 }
+                vm.push(Value::int(a.get_int().wrapping_div(bv)));
             }
 
-            Op::Neg => {
+            Op::NegInt => {
                 let a = vm.pop();
-                match a.as_number() {
-                    Some(n) => vm.push(Value::number(-n)),
-                    None => {
-                        vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(
-                            vm.vm_error("Negate requires number", &vm.frames[frame_idx]),
-                        ));
-                    }
-                }
+                vm.push(Value::int(a.get_int().wrapping_neg()));
+            }
+
+            // --- Float Arithmetic (type checker guarantees operand types) ---
+            Op::AddFloat => {
+                let b = vm.pop();
+                let a = vm.pop();
+                vm.push(Value::float(a.get_float() + b.get_float()));
+            }
+
+            Op::SubFloat => {
+                let b = vm.pop();
+                let a = vm.pop();
+                vm.push(Value::float(a.get_float() - b.get_float()));
+            }
+
+            Op::MulFloat => {
+                let b = vm.pop();
+                let a = vm.pop();
+                vm.push(Value::float(a.get_float() * b.get_float()));
+            }
+
+            Op::DivFloat => {
+                let b = vm.pop();
+                let a = vm.pop();
+                vm.push(Value::float(a.get_float() / b.get_float()));
+            }
+
+            Op::NegFloat => {
+                let a = vm.pop();
+                vm.push(Value::float(-a.get_float()));
             }
 
             // --- Comparison ---
@@ -942,60 +928,54 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 vm.push(Value::boolean(values_equal(&a, &b)));
             }
 
-            Op::Lt => {
+            // --- Integer Comparison (type checker guarantees operand types) ---
+            Op::LtInt => {
                 let b = vm.pop();
                 let a = vm.pop();
-                match (a.as_number(), b.as_number()) {
-                    (Some(na), Some(nb)) => vm.push(Value::boolean(na < nb)),
-                    _ => {
-                        vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(
-                            vm.vm_error("< requires numbers", &vm.frames[frame_idx]),
-                        ));
-                    }
-                }
+                vm.push(Value::boolean(a.get_int() < b.get_int()));
             }
 
-            Op::Gt => {
+            Op::GtInt => {
                 let b = vm.pop();
                 let a = vm.pop();
-                match (a.as_number(), b.as_number()) {
-                    (Some(na), Some(nb)) => vm.push(Value::boolean(na > nb)),
-                    _ => {
-                        vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(
-                            vm.vm_error("> requires numbers", &vm.frames[frame_idx]),
-                        ));
-                    }
-                }
+                vm.push(Value::boolean(a.get_int() > b.get_int()));
             }
 
-            Op::Le => {
+            Op::LeInt => {
                 let b = vm.pop();
                 let a = vm.pop();
-                match (a.as_number(), b.as_number()) {
-                    (Some(na), Some(nb)) => vm.push(Value::boolean(na <= nb)),
-                    _ => {
-                        vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(
-                            vm.vm_error("<= requires numbers", &vm.frames[frame_idx]),
-                        ));
-                    }
-                }
+                vm.push(Value::boolean(a.get_int() <= b.get_int()));
             }
 
-            Op::Ge => {
+            Op::GeInt => {
                 let b = vm.pop();
                 let a = vm.pop();
-                match (a.as_number(), b.as_number()) {
-                    (Some(na), Some(nb)) => vm.push(Value::boolean(na >= nb)),
-                    _ => {
-                        vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(
-                            vm.vm_error(">= requires numbers", &vm.frames[frame_idx]),
-                        ));
-                    }
-                }
+                vm.push(Value::boolean(a.get_int() >= b.get_int()));
+            }
+
+            // --- Float Comparison (type checker guarantees operand types) ---
+            Op::LtFloat => {
+                let b = vm.pop();
+                let a = vm.pop();
+                vm.push(Value::boolean(a.get_float() < b.get_float()));
+            }
+
+            Op::GtFloat => {
+                let b = vm.pop();
+                let a = vm.pop();
+                vm.push(Value::boolean(a.get_float() > b.get_float()));
+            }
+
+            Op::LeFloat => {
+                let b = vm.pop();
+                let a = vm.pop();
+                vm.push(Value::boolean(a.get_float() <= b.get_float()));
+            }
+
+            Op::GeFloat => {
+                let b = vm.pop();
+                let a = vm.pop();
+                vm.push(Value::boolean(a.get_float() >= b.get_float()));
             }
 
             Op::Not => {
@@ -1575,7 +1555,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let target = inst.operand2 as usize;
                 let value = vm.peek(0);
 
-                if value.is_number() {
+                if value.is_int() || value.is_float() {
                     ip = target;
                 } else if value.is_nil() {
                     if tag_name == "Nil" {
@@ -2103,10 +2083,17 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 // --- Value equality ---
 
 pub fn values_equal(a: &Value, b: &Value) -> bool {
-    // Fast path: both numbers
-    if let (Some(na), Some(nb)) = (a.as_number(), b.as_number()) {
+    // Int == Int
+    if let (Some(na), Some(nb)) = (a.as_int(), b.as_int()) {
         return na == nb;
     }
+
+    // Float == Float
+    if let (Some(na), Some(nb)) = (a.as_float(), b.as_float()) {
+        return na == nb;
+    }
+
+    // Int != Float (different types are never equal)
 
     // Both nil
     if a.is_nil() && b.is_nil() {

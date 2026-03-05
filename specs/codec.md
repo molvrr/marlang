@@ -73,7 +73,8 @@ A single `Codec a` value that can both parse (`String -> Result String a`) and p
 | `iso-compose` | `(Iso a b) -> (Iso b c) -> (Iso a c)` |
 | `iso-inverse` | `(Iso a b) -> (Iso b a)` |
 | `iso-chars` | `Iso (List Char) String` |
-| `iso-number` | `Iso String Float` |
+| `iso-int` | `Iso String Int` |
+| `iso-float` | `Iso String Float` |
 | `iso-cons` | `Iso (Pair a (List a)) (List a)` |
 | `iso-nil` | `Iso Unit (List a)` |
 | `iso-some` | `Iso a (Option a)` |

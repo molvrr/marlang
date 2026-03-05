@@ -441,7 +441,7 @@ fn handle_effect(
 
         // --- Channels ---
         "chan-new" => {
-            let capacity = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as usize;
+            let capacity = args.first().and_then(|v| v.as_int()).unwrap_or(0) as usize;
             let id = shared.next_channel_id.fetch_add(1, Ordering::Relaxed);
             {
                 let mut channels = shared.channels.lock().unwrap();
@@ -926,7 +926,7 @@ fn handle_effect(
                 .to_string();
             let port = args
                 .get(1)
-                .and_then(|v| v.as_number())
+                .and_then(|v| v.as_int())
                 .ok_or_else(|| VMError::runtime("tcp-connect: port must be a number"))?
                 as u16;
             let sender = shared.scheduler_senders[sched.id].clone();
@@ -1006,7 +1006,7 @@ fn handle_effect(
         "tcp-listen" => {
             let port = args
                 .first()
-                .and_then(|v| v.as_number())
+                .and_then(|v| v.as_int())
                 .ok_or_else(|| VMError::runtime("tcp-listen: port must be a number"))?
                 as u16;
             let sched_id = sched.id;

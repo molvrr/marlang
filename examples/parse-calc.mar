@@ -1,9 +1,10 @@
 ; Calculator Example — using std:codec
 ;
-; Parses and evaluates simple arithmetic expressions:
+; Parses and evaluates simple integer arithmetic expressions:
 ;   1 + 2 * 3       => 7
 ;   (1 + 2) * 3     => 9
 ;   10 - 3 - 2      => 5  (left-associative)
+;   100 / 5 / 4     => 5  (integer division, truncates toward zero)
 ;
 ; Grammar:
 ;   expr   = term (('+' | '-') term)*
@@ -29,8 +30,8 @@
         (begin
           ((c/codec-parser c/spaces0))
           (c/or-else
-            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 43)))) ((c/codec-parser c/spaces0)) +.))
-            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 45)))) ((c/codec-parser c/spaces0)) -.)))))
+            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 43)))) ((c/codec-parser c/spaces0)) +))
+            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 45)))) ((c/codec-parser c/spaces0)) -)))))
       (lambda () (parse-expr 1)))
   (if (= level 1)
     ; term: factor chained with * and /
@@ -39,8 +40,8 @@
         (begin
           ((c/codec-parser c/spaces0))
           (c/or-else
-            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 42)))) ((c/codec-parser c/spaces0)) *.))
-            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 47)))) ((c/codec-parser c/spaces0)) /.)))))
+            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 42)))) ((c/codec-parser c/spaces0)) *))
+            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 47)))) ((c/codec-parser c/spaces0)) /)))))
       (lambda () (parse-expr 2)))
     ; factor: parens or integer
     (begin
@@ -67,19 +68,19 @@
     (match result
       ((Ok val) (io/println (string-append input
         (string-append " = " (string-append (show val)
-          (if (=. val expected) " OK" " FAIL"))))))
+          (if (= val expected) " OK" " FAIL"))))))
       ((Err msg) (io/println (string-append input
         (string-append " => ERROR: " msg))))))))
 
-(test "42" 42.0)
-(test "1 + 2" 3.0)
-(test "1 + 2 * 3" 7.0)
-(test "10 - 3 - 2" 5.0)
-(test "(1 + 2) * 3" 9.0)
-(test "100 / 5 / 4" 5.0)
-(test " 3 + 4 * 2 / (1 - 5)" 1.0)
-(test "0" 0.0)
-(test "-7" -7.0)
+(test "42" 42)
+(test "1 + 2" 3)
+(test "1 + 2 * 3" 7)
+(test "10 - 3 - 2" 5)
+(test "(1 + 2) * 3" 9)
+(test "100 / 5 / 4" 5)
+(test " 3 + 4 * 2 / (1 - 5)" 1)
+(test "0" 0)
+(test "-7" -7)
 
 ; Error case
 (let ((result (calc "1 +")))
