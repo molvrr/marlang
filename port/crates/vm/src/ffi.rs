@@ -1,9 +1,8 @@
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
-
 use crate::errors::VMError;
 use crate::object::VMObject;
 use crate::value::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 // --- Global struct registry ---
 

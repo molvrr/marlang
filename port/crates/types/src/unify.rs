@@ -1,8 +1,7 @@
-use std::collections::HashSet;
-
 use crate::ast::*;
 use crate::env::*;
 use crate::errors::TypeError;
+use std::collections::HashSet;
 
 // Occurs check: does variable v occur in type t?
 fn occurs(v: &str, t: &Type) -> bool {
@@ -43,10 +42,10 @@ fn unify_internal(
 
     // Type variable cases
     if let Type::Var(name1) = t1 {
-        if let Type::Var(name2) = t2 {
-            if name1 == name2 {
-                return Ok(empty_subst());
-            }
+        if let Type::Var(name2) = t2
+            && name1 == name2
+        {
+            return Ok(empty_subst());
         }
         if occurs(name1, t2) {
             // Create mu-type instead of failing on occurs check
@@ -197,9 +196,9 @@ fn unify_internal(
                     subst = compose_subst(&s, &subst);
                 }
                 // Extra params in t2 unify with rest type
-                for i in p1.len()..p2.len() {
+                for extra_param in &p2[p1.len()..] {
                     let rest_ty = apply_subst(&subst, rt1);
-                    let pb = apply_subst(&subst, &p2[i]);
+                    let pb = apply_subst(&subst, extra_param);
                     let s = unify_internal(&rest_ty, &pb, seen)?;
                     subst = compose_subst(&s, &subst);
                 }
@@ -223,8 +222,8 @@ fn unify_internal(
                     subst = compose_subst(&s, &subst);
                 }
                 // Extra params in t1 unify with rest type
-                for i in p2.len()..p1.len() {
-                    let pa = apply_subst(&subst, &p1[i]);
+                for extra_param in &p1[p2.len()..] {
+                    let pa = apply_subst(&subst, extra_param);
                     let rest_ty = apply_subst(&subst, rt2);
                     let s = unify_internal(&pa, &rest_ty, seen)?;
                     subst = compose_subst(&s, &subst);
@@ -418,10 +417,9 @@ pub fn match_types(pattern: &Type, target: &Type) -> Result<Substitution, TypeEr
                     let s = match_types(&p, t)?;
                     subst = compose_subst(&s, &subst);
                 }
-                for i in p1.len()..p2.len() {
+                for extra_param in &p2[p1.len()..] {
                     let rest_ty = apply_subst(&subst, rt1);
-                    let t = &p2[i];
-                    let s = match_types(&rest_ty, t)?;
+                    let s = match_types(&rest_ty, extra_param)?;
                     subst = compose_subst(&s, &subst);
                 }
             }
@@ -440,10 +438,9 @@ pub fn match_types(pattern: &Type, target: &Type) -> Result<Substitution, TypeEr
                     let s = match_types(&p, t)?;
                     subst = compose_subst(&s, &subst);
                 }
-                for i in p2.len()..p1.len() {
-                    let p = apply_subst(&subst, &p1[i]);
-                    let rest_ty = rt2;
-                    let s = match_types(&p, rest_ty)?;
+                for extra_param in &p1[p2.len()..] {
+                    let p = apply_subst(&subst, extra_param);
+                    let s = match_types(&p, rt2)?;
                     subst = compose_subst(&s, &subst);
                 }
             }
@@ -591,91 +588,6 @@ pub fn unify_effect_rows_into_subst(
                 rv1,
                 Type::EffectRowRef(effect_row_open(only_in_2, rv2.clone())),
             ))
-        }
-    }
-}
-
-/// Legacy function — kept for backward compatibility
-pub fn unify_effect_rows(
-    r1: Option<&EffectRow>,
-    r2: Option<&EffectRow>,
-) -> Result<EffectRowSubstitution, TypeError> {
-    let default_closed = effect_row_closed(vec![]);
-    let row1 = r1.unwrap_or(&default_closed);
-    let row2 = r2.unwrap_or(&default_closed);
-
-    match (row1, row2) {
-        (EffectRow::Closed(e1), EffectRow::Closed(e2)) => {
-            let set1: HashSet<_> = e1.iter().collect();
-            let set2: HashSet<_> = e2.iter().collect();
-            if set1 == set2 {
-                Ok(EffectRowSubstitution::new())
-            } else {
-                Err(TypeError::UnificationError {
-                    t1: Type::Const(format_effect_row(row1)),
-                    t2: Type::Const(format_effect_row(row2)),
-                    context: Some("effect rows".to_string()),
-                    span: None,
-                })
-            }
-        }
-        (EffectRow::Open { effects, row_var }, EffectRow::Closed(e2)) => {
-            for e in effects {
-                if !e2.contains(e) {
-                    return Err(TypeError::UnificationError {
-                        t1: Type::Const(format_effect_row(row1)),
-                        t2: Type::Const(format_effect_row(row2)),
-                        context: Some("effect rows".to_string()),
-                        span: None,
-                    });
-                }
-            }
-            let remaining: Vec<String> = e2
-                .iter()
-                .filter(|e| !effects.contains(e))
-                .cloned()
-                .collect();
-            let mut subst = EffectRowSubstitution::new();
-            subst.insert(row_var.clone(), effect_row_closed(remaining));
-            Ok(subst)
-        }
-        (EffectRow::Closed(e1), EffectRow::Open { effects, row_var }) => {
-            for e in effects {
-                if !e1.contains(e) {
-                    return Err(TypeError::UnificationError {
-                        t1: Type::Const(format_effect_row(row1)),
-                        t2: Type::Const(format_effect_row(row2)),
-                        context: Some("effect rows".to_string()),
-                        span: None,
-                    });
-                }
-            }
-            let remaining: Vec<String> = e1
-                .iter()
-                .filter(|e| !effects.contains(e))
-                .cloned()
-                .collect();
-            let mut subst = EffectRowSubstitution::new();
-            subst.insert(row_var.clone(), effect_row_closed(remaining));
-            Ok(subst)
-        }
-        (
-            EffectRow::Open {
-                effects: e1,
-                row_var: rv1,
-            },
-            EffectRow::Open {
-                effects: e2,
-                row_var: rv2,
-            },
-        ) => {
-            if rv1 == rv2 {
-                return Ok(EffectRowSubstitution::new());
-            }
-            let only_in2: Vec<String> = e2.iter().filter(|e| !e1.contains(e)).cloned().collect();
-            let mut subst = EffectRowSubstitution::new();
-            subst.insert(rv1.clone(), effect_row_open(only_in2, rv2.clone()));
-            Ok(subst)
         }
     }
 }

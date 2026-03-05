@@ -1,7 +1,6 @@
-use std::sync::{Arc, Mutex};
-
 use crate::bytecode::FunctionPrototype;
 use crate::value::Value;
+use std::sync::{Arc, Mutex};
 
 /// A mutable upvalue cell, shared between a closure and its enclosing scope.
 /// Uses `Arc<Mutex<Value>>` for thread-safety (required by multi-threaded scheduler).

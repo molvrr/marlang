@@ -1,7 +1,6 @@
+use crate::ast::*;
 use std::collections::HashMap;
 use std::collections::HashSet;
-
-use crate::ast::*;
 
 // ===== Substitution =====
 
@@ -113,10 +112,10 @@ pub fn apply_effect_row_subst_via_type_subst(subst: &Substitution, row: &EffectR
 
 /// Chase a substitution chain: if subst[x] = Var(y) and subst[y] = ..., follow.
 fn chase_subst<'a>(subst: &'a Substitution, t: &'a Type) -> &'a Type {
-    if let Type::Var(name) = t {
-        if let Some(next) = subst.get(name) {
-            return chase_subst(subst, next);
-        }
+    if let Type::Var(name) = t
+        && let Some(next) = subst.get(name)
+    {
+        return chase_subst(subst, next);
     }
     t
 }
@@ -329,10 +328,9 @@ pub fn find_effects_with_op(env: &TypeEnv, op_name: &str) -> Vec<String> {
     let mut current: Option<&TypeEnv> = Some(env);
     while let Some(e) = current {
         for (name, effect) in &e.effects {
-            if effect.operations.iter().any(|op| op.name == op_name) {
-                if !effect_names.contains(name) {
-                    effect_names.push(name.clone());
-                }
+            if effect.operations.iter().any(|op| op.name == op_name) && !effect_names.contains(name)
+            {
+                effect_names.push(name.clone());
             }
         }
         current = e.parent.as_deref();

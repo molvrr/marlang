@@ -1,7 +1,6 @@
-use std::sync::Arc;
-
 use crate::intern::Symbol;
 use crate::span::Span;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum LispValue {

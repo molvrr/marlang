@@ -1,14 +1,12 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
+use crate::ast::format_type;
+use crate::checker::{TypeModuleLoader, type_check, type_check_with_modules};
+use crate::errors::{TypeError, format_error};
 use marlang_core::ast::Expr;
 use marlang_core::intern::Interner;
 use marlang_core::lexer::lex;
 use marlang_core::parser::parse_with_interner;
-
-use crate::ast::format_type;
-use crate::checker::{TypeModuleLoader, type_check, type_check_with_modules};
-use crate::errors::{TypeError, format_error};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// Minimal prelude for type-checker tests: data types, builtin declares, and effects.
 /// Mirrors the declarations in stdlib/prelude.mar but omits macros and function definitions

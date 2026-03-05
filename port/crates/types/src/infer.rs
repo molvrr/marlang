@@ -1,15 +1,13 @@
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-
-use marlang_core::ast::{self, Expr, LispValue};
-use marlang_core::intern::Interner;
-use marlang_core::span::Span;
-
 use crate::ast::*;
 use crate::checker::{ModuleCacheState, TypeModuleCache, TypeModuleLoader};
 use crate::env::*;
 use crate::errors::TypeError;
 use crate::unify::*;
+use marlang_core::ast::{self, Expr, LispValue};
+use marlang_core::intern::Interner;
+use marlang_core::span::Span;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 // ===== Hygiene mark stripping =====
 
@@ -96,18 +94,16 @@ fn get_first_symbol<'a>(expr: &'a Expr, interner: &'a Interner) -> Option<&'a st
 fn is_define_form<'a>(expr: &'a Expr, interner: &'a Interner) -> Option<&'a str> {
     if let Expr::List { .. } = expr {
         let elements = ast::list_to_array(expr);
-        if elements.len() == 3 {
-            if is_symbol(elements[0], interner, "define") {
-                // Simple define: (define name value)
-                if let Some(name) = ast::get_symbol_name(elements[1], interner) {
-                    return Some(name);
-                }
-                // Annotated define: (define (name : Type) value)
-                if let Expr::List { .. } = elements[1] {
-                    let name_elements = ast::list_to_array(elements[1]);
-                    if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
-                        return ast::get_symbol_name(name_elements[0], interner);
-                    }
+        if elements.len() == 3 && is_symbol(elements[0], interner, "define") {
+            // Simple define: (define name value)
+            if let Some(name) = ast::get_symbol_name(elements[1], interner) {
+                return Some(name);
+            }
+            // Annotated define: (define (name : Type) value)
+            if let Expr::List { .. } = elements[1] {
+                let name_elements = ast::list_to_array(elements[1]);
+                if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
+                    return ast::get_symbol_name(name_elements[0], interner);
                 }
             }
         }
@@ -119,12 +115,13 @@ fn is_define_form<'a>(expr: &'a Expr, interner: &'a Interner) -> Option<&'a str>
 fn get_define_annotation(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Option<Type> {
     if let Expr::List { .. } = expr {
         let elements = ast::list_to_array(expr);
-        if elements.len() == 3 && is_symbol(elements[0], interner, "define") {
-            if let Expr::List { .. } = elements[1] {
-                let name_elements = ast::list_to_array(elements[1]);
-                if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
-                    return parse_type_annotation(name_elements[2], env, interner).ok();
-                }
+        if elements.len() == 3
+            && is_symbol(elements[0], interner, "define")
+            && let Expr::List { .. } = elements[1]
+        {
+            let name_elements = ast::list_to_array(elements[1]);
+            if name_elements.len() == 3 && is_symbol(name_elements[1], interner, ":") {
+                return parse_type_annotation(name_elements[2], env, interner).ok();
             }
         }
     }
@@ -169,13 +166,9 @@ fn infer_body_with_defines(
         let name = is_define_form(def_expr, interner).unwrap().to_string();
         let ann_type = get_define_annotation(def_expr, &define_env, interner);
         let placeholder = ann_type.unwrap_or_else(fresh_type_var);
-        define_env.bindings.insert(
-            name.clone(),
-            TypeScheme {
-                quantified_vars: vec![],
-                ty: placeholder.clone(),
-            },
-        );
+        define_env
+            .bindings
+            .insert(name.clone(), monotype(placeholder.clone()));
         placeholders.push((name, placeholder));
     }
 
@@ -212,10 +205,7 @@ fn infer_body_with_defines(
             let ty = apply_subst(&subst, &scheme.ty);
             generalize(&final_env, &ty)
         } else {
-            TypeScheme {
-                quantified_vars: vec![],
-                ty: t_unit(),
-            }
+            monotype(t_unit())
         };
         final_env.bindings.insert(name.clone(), final_type);
     }
@@ -292,10 +282,10 @@ const FFI_VARIADIC_FUNCTIONS: &[&str] = &["ffi-call", "struct-new", "struct-get"
 fn is_effect_row_expr(expr: &Expr, interner: &Interner) -> bool {
     if let Expr::List { .. } = expr {
         let elements = ast::list_to_array(expr);
-        if !elements.is_empty() {
-            if let Some("__effect_row") = ast::get_symbol_name(elements[0], interner) {
-                return true;
-            }
+        if !elements.is_empty()
+            && let Some("__effect_row") = ast::get_symbol_name(elements[0], interner)
+        {
+            return true;
         }
     }
     false
@@ -399,19 +389,18 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                     // Check for (... T) rest type syntax
                     if let Expr::List { .. } = e {
                         let sub_elems = ast::list_to_array(e);
-                        if sub_elems.len() == 2 {
-                            if let Some("...") = ast::get_symbol_name(sub_elems[0], interner) {
-                                if rest_type.is_some() {
-                                    return Err(TypeError::InvalidTypeAnnotation {
-                                        message:
-                                            "Arrow type can have at most one (... T) rest type"
-                                                .into(),
-                                        span: Some(e.span()),
-                                    });
-                                }
-                                rest_type = Some(parse_type_expr(sub_elems[1], env, interner)?);
-                                continue;
+                        if sub_elems.len() == 2
+                            && let Some("...") = ast::get_symbol_name(sub_elems[0], interner)
+                        {
+                            if rest_type.is_some() {
+                                return Err(TypeError::InvalidTypeAnnotation {
+                                    message: "Arrow type can have at most one (... T) rest type"
+                                        .into(),
+                                    span: Some(e.span()),
+                                });
                             }
+                            rest_type = Some(parse_type_expr(sub_elems[1], env, interner)?);
+                            continue;
                         }
                     }
                     types.push(parse_type_expr(e, env, interner)?);
@@ -489,13 +478,13 @@ fn parse_type_annotation(
 ) -> Result<Type, TypeError> {
     if let Expr::List { .. } = expr {
         let elements = ast::list_to_array(expr);
-        if !elements.is_empty() {
-            if let Some("=>") = ast::get_symbol_name(elements[0], interner) {
-                return Err(TypeError::InvalidTypeAnnotation {
-                    message: "'=> (constrained types)' declarations are not supported".into(),
-                    span: Some(expr.span()),
-                });
-            }
+        if !elements.is_empty()
+            && let Some("=>") = ast::get_symbol_name(elements[0], interner)
+        {
+            return Err(TypeError::InvalidTypeAnnotation {
+                message: "'=> (constrained types)' declarations are not supported".into(),
+                span: Some(expr.span()),
+            });
         }
     }
     parse_type_expr(expr, env, interner)
@@ -511,13 +500,13 @@ fn parse_pattern(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Result<Patt
                 return Ok(Pattern::Wildcard);
             }
             // Check if it's a constructor
-            if let Some((_, ctor)) = lookup_constructor(env, name) {
-                if ctor.params.is_empty() {
-                    return Ok(Pattern::Constructor {
-                        name: name.to_string(),
-                        args: vec![],
-                    });
-                }
+            if let Some((_, ctor)) = lookup_constructor(env, name)
+                && ctor.params.is_empty()
+            {
+                return Ok(Pattern::Constructor {
+                    name: name.to_string(),
+                    args: vec![],
+                });
             }
             Ok(Pattern::Var(name.to_string()))
         }
@@ -770,13 +759,7 @@ fn infer_lambda(
                 )?;
                 let ty = parse_type_expr(param_elements[2], env, interner)?;
                 params.push((name.to_string(), ty.clone()));
-                param_env.bindings.insert(
-                    name.to_string(),
-                    TypeScheme {
-                        quantified_vars: vec![],
-                        ty,
-                    },
-                );
+                param_env.bindings.insert(name.to_string(), monotype(ty));
                 continue;
             }
         }
@@ -788,13 +771,9 @@ fn infer_lambda(
             })?;
         let param_type = fresh_type_var();
         params.push((name.to_string(), param_type.clone()));
-        param_env.bindings.insert(
-            name.to_string(),
-            TypeScheme {
-                quantified_vars: vec![],
-                ty: param_type,
-            },
-        );
+        param_env
+            .bindings
+            .insert(name.to_string(), monotype(param_type));
     }
 
     // Handle rest parameter
@@ -829,13 +808,9 @@ fn infer_lambda(
 
         // The rest parameter has type (List elem_type) in the function body
         let list_type = t_list(elem_type.clone());
-        param_env.bindings.insert(
-            rest_name.to_string(),
-            TypeScheme {
-                quantified_vars: vec![],
-                ty: list_type,
-            },
-        );
+        param_env
+            .bindings
+            .insert(rest_name.to_string(), monotype(list_type));
         rest_param = Some((rest_name.to_string(), elem_type));
     }
 
@@ -1235,13 +1210,9 @@ fn infer_match(
         // Extend env with pattern bindings
         let mut branch_env = apply_subst_env(&subst, env);
         for (name, ty) in &pattern_check.bindings {
-            branch_env.bindings.insert(
-                name.to_string(),
-                TypeScheme {
-                    quantified_vars: vec![],
-                    ty: apply_subst(&subst, ty),
-                },
-            );
+            branch_env
+                .bindings
+                .insert(name.to_string(), monotype(apply_subst(&subst, ty)));
         }
 
         let body_result = infer_expr(&branch_env, body_expr, interner)?;
@@ -1604,35 +1575,32 @@ fn infer_ffi_application(
         }
         "struct-set" => {
             // (struct-set struct-instance "field-name" value)
-            if arg_exprs.len() >= 3 {
-                if let Some(field_name) = get_string_literal(arg_exprs[1]) {
-                    let struct_type = apply_subst(&subst, &arg_types[0]);
-                    if let Type::Const(ref type_name) = struct_type {
-                        if let Some(info) = lookup_ffi_struct_info(env, type_name) {
-                            let field = info.fields.iter().find(|f| f.name == field_name);
-                            match field {
-                                Some(f) => {
-                                    let val_type = apply_subst(&subst, &arg_types[2]);
-                                    let unify_result = unify_with_context(
-                                        &val_type,
-                                        &f.marlang_type,
-                                        &format!(
-                                            "field '{}' of struct-set {}",
-                                            field_name, type_name
-                                        ),
-                                    )?;
-                                    subst = compose_subst(&unify_result, &subst);
-                                }
-                                None => {
-                                    return Err(TypeError::InvalidTypeAnnotation {
-                                        message: format!(
-                                            "struct '{}' has no field '{}'",
-                                            type_name, field_name
-                                        ),
-                                        span: Some(arg_exprs[1].span()),
-                                    });
-                                }
-                            }
+            if arg_exprs.len() >= 3
+                && let Some(field_name) = get_string_literal(arg_exprs[1])
+            {
+                let struct_type = apply_subst(&subst, &arg_types[0]);
+                if let Type::Const(ref type_name) = struct_type
+                    && let Some(info) = lookup_ffi_struct_info(env, type_name)
+                {
+                    let field = info.fields.iter().find(|f| f.name == field_name);
+                    match field {
+                        Some(f) => {
+                            let val_type = apply_subst(&subst, &arg_types[2]);
+                            let unify_result = unify_with_context(
+                                &val_type,
+                                &f.marlang_type,
+                                &format!("field '{}' of struct-set {}", field_name, type_name),
+                            )?;
+                            subst = compose_subst(&unify_result, &subst);
+                        }
+                        None => {
+                            return Err(TypeError::InvalidTypeAnnotation {
+                                message: format!(
+                                    "struct '{}' has no field '{}'",
+                                    type_name, field_name
+                                ),
+                                span: Some(arg_exprs[1].span()),
+                            });
                         }
                     }
                 }
@@ -2025,16 +1993,13 @@ fn infer_handle(
         if op_name == "return" {
             // Return handler — bind the return variable and infer the body
             let mut handler_env = apply_subst_env(&subst, env);
-            if pattern_elements.len() >= 2 {
-                if let Some(return_var_name) = ast::get_symbol_name(pattern_elements[1], interner) {
-                    handler_env.bindings.insert(
-                        return_var_name.to_string(),
-                        TypeScheme {
-                            quantified_vars: vec![],
-                            ty: apply_subst(&subst, &body_result.ty),
-                        },
-                    );
-                }
+            if pattern_elements.len() >= 2
+                && let Some(return_var_name) = ast::get_symbol_name(pattern_elements[1], interner)
+            {
+                handler_env.bindings.insert(
+                    return_var_name.to_string(),
+                    monotype(apply_subst(&subst, &body_result.ty)),
+                );
             }
             let handler_result = infer_expr(&handler_env, body, interner)?;
             subst = compose_subst(&handler_result.subst, &subst);
@@ -2075,32 +2040,24 @@ fn infer_handle(
         let mut handler_env = apply_subst_env(&subst, env);
         let arg_patterns = &pattern_elements[1..pattern_elements.len().saturating_sub(1)];
         for (i, arg_p) in arg_patterns.iter().enumerate() {
-            if let Some(arg_name) = ast::get_symbol_name(arg_p, interner) {
-                if i < op_info.params.len() {
-                    handler_env.bindings.insert(
-                        arg_name.to_string(),
-                        TypeScheme {
-                            quantified_vars: vec![],
-                            ty: op_info.params[i].clone(),
-                        },
-                    );
-                }
+            if let Some(arg_name) = ast::get_symbol_name(arg_p, interner)
+                && i < op_info.params.len()
+            {
+                handler_env
+                    .bindings
+                    .insert(arg_name.to_string(), monotype(op_info.params[i].clone()));
             }
         }
-        if let Some(cont_p) = pattern_elements.last() {
-            if let Some(k_name) = ast::get_symbol_name(cont_p, interner) {
-                let k_type = type_arrow(
-                    vec![op_info.result.clone()],
-                    apply_subst(&subst, &body_result.ty),
-                );
-                handler_env.bindings.insert(
-                    k_name.to_string(),
-                    TypeScheme {
-                        quantified_vars: vec![],
-                        ty: k_type,
-                    },
-                );
-            }
+        if let Some(cont_p) = pattern_elements.last()
+            && let Some(k_name) = ast::get_symbol_name(cont_p, interner)
+        {
+            let k_type = type_arrow(
+                vec![op_info.result.clone()],
+                apply_subst(&subst, &body_result.ty),
+            );
+            handler_env
+                .bindings
+                .insert(k_name.to_string(), monotype(k_type));
         }
 
         let handler_result = infer_expr(&handler_env, body, interner)?;
@@ -2352,14 +2309,7 @@ fn process_define(
 
     // Add placeholder for recursive functions
     let placeholder_type = annotated_type.clone().unwrap_or_else(fresh_type_var);
-    let infer_env = extend_env(
-        env,
-        &name,
-        TypeScheme {
-            quantified_vars: vec![],
-            ty: placeholder_type,
-        },
-    );
+    let infer_env = extend_env(env, &name, monotype(placeholder_type));
 
     let applied_env = apply_subst_env(current_subst, &infer_env);
     let value_result = infer_expr(&applied_env, value_expr, interner)?;
@@ -2560,35 +2510,35 @@ fn try_extract_ffi_struct_info(expr: &Expr, interner: &Interner) -> Option<FfiSt
     let mut fields = Vec::new();
 
     // Parse field definitions from the third argument: (list (list "field" "type") ...)
-    if elements.len() >= 3 {
-        if let Expr::List { .. } = elements[2] {
-            let list_elements = ast::list_to_array(elements[2]);
-            // Skip the leading `list` symbol
-            let field_entries =
-                if !list_elements.is_empty() && is_symbol(list_elements[0], interner, "list") {
-                    &list_elements[1..]
-                } else {
-                    &list_elements[..]
-                };
-            for entry in field_entries {
-                let Expr::List { .. } = entry else { continue };
-                let pair = ast::list_to_array(entry);
-                // (list "field_name" "type_string")
-                let inner = if pair.len() >= 3 && is_symbol(pair[0], interner, "list") {
-                    &pair[1..]
-                } else {
-                    &pair[..]
-                };
-                if let [
-                    Expr::Atom(LispValue::String(fname), _),
-                    Expr::Atom(LispValue::String(ftype), _),
-                ] = inner
-                {
-                    fields.push(FfiStructFieldInfo {
-                        name: fname.to_string(),
-                        marlang_type: ffi_type_string_to_type_const(ftype),
-                    });
-                }
+    if elements.len() >= 3
+        && let Expr::List { .. } = elements[2]
+    {
+        let list_elements = ast::list_to_array(elements[2]);
+        // Skip the leading `list` symbol
+        let field_entries =
+            if !list_elements.is_empty() && is_symbol(list_elements[0], interner, "list") {
+                &list_elements[1..]
+            } else {
+                &list_elements[..]
+            };
+        for entry in field_entries {
+            let Expr::List { .. } = entry else { continue };
+            let pair = ast::list_to_array(entry);
+            // (list "field_name" "type_string")
+            let inner = if pair.len() >= 3 && is_symbol(pair[0], interner, "list") {
+                &pair[1..]
+            } else {
+                &pair[..]
+            };
+            if let [
+                Expr::Atom(LispValue::String(fname), _),
+                Expr::Atom(LispValue::String(ftype), _),
+            ] = inner
+            {
+                fields.push(FfiStructFieldInfo {
+                    name: fname.to_string(),
+                    marlang_type: ffi_type_string_to_type_const(ftype),
+                });
             }
         }
     }
@@ -2832,31 +2782,30 @@ fn parse_import_form(
     }
 
     // Check for `as alias`
-    if elements.len() == 4 {
-        if is_symbol(elements[2], interner, "as") {
-            if let Some(alias) = ast::get_symbol_name(elements[3], interner) {
-                return Ok((path, ImportForm::Qualified(alias.to_string())));
-            }
-        }
+    if elements.len() == 4
+        && is_symbol(elements[2], interner, "as")
+        && let Some(alias) = ast::get_symbol_name(elements[3], interner)
+    {
+        return Ok((path, ImportForm::Qualified(alias.to_string())));
     }
 
     // Check for selective: (import "path" (name1 name2 ...))
-    if elements.len() == 3 {
-        if let Expr::List { .. } = elements[2] {
-            let name_exprs = ast::list_to_array(elements[2]);
-            let mut names = Vec::new();
-            for ne in &name_exprs {
-                if let Some(name) = ast::get_symbol_name(ne, interner) {
-                    names.push(name.to_string());
-                } else {
-                    return Err(TypeError::InvalidTypeAnnotation {
-                        message: "Selective import expects symbols".into(),
-                        span: Some(ne.span()),
-                    });
-                }
+    if elements.len() == 3
+        && let Expr::List { .. } = elements[2]
+    {
+        let name_exprs = ast::list_to_array(elements[2]);
+        let mut names = Vec::new();
+        for ne in &name_exprs {
+            if let Some(name) = ast::get_symbol_name(ne, interner) {
+                names.push(name.to_string());
+            } else {
+                return Err(TypeError::InvalidTypeAnnotation {
+                    message: "Selective import expects symbols".into(),
+                    span: Some(ne.span()),
+                });
             }
-            return Ok((path, ImportForm::Selective(names)));
         }
+        return Ok((path, ImportForm::Selective(names)));
     }
 
     Err(TypeError::InvalidTypeAnnotation {

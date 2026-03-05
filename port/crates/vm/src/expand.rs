@@ -1,18 +1,16 @@
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-use marlang_core::ast::{self, Expr, LispValue};
-use marlang_core::intern::{Interner, Symbol};
-use marlang_core::lexer::lex;
-use marlang_core::parser::{parse, parse_with_interner};
-use marlang_core::span::Span;
-
 use crate::builtins::register_builtins;
 use crate::compiler::compile_program;
 use crate::object::VMObject;
 use crate::value::Value;
 use crate::vm::{VM, call_value, interpret};
+use marlang_core::ast::{self, Expr, LispValue};
+use marlang_core::intern::{Interner, Symbol};
+use marlang_core::lexer::lex;
+use marlang_core::parser::{parse, parse_with_interner};
+use marlang_core::span::Span;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 // --- Macro expansion error ---
 
@@ -77,7 +75,7 @@ impl<'a> MacroExpander<'a> {
 
         let immune = build_immune_set(interner);
 
-        let expander = MacroExpander {
+        MacroExpander {
             vm,
             macros: HashMap::new(),
             own_macros: HashSet::new(),
@@ -95,8 +93,7 @@ impl<'a> MacroExpander<'a> {
             module_macro_cache: HashMap::new(),
             expanding_paths: HashSet::new(),
             virtual_modules: HashMap::new(),
-        };
-        expander
+        }
     }
 
     /// Load the prelude file, register any macros, and return remaining expressions.
@@ -120,10 +117,7 @@ impl<'a> MacroExpander<'a> {
             Err(_) => return vec![],
         };
         // expand_all consumes defmacro forms (registering them) and returns the rest
-        match self.expand_all(exprs) {
-            Ok(remaining) => remaining,
-            Err(_) => vec![],
-        }
+        self.expand_all(exprs).unwrap_or_default()
     }
 
     /// Run prelude expressions in the expansion VM so it has access to
@@ -186,10 +180,10 @@ impl<'a> MacroExpander<'a> {
     fn is_defmacro(&self, expr: &Expr) -> bool {
         if let Expr::List { .. } = expr {
             let elements = ast::list_to_array(expr);
-            if let Some(first) = elements.first() {
-                if let Expr::Atom(LispValue::Symbol(sym), _) = first {
-                    return *sym == self.defmacro_sym;
-                }
+            if let Some(first) = elements.first()
+                && let Expr::Atom(LispValue::Symbol(sym), _) = first
+            {
+                return *sym == self.defmacro_sym;
             }
         }
         false
@@ -198,10 +192,10 @@ impl<'a> MacroExpander<'a> {
     fn is_import(&self, expr: &Expr) -> bool {
         if let Expr::List { .. } = expr {
             let elements = ast::list_to_array(expr);
-            if let Some(first) = elements.first() {
-                if let Expr::Atom(LispValue::Symbol(sym), _) = first {
-                    return *sym == self.import_sym;
-                }
+            if let Some(first) = elements.first()
+                && let Expr::Atom(LispValue::Symbol(sym), _) = first
+            {
+                return *sym == self.import_sym;
             }
         }
         false
@@ -210,19 +204,19 @@ impl<'a> MacroExpander<'a> {
     fn is_macro_call(&self, expr: &Expr) -> Option<Symbol> {
         if let Expr::List { .. } = expr {
             let elements = ast::list_to_array(expr);
-            if let Some(first) = elements.first() {
-                if let Expr::Atom(LispValue::Symbol(sym), _) = first {
-                    if self.macros.contains_key(sym) {
-                        return Some(*sym);
-                    }
-                    // Fallback: strip marks and check again
-                    let name = self.interner.resolve(*sym);
-                    let stripped = strip_all_marks(name);
-                    if stripped != name {
-                        let stripped_sym = self.interner.intern(stripped);
-                        if self.macros.contains_key(&stripped_sym) {
-                            return Some(stripped_sym);
-                        }
+            if let Some(first) = elements.first()
+                && let Expr::Atom(LispValue::Symbol(sym), _) = first
+            {
+                if self.macros.contains_key(sym) {
+                    return Some(*sym);
+                }
+                // Fallback: strip marks and check again
+                let name = self.interner.resolve(*sym);
+                let stripped = strip_all_marks(name);
+                if stripped != name {
+                    let stripped_sym = self.interner.intern(stripped);
+                    if self.macros.contains_key(&stripped_sym) {
+                        return Some(stripped_sym);
                     }
                 }
             }
@@ -355,10 +349,10 @@ impl<'a> MacroExpander<'a> {
             Expr::Atom(_, _) | Expr::Nil(_) => Ok(expr),
             Expr::List { head, tail, span } => {
                 // Don't expand inside quote
-                if let Expr::Atom(LispValue::Symbol(sym), _) = head.as_ref() {
-                    if *sym == self.quote_sym {
-                        return Ok(Expr::List { head, tail, span });
-                    }
+                if let Expr::Atom(LispValue::Symbol(sym), _) = head.as_ref()
+                    && *sym == self.quote_sym
+                {
+                    return Ok(Expr::List { head, tail, span });
                 }
 
                 let expanded_head = self.expand_expr(*head)?;
@@ -531,8 +525,7 @@ impl<'a> MacroExpander<'a> {
     }
 
     fn resolve_import_path(&self, import_path: &str) -> Result<PathBuf, MacroError> {
-        if import_path.starts_with("std:") {
-            let module_name = &import_path[4..];
+        if let Some(module_name) = import_path.strip_prefix("std:") {
             let stdlib = self.stdlib_dir.as_ref().ok_or_else(|| {
                 MacroError::new(format!(
                     "Cannot resolve stdlib module '{}': stdlib dir not set",

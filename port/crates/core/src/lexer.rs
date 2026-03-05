@@ -1,7 +1,6 @@
-use std::sync::Arc;
-
 use crate::intern::{Interner, Symbol};
 use crate::span::Span;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum Token {
@@ -119,27 +118,19 @@ impl<'a> Lexer<'a> {
             return Ok(Token::Eof(span));
         };
 
+        macro_rules! single_char {
+            ($tok:ident) => {{
+                let start = self.pos;
+                self.advance();
+                Ok(Token::$tok(self.span_from(start)))
+            }};
+        }
+
         match b {
-            b'(' => {
-                let start = self.pos;
-                self.advance();
-                Ok(Token::LParen(self.span_from(start)))
-            }
-            b')' => {
-                let start = self.pos;
-                self.advance();
-                Ok(Token::RParen(self.span_from(start)))
-            }
-            b'{' => {
-                let start = self.pos;
-                self.advance();
-                Ok(Token::LBrace(self.span_from(start)))
-            }
-            b'}' => {
-                let start = self.pos;
-                self.advance();
-                Ok(Token::RBrace(self.span_from(start)))
-            }
+            b'(' => single_char!(LParen),
+            b')' => single_char!(RParen),
+            b'{' => single_char!(LBrace),
+            b'}' => single_char!(RBrace),
             b'\'' => {
                 let start = self.pos;
                 self.advance();
@@ -216,95 +207,63 @@ impl<'a> Lexer<'a> {
         Ok(Token::String(Arc::from(value.as_str()), span))
     }
 
-    fn lex_number_or_ident(&mut self) -> Result<Token, LexError> {
-        let start = self.pos;
-        let mut text = String::new();
-
-        // Consume digits and dots
+    /// Consume digits/dots, then resolve as number or identifier (if followed by alpha).
+    fn lex_number_tail(&mut self, start: usize, prefix: &mut String) -> Result<Token, LexError> {
         while let Some(b) = self.peek() {
             if b.is_ascii_digit() || b == b'.' {
-                text.push(b as char);
+                prefix.push(b as char);
                 self.advance();
             } else {
                 break;
             }
         }
 
-        // If followed by an alphanumeric char, it's an identifier (e.g. "123abc")
-        if let Some(b) = self.peek() {
-            if b.is_ascii_alphanumeric() {
-                while let Some(b) = self.peek() {
-                    if is_symbol_char(b) {
-                        text.push(b as char);
-                        self.advance();
-                    } else {
-                        break;
-                    }
+        // If followed by an alphanumeric char, it's an identifier (e.g. "123abc", "-3x")
+        if self.peek().is_some_and(|b| b.is_ascii_alphanumeric()) {
+            while let Some(b) = self.peek() {
+                if is_symbol_char(b) {
+                    prefix.push(b as char);
+                    self.advance();
+                } else {
+                    break;
                 }
-                let span = self.span_from(start);
-                let sym = self.interner.intern(&text);
-                return Ok(Token::Identifier(sym, span));
             }
+            let span = self.span_from(start);
+            let sym = self.interner.intern(prefix);
+            return Ok(Token::Identifier(sym, span));
         }
 
         let span = self.span_from(start);
-        let is_float = text.contains('.');
-        let value: f64 = text.parse().map_err(|_| LexError {
-            message: format!("invalid number: {text}"),
+        let is_float = prefix.contains('.');
+        let value: f64 = prefix.parse().map_err(|_| LexError {
+            message: format!("invalid number: {prefix}"),
             span,
         })?;
         Ok(Token::Number(value, is_float, span))
     }
 
-    fn lex_identifier(&mut self) -> Result<Token, LexError> {
+    fn lex_number_or_ident(&mut self) -> Result<Token, LexError> {
         let start = self.pos;
         let mut text = String::new();
+        self.lex_number_tail(start, &mut text)
+    }
+
+    fn lex_identifier(&mut self) -> Result<Token, LexError> {
+        let start = self.pos;
 
         // Special case: '-' might be a negative number
-        if self.peek() == Some(b'-') {
-            // Check if next char is a digit
-            if self
+        if self.peek() == Some(b'-')
+            && self
                 .source
                 .get(self.pos + 1)
                 .is_some_and(|b| b.is_ascii_digit())
-            {
-                text.push('-');
-                self.advance();
-                // Now lex the number part
-                while let Some(b) = self.peek() {
-                    if b.is_ascii_digit() || b == b'.' {
-                        text.push(b as char);
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-                // Check if followed by alpha (making it an identifier like "-3x")
-                if let Some(b) = self.peek() {
-                    if b.is_ascii_alphanumeric() {
-                        while let Some(b) = self.peek() {
-                            if is_symbol_char(b) {
-                                text.push(b as char);
-                                self.advance();
-                            } else {
-                                break;
-                            }
-                        }
-                        let span = self.span_from(start);
-                        let sym = self.interner.intern(&text);
-                        return Ok(Token::Identifier(sym, span));
-                    }
-                }
-                let span = self.span_from(start);
-                let is_float = text.contains('.');
-                let value: f64 = text.parse().map_err(|_| LexError {
-                    message: format!("invalid number: {text}"),
-                    span,
-                })?;
-                return Ok(Token::Number(value, is_float, span));
-            }
+        {
+            let mut text = String::from("-");
+            self.advance();
+            return self.lex_number_tail(start, &mut text);
         }
 
+        let mut text = String::new();
         while let Some(b) = self.peek() {
             if is_symbol_char(b) {
                 text.push(b as char);

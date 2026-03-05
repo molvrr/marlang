@@ -4,9 +4,6 @@
 //! selective receive, supervision), and synchronous IO — all powered by
 //! the existing effect/continuation machinery.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
-
 use crate::bytecode::{Chunk, FunctionPrototype};
 use crate::errors::VMError;
 use crate::object::{Closure, HandlerEntry, VMHandlerFrame, VMObject};
@@ -15,6 +12,8 @@ use crate::vm::{
     EffectSignal, VM, VMSignal, call_closure, call_value, next_handler_id, resume_continuation,
     resume_continuation_owned,
 };
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -157,7 +156,7 @@ fn make_err(msg: &str) -> Value {
 /// Call a predicate closure synchronously. Returns true if truthy, false on error.
 fn call_predicate_safe(vm: &mut VM, predicate: &Closure, value: &Value) -> bool {
     let pred_val = Value::object(VMObject::Closure(Box::new(predicate.clone())));
-    match call_value(vm, &pred_val, &[value.clone()]) {
+    match call_value(vm, &pred_val, std::slice::from_ref(value)) {
         Ok(result) => result.is_truthy(),
         Err(_) => false,
     }
@@ -532,12 +531,12 @@ fn handle_effect(
 
         "actor-receive" => {
             let mailbox = state.mailboxes.get_mut(&state.current_pid);
-            if let Some(mailbox) = mailbox {
-                if !mailbox.is_empty() {
-                    let msg = mailbox.pop_front().unwrap();
-                    enqueue_resumed(state, state.current_pid, cont, msg);
-                    return Ok(());
-                }
+            if let Some(mailbox) = mailbox
+                && !mailbox.is_empty()
+            {
+                let msg = mailbox.pop_front().unwrap();
+                enqueue_resumed(state, state.current_pid, cont, msg);
+                return Ok(());
             }
             // Block until message arrives
             state.blocked_on_receive.insert(
@@ -707,7 +706,7 @@ fn handle_effect(
             let msg = args
                 .first()
                 .and_then(|v| v.as_string())
-                .unwrap_or("unknown error".into())
+                .unwrap_or("unknown error")
                 .to_string();
             return Err(VMError::runtime(format!("uncaught exception: {}", msg)));
         }

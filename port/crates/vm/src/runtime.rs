@@ -4,15 +4,6 @@
 //! threads at spawn time, cross-thread communication uses crossbeam channels.
 //! Bytecode execution on each thread is lock-free.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-
-use crossbeam_channel::{Receiver, Sender};
-use crossbeam_deque::{Steal, Stealer, Worker};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::OwnedWriteHalf;
-
 use crate::bytecode::{Chunk, FunctionPrototype};
 use crate::errors::VMError;
 use crate::object::{Closure, HandlerEntry, VMHandlerFrame, VMObject};
@@ -20,6 +11,13 @@ use crate::value::{Value, format_value_unquoted};
 use crate::vm::{
     EffectSignal, VM, VMSignal, call_closure, call_value, next_handler_id, resume_continuation,
 };
+use crossbeam_channel::{Receiver, Sender};
+use crossbeam_deque::{Steal, Stealer, Worker};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::OwnedWriteHalf;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -248,7 +246,7 @@ fn as_channel(val: &Value) -> Option<u64> {
 
 fn call_predicate_safe(vm: &mut VM, predicate: &Closure, value: &Value) -> bool {
     let pred_val = Value::object(VMObject::Closure(Box::new(predicate.clone())));
-    match call_value(vm, &pred_val, &[value.clone()]) {
+    match call_value(vm, &pred_val, std::slice::from_ref(value)) {
         Ok(result) => result.is_truthy(),
         Err(_) => false,
     }
@@ -647,17 +645,17 @@ fn handle_effect(
         "actor-receive" => {
             let current_pid = sched.current_pid;
             let mut mailboxes = shared.mailboxes.lock().unwrap();
-            if let Some(mailbox) = mailboxes.get_mut(&current_pid) {
-                if !mailbox.is_empty() {
-                    let msg = mailbox.pop_front().unwrap();
-                    drop(mailboxes);
-                    sched.ready_queue.push_back(Fiber::Suspended {
-                        continuation: cont,
-                        resume_value: msg,
-                        pid: current_pid,
-                    });
-                    return Ok(());
-                }
+            if let Some(mailbox) = mailboxes.get_mut(&current_pid)
+                && !mailbox.is_empty()
+            {
+                let msg = mailbox.pop_front().unwrap();
+                drop(mailboxes);
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: msg,
+                    pid: current_pid,
+                });
+                return Ok(());
             }
             drop(mailboxes);
 
@@ -1479,7 +1477,7 @@ fn handle_effect(
             let msg = args
                 .first()
                 .and_then(|v| v.as_string())
-                .unwrap_or("unknown error".into())
+                .unwrap_or("unknown error")
                 .to_string();
             return Err(VMError::runtime(format!("uncaught exception: {}", msg)));
         }
@@ -1502,7 +1500,7 @@ fn handle_effect(
 /// Wake a fiber, routing to the correct scheduler thread.
 fn wake_fiber(sched: &mut PerScheduler, shared: &SharedState, pid: FiberId, fiber: Fiber) {
     // Check if this fiber is parked locally
-    if let Some(_) = sched.parked_fibers.get(&pid) {
+    if sched.parked_fibers.contains_key(&pid) {
         // It's ours — will be handled in check_parked_wakeups
         // Just put on our ready queue directly
         sched.ready_queue.push_back(fiber);
@@ -2237,30 +2235,19 @@ fn scheduler_loop(
     let mut main_result = Value::nil();
 
     // If this is scheduler 0, run the main fiber first
-    if is_main {
-        if let Some(body) = main_body {
-            let main_pid: FiberId = 0;
-            sched.current_pid = main_pid;
+    if is_main && let Some(body) = main_body {
+        let main_pid: FiberId = 0;
+        sched.current_pid = main_pid;
 
-            install_handler_frame(vm);
-            match call_closure(vm, body, &[]) {
-                Ok(result) => {
-                    remove_handler_frame(vm);
-                    main_result = result;
-                    handle_fiber_exit(sched, shared, vm, main_pid, ExitReason::Normal);
-                }
-                Err(VMSignal::Effect(signal)) => {
-                    if let Err(e) = handle_effect(sched, shared, vm, signal) {
-                        handle_fiber_exit(
-                            sched,
-                            shared,
-                            vm,
-                            main_pid,
-                            ExitReason::Crash(e.message.clone()),
-                        );
-                    }
-                }
-                Err(VMSignal::Error(e)) => {
+        install_handler_frame(vm);
+        match call_closure(vm, body, &[]) {
+            Ok(result) => {
+                remove_handler_frame(vm);
+                main_result = result;
+                handle_fiber_exit(sched, shared, vm, main_pid, ExitReason::Normal);
+            }
+            Err(VMSignal::Effect(signal)) => {
+                if let Err(e) = handle_effect(sched, shared, vm, signal) {
                     handle_fiber_exit(
                         sched,
                         shared,
@@ -2269,6 +2256,15 @@ fn scheduler_loop(
                         ExitReason::Crash(e.message.clone()),
                     );
                 }
+            }
+            Err(VMSignal::Error(e)) => {
+                handle_fiber_exit(
+                    sched,
+                    shared,
+                    vm,
+                    main_pid,
+                    ExitReason::Crash(e.message.clone()),
+                );
             }
         }
     }
@@ -2347,10 +2343,8 @@ fn scheduler_loop(
 
             // Check for shutdown after each fiber
             if shared.shutdown.load(Ordering::Acquire) {
-                if is_main {
-                    if let Some(ref sender) = result_sender {
-                        let _ = sender.send(Ok(main_result.clone()));
-                    }
+                if is_main && let Some(ref sender) = result_sender {
+                    let _ = sender.send(Ok(main_result.clone()));
                 }
                 return;
             }
@@ -2363,10 +2357,8 @@ fn scheduler_loop(
 
         // 4. Check termination
         if check_termination(shared) {
-            if is_main {
-                if let Some(ref sender) = result_sender {
-                    let _ = sender.send(Ok(main_result.clone()));
-                }
+            if is_main && let Some(ref sender) = result_sender {
+                let _ = sender.send(Ok(main_result.clone()));
             }
             return;
         }
@@ -2382,10 +2374,8 @@ fn scheduler_loop(
                 shared.idle_count.fetch_sub(1, Ordering::AcqRel);
                 if process_single_message(sched, shared, vm, msg) {
                     // Shutdown requested
-                    if is_main {
-                        if let Some(ref sender) = result_sender {
-                            let _ = sender.send(Ok(main_result.clone()));
-                        }
+                    if is_main && let Some(ref sender) = result_sender {
+                        let _ = sender.send(Ok(main_result.clone()));
                     }
                     return;
                 }
@@ -2393,20 +2383,16 @@ fn scheduler_loop(
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 shared.idle_count.fetch_sub(1, Ordering::AcqRel);
                 if check_termination(shared) {
-                    if is_main {
-                        if let Some(ref sender) = result_sender {
-                            let _ = sender.send(Ok(main_result.clone()));
-                        }
+                    if is_main && let Some(ref sender) = result_sender {
+                        let _ = sender.send(Ok(main_result.clone()));
                     }
                     return;
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                 shared.idle_count.fetch_sub(1, Ordering::AcqRel);
-                if is_main {
-                    if let Some(ref sender) = result_sender {
-                        let _ = sender.send(Ok(main_result.clone()));
-                    }
+                if is_main && let Some(ref sender) = result_sender {
+                    let _ = sender.send(Ok(main_result.clone()));
                 }
                 return;
             }
@@ -2504,8 +2490,7 @@ pub fn run_fibers_parallel(
                 .map(|(_, s)| s.clone())
                 .collect();
             let result_sender = if i == 0 {
-                let sender = shared.result_sender.lock().unwrap().take();
-                sender
+                shared.result_sender.lock().unwrap().take()
             } else {
                 None
             };

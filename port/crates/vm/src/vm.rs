@@ -1,14 +1,12 @@
-use std::collections::HashSet;
-use std::sync::Arc;
-
-use rustc_hash::FxHashMap;
-
 use crate::bytecode::{Chunk, ConstantValue, FunctionPrototype, ModuleId, Op, ROOT_MODULE};
 use crate::errors::{StackTraceEntry, VMError};
 use crate::object::{
     CallFrame, Closure, HandlerDispatch, HandlerEntry, VMContinuation, VMHandlerFrame, VMObject,
 };
 use crate::value::{Value, format_value_unquoted};
+use rustc_hash::FxHashMap;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 // --- VMSignal: unified error/effect propagation ---
 
@@ -121,10 +119,10 @@ impl VM {
     /// Look up a global by name, checking the given module first, then falling back to root.
     #[inline]
     pub fn resolve_global(&self, name: &str, module_id: ModuleId) -> Option<&Value> {
-        if module_id != ROOT_MODULE {
-            if let Some(v) = self.module_globals[module_id as usize].get(name) {
-                return Some(v);
-            }
+        if module_id != ROOT_MODULE
+            && let Some(v) = self.module_globals[module_id as usize].get(name)
+        {
+            return Some(v);
         }
         self.module_globals[ROOT_MODULE as usize].get(name)
     }
@@ -559,9 +557,7 @@ fn extract_number(s: &str, key: &str) -> Result<f64, String> {
         .find(&pattern)
         .ok_or_else(|| format!("missing key: {}", key))?;
     let after = &s[pos + pattern.len()..];
-    let end = after
-        .find(|c: char| c == ',' || c == '}' || c == ']')
-        .unwrap_or(after.len());
+    let end = after.find([',', '}', ']']).unwrap_or(after.len());
     let num_str = after[..end].trim();
     num_str
         .parse::<f64>()
@@ -577,11 +573,11 @@ fn find_matching_bracket(s: &str, open: usize) -> Result<usize, String> {
         _ => return Err("not a bracket".to_string()),
     };
     let mut depth = 1;
-    for i in (open + 1)..bytes.len() {
-        if bytes[i] == open_char {
+    for (i, &b) in bytes.iter().enumerate().skip(open + 1) {
+        if b == open_char {
             depth += 1;
         }
-        if bytes[i] == close_char {
+        if b == close_char {
             depth -= 1;
             if depth == 0 {
                 return Ok(i);
@@ -712,12 +708,12 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 // Fast path: most frames have no open upvalues (empty vec).
                 // Only check the cell if open_upvalues is non-empty and this slot has one.
                 let open_upvalues = &vm.frames[frame_idx].open_upvalues;
-                if !open_upvalues.is_empty() {
-                    if let Some(Some(cell)) = open_upvalues.get(slot) {
-                        let val = cell.lock().unwrap().clone();
-                        vm.push(val);
-                        continue;
-                    }
+                if !open_upvalues.is_empty()
+                    && let Some(Some(cell)) = open_upvalues.get(slot)
+                {
+                    let val = cell.lock().unwrap().clone();
+                    vm.push(val);
+                    continue;
                 }
                 // SAFETY: operand is a valid local index (from compiler)
                 let val = unsafe { (*locals.add(slot)).clone() };
@@ -729,10 +725,10 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let slot = inst.operand as usize;
                 // Sync to upvalue cell if this local has been captured mutably.
                 let open_upvalues = &vm.frames[frame_idx].open_upvalues;
-                if !open_upvalues.is_empty() {
-                    if let Some(Some(cell)) = open_upvalues.get(slot) {
-                        *cell.lock().unwrap() = val.clone();
-                    }
+                if !open_upvalues.is_empty()
+                    && let Some(Some(cell)) = open_upvalues.get(slot)
+                {
+                    *cell.lock().unwrap() = val.clone();
                 }
                 // SAFETY: operand is a valid local index, pointer is valid
                 unsafe { *locals.add(slot) = val };
@@ -812,22 +808,20 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let target_module = vm.current_module;
 
                 // Check for N-ary constructor encoding: "\0ctor:Name:arity"
-                if let Some(s) = value.as_string() {
-                    if s.starts_with("\0ctor:") {
-                        let rest = &s[6..];
-                        if let Some(colon_pos) = rest.rfind(':') {
-                            let ctor_name = &rest[..colon_pos];
-                            if let Ok(arity) = rest[colon_pos + 1..].parse::<u8>() {
-                                vm.module_globals[target_module as usize].insert(
-                                    name,
-                                    Value::object(VMObject::AdtConstructor {
-                                        name: ctor_name.to_string(),
-                                        arity,
-                                    }),
-                                );
-                                continue;
-                            }
-                        }
+                if let Some(s) = value.as_string()
+                    && let Some(rest) = s.strip_prefix("\0ctor:")
+                    && let Some(colon_pos) = rest.rfind(':')
+                {
+                    let ctor_name = &rest[..colon_pos];
+                    if let Ok(arity) = rest[colon_pos + 1..].parse::<u8>() {
+                        vm.module_globals[target_module as usize].insert(
+                            name,
+                            Value::object(VMObject::AdtConstructor {
+                                name: ctor_name.to_string(),
+                                arity,
+                            }),
+                        );
+                        continue;
                     }
                 }
                 vm.module_globals[target_module as usize].insert(name, value);
@@ -1008,48 +1002,48 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 vm.frame_count -= 1;
 
                 // Check if we're returning from a handler dispatch (body or clause)
-                if let Some(dispatch) = vm.handler_dispatch_stack.last() {
-                    if vm.frame_count <= dispatch.dispatch_frame {
-                        let dispatch = vm.handler_dispatch_stack.pop().unwrap();
+                if let Some(dispatch) = vm.handler_dispatch_stack.last()
+                    && vm.frame_count <= dispatch.dispatch_frame
+                {
+                    let dispatch = vm.handler_dispatch_stack.pop().unwrap();
 
-                        // Remove the handler frame if still present
-                        if let Some(pos) = vm
-                            .handler_stack
-                            .iter()
-                            .position(|h| h.id == dispatch.handler_id)
-                        {
-                            vm.handler_stack.remove(pos);
-                        }
+                    // Remove the handler frame if still present
+                    if let Some(pos) = vm
+                        .handler_stack
+                        .iter()
+                        .position(|h| h.id == dispatch.handler_id)
+                    {
+                        vm.handler_stack.remove(pos);
+                    }
 
-                        if let Some(ret_closure) = dispatch.return_handler {
-                            // Apply return handler: push its frame and let the run loop execute it.
-                            // When it returns, it will fall through to the normal Return path.
-                            let local_count = ret_closure.proto.chunk.local_count as usize;
-                            let mut ret_locals = vm.take_locals(local_count);
-                            ret_locals[0] = result;
-                            let new_frame = CallFrame {
-                                closure: ret_closure,
-                                ip: 0,
-                                locals: ret_locals,
-                                open_upvalues: Vec::new(),
-                            };
-                            vm.push_frame(new_frame);
-                            frame_idx = vm.frame_count - 1;
-                            ip = 0;
-                            cache_frame!();
-                            continue;
-                        }
-
-                        // No return handler — result is the final value
-                        if vm.frame_count <= base_frame_count {
-                            return Ok(result);
-                        }
+                    if let Some(ret_closure) = dispatch.return_handler {
+                        // Apply return handler: push its frame and let the run loop execute it.
+                        // When it returns, it will fall through to the normal Return path.
+                        let local_count = ret_closure.proto.chunk.local_count as usize;
+                        let mut ret_locals = vm.take_locals(local_count);
+                        ret_locals[0] = result;
+                        let new_frame = CallFrame {
+                            closure: ret_closure,
+                            ip: 0,
+                            locals: ret_locals,
+                            open_upvalues: Vec::new(),
+                        };
+                        vm.push_frame(new_frame);
                         frame_idx = vm.frame_count - 1;
-                        ip = vm.frames[frame_idx].ip;
+                        ip = 0;
                         cache_frame!();
-                        vm.push(result);
                         continue;
                     }
+
+                    // No return handler — result is the final value
+                    if vm.frame_count <= base_frame_count {
+                        return Ok(result);
+                    }
+                    frame_idx = vm.frame_count - 1;
+                    ip = vm.frames[frame_idx].ip;
+                    cache_frame!();
+                    vm.push(result);
+                    continue;
                 }
 
                 // Normal return path
@@ -1107,9 +1101,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 vm.pop(); // pop callee
 
                                 // Required params go in locals[0..required_arity]
-                                for i in 0..required_arity {
-                                    locals[i] = all_args[i].clone();
-                                }
+                                locals[..required_arity]
+                                    .clone_from_slice(&all_args[..required_arity]);
                                 // Excess args packed into a List in locals[required_arity]
                                 let rest_args: Vec<Value> = all_args[required_arity..].to_vec();
                                 locals[required_arity] = Value::object(VMObject::List(rest_args));
@@ -1277,9 +1270,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                     all_args[i] = vm.pop();
                                 }
                                 vm.pop(); // pop callee
-                                for i in 0..required_arity {
-                                    locals[i] = all_args[i].clone();
-                                }
+                                locals[..required_arity]
+                                    .clone_from_slice(&all_args[..required_arity]);
                                 let rest_args: Vec<Value> = all_args[required_arity..].to_vec();
                                 locals[required_arity] = Value::object(VMObject::List(rest_args));
                             } else {
@@ -1759,11 +1751,11 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     // Fast-path: synchronous effects under the scheduler.
                     // These can be executed inline without continuation capture,
                     // avoiding the expensive capture → unwind → signal → resume cycle.
-                    if is_scheduler {
-                        if let Some(result) = try_default_handler(vm, op_name_ref, &args) {
-                            vm.push(result);
-                            continue;
-                        }
+                    if is_scheduler
+                        && let Some(result) = try_default_handler(vm, op_name_ref, &args)
+                    {
+                        vm.push(result);
+                        continue;
                     }
 
                     let handler_id = vm.handler_stack[handler_idx].id;
@@ -1798,10 +1790,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             open_upvalues: f.open_upvalues.clone(),
                         });
                     }
-                    let captured_stack: Vec<Value> = vm.stack[capture_stack_start..vm.stack_top]
-                        .iter()
-                        .map(|v| v.clone())
-                        .collect();
+                    let captured_stack: Vec<Value> =
+                        vm.stack[capture_stack_start..vm.stack_top].to_vec();
 
                     // Capture nested handler frames (above the matched handler)
                     let captured_handlers: Vec<VMHandlerFrame> =
@@ -1902,9 +1892,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     let expected_arg_count = (clause.arity as usize).saturating_sub(1);
                     let local_count = clause.closure.proto.chunk.local_count as usize;
                     let mut clause_locals = vm.take_locals(local_count);
-                    for i in 0..expected_arg_count.min(args.len()) {
-                        clause_locals[i] = args[i].clone();
-                    }
+                    let copy_count = expected_arg_count.min(args.len());
+                    clause_locals[..copy_count].clone_from_slice(&args[..copy_count]);
                     clause_locals[expected_arg_count] = cont_value;
 
                     // Call handler clause inline
@@ -2078,19 +2067,19 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
     }
 
     // nil == empty list, nil == Nil ADT
-    if a.is_nil() {
-        if let Some(obj) = b.as_object() {
-            return matches!(obj,
+    if a.is_nil()
+        && let Some(obj) = b.as_object()
+    {
+        return matches!(obj,
                 VMObject::List(elements) if elements.is_empty())
-                || matches!(obj, VMObject::AdtValue { tag, fields } if tag == "Nil" && fields.is_empty());
-        }
+            || matches!(obj, VMObject::AdtValue { tag, fields } if tag == "Nil" && fields.is_empty());
     }
-    if b.is_nil() {
-        if let Some(obj) = a.as_object() {
-            return matches!(obj,
+    if b.is_nil()
+        && let Some(obj) = a.as_object()
+    {
+        return matches!(obj,
                 VMObject::List(elements) if elements.is_empty())
-                || matches!(obj, VMObject::AdtValue { tag, fields } if tag == "Nil" && fields.is_empty());
-        }
+            || matches!(obj, VMObject::AdtValue { tag, fields } if tag == "Nil" && fields.is_empty());
     }
 
     false

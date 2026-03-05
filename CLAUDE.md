@@ -120,7 +120,21 @@ Declared in the prelude with a polymorphic return type so `throw` unifies with a
 ```
 Without a handler, `throw` crashes the fiber. Note: `string->number` (defined in prelude) wraps the `__try-string->number` builtin and throws on parse failure.
 
+## Rust Style
+
+- Prefer `crate::` over `super::` for imports. Always use absolute crate paths (`crate::module::Item`) instead of relative `super::` paths.
+- Keep all `use` statements in a single group with no blank lines between them. Do not separate std, external, and crate imports into separate groups.
+- Declare `mod` items only in `lib.rs` (or `mod.rs` for submodules), never in `main.rs`. Binary crates should have a `lib.rs` that owns the module tree; `main.rs` imports from the lib crate.
+
 ## Workflow
+
+### After writing Rust code
+Always run clippy and fmt after writing or modifying Rust code:
+```bash
+cargo fmt --all --manifest-path port/Cargo.toml
+cargo clippy --workspace --manifest-path port/Cargo.toml
+```
+Fix all warnings before considering the task done. The codebase must have zero clippy warnings.
 
 ### Verifying macro-using code
 When writing or modifying Marlang code that uses macros (e.g. `when`, `unless`, or any `defmacro`), always run `expand` to inspect the expanded output:

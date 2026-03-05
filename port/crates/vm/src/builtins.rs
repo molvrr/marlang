@@ -3,6 +3,112 @@ use crate::object::VMObject;
 use crate::value::{Value, format_value};
 use crate::vm::VM;
 
+/// Type alias for a builtin function pointer.
+type BuiltinFn = fn(&mut VM, &[Value]) -> Result<Value, VMError>;
+
+/// Type alias for the builtin registration function.
+type RegisterFn = fn(&mut VM, &str, BuiltinFn);
+
+/// Register a unary numeric builtin: extracts one f64, applies `$op`, returns Value::number.
+macro_rules! unary_num {
+    ($vm:expr, $builtin:ident, $name:expr, $op:expr) => {
+        $builtin($vm, $name, |_vm, args| {
+            if args.len() != 1 {
+                return Err(VMError::runtime(concat!($name, " expects one number")));
+            }
+            let n = args[0]
+                .as_number()
+                .ok_or_else(|| VMError::runtime(concat!($name, " expects a number")))?;
+            Ok(Value::number($op(n)))
+        });
+    };
+}
+
+/// Register a binary numeric comparison: extracts two f64, applies `$op`, returns Value::boolean.
+macro_rules! bin_num_cmp {
+    ($vm:expr, $builtin:ident, $name:expr, $op:expr) => {
+        $builtin($vm, $name, |_vm, args| {
+            if args.len() != 2 {
+                return Err(VMError::runtime(concat!($name, " expects two numbers")));
+            }
+            let a = args[0]
+                .as_number()
+                .ok_or_else(|| VMError::runtime(concat!($name, " expects two numbers")))?;
+            let b = args[1]
+                .as_number()
+                .ok_or_else(|| VMError::runtime(concat!($name, " expects two numbers")))?;
+            Ok(Value::boolean($op(a, b)))
+        });
+    };
+}
+
+/// Register a binary string comparison: extracts two strings, applies `$op`, returns Value::boolean.
+macro_rules! bin_str_cmp {
+    ($vm:expr, $builtin:ident, $name:expr, $op:expr) => {
+        $builtin($vm, $name, |_vm, args| {
+            if args.len() != 2 {
+                return Err(VMError::runtime(concat!($name, " expects two strings")));
+            }
+            let a = args[0]
+                .as_string()
+                .ok_or_else(|| VMError::runtime(concat!($name, " expects two strings")))?;
+            let b = args[1]
+                .as_string()
+                .ok_or_else(|| VMError::runtime(concat!($name, " expects two strings")))?;
+            Ok(Value::boolean($op(a, b)))
+        });
+    };
+}
+
+/// Register a unary numeric predicate: extracts one f64, applies `$pred`, returns Value::boolean.
+macro_rules! unary_num_pred {
+    ($vm:expr, $builtin:ident, $name:expr, $pred:expr) => {
+        $builtin($vm, $name, |_vm, args| {
+            if args.len() != 1 {
+                return Err(VMError::runtime(concat!($name, " expects one number")));
+            }
+            let n = args[0]
+                .as_number()
+                .ok_or_else(|| VMError::runtime(concat!($name, " expects a number")))?;
+            Ok(Value::boolean($pred(n)))
+        });
+    };
+}
+
+/// Register a unary string transform: extracts one string, applies `$transform`, returns Value::string.
+macro_rules! unary_str_transform {
+    ($vm:expr, $builtin:ident, $name:expr, $transform:expr) => {
+        $builtin($vm, $name, |_vm, args| {
+            if args.len() != 1 {
+                return Err(VMError::runtime(concat!($name, " expects 1 argument")));
+            }
+            let s = args[0]
+                .as_string()
+                .ok_or_else(|| VMError::runtime(concat!($name, " expects a string")))?;
+            let result: String = $transform(s);
+            Ok(Value::string(&*result))
+        });
+    };
+}
+
+/// Register a binary numeric op: extracts two f64, applies `$op`, returns Value::number.
+macro_rules! bin_num_op {
+    ($vm:expr, $builtin:ident, $name:expr, $op:expr) => {
+        $builtin($vm, $name, |_vm, args| {
+            if args.len() != 2 {
+                return Err(VMError::runtime(concat!($name, " expects two numbers")));
+            }
+            let a = args[0]
+                .as_number()
+                .ok_or_else(|| VMError::runtime(concat!($name, " expects numbers")))?;
+            let b = args[1]
+                .as_number()
+                .ok_or_else(|| VMError::runtime(concat!($name, " expects numbers")))?;
+            Ok(Value::number($op(a, b)))
+        });
+    };
+}
+
 /// Collect any list representation (VMObject::List or Cons/Nil ADT) into a Vec<Value>.
 /// Returns Err if the value is not a list of either kind.
 fn collect_list(val: &Value, context: &str) -> Result<Vec<Value>, VMError> {
@@ -46,7 +152,7 @@ pub fn register_builtins(vm: &mut VM) {
 
     // --- Built-in functions ---
 
-    fn builtin(vm: &mut VM, name: &str, func: fn(&mut VM, &[Value]) -> Result<Value, VMError>) {
+    fn builtin(vm: &mut VM, name: &str, func: BuiltinFn) {
         vm.globals_mut().insert(
             name.to_string(),
             Value::object(VMObject::Builtin {
@@ -114,81 +220,14 @@ pub fn register_builtins(vm: &mut VM) {
         Ok(Value::number(result))
     });
 
-    builtin(vm, "negate", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("negate expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("negate expects one number"))?;
-        Ok(Value::number(-n))
-    });
+    unary_num!(vm, builtin, "negate", |n: f64| -n);
 
     // Comparison (for non-binary calls)
-    builtin(vm, "<", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("< expects two numbers"));
-        }
-        let a = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("< expects two numbers"))?;
-        let b = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("< expects two numbers"))?;
-        Ok(Value::boolean(a < b))
-    });
-
-    builtin(vm, ">", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("> expects two numbers"));
-        }
-        let a = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("> expects two numbers"))?;
-        let b = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("> expects two numbers"))?;
-        Ok(Value::boolean(a > b))
-    });
-
-    builtin(vm, "=", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("= expects two numbers"));
-        }
-        let a = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("= expects two numbers"))?;
-        let b = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("= expects two numbers"))?;
-        Ok(Value::boolean(a == b))
-    });
-
-    builtin(vm, "<=", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("<= expects two numbers"));
-        }
-        let a = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("<= expects two numbers"))?;
-        let b = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("<= expects two numbers"))?;
-        Ok(Value::boolean(a <= b))
-    });
-
-    builtin(vm, ">=", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime(">= expects two numbers"));
-        }
-        let a = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime(">= expects two numbers"))?;
-        let b = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime(">= expects two numbers"))?;
-        Ok(Value::boolean(a >= b))
-    });
+    bin_num_cmp!(vm, builtin, "<", |a: f64, b: f64| a < b);
+    bin_num_cmp!(vm, builtin, ">", |a: f64, b: f64| a > b);
+    bin_num_cmp!(vm, builtin, "=", |a: f64, b: f64| a == b);
+    bin_num_cmp!(vm, builtin, "<=", |a: f64, b: f64| a <= b);
+    bin_num_cmp!(vm, builtin, ">=", |a: f64, b: f64| a >= b);
 
     // Float arithmetic (same runtime behavior — everything is f64)
     builtin(vm, "+.", |_vm, args| {
@@ -248,491 +287,70 @@ pub fn register_builtins(vm: &mut VM) {
         Ok(Value::number(result))
     });
 
-    builtin(vm, "negate.", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("negate. expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("negate. expects one number"))?;
-        Ok(Value::number(-n))
-    });
+    unary_num!(vm, builtin, "negate.", |n: f64| -n);
 
     // Math builtins
-    builtin(vm, "rem", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("rem expects two numbers"));
-        }
-        let a = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("rem expects numbers"))?;
-        let b = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("rem expects numbers"))?;
-        Ok(Value::number(a % b))
-    });
+    bin_num_op!(vm, builtin, "rem", |a: f64, b: f64| a % b);
+    bin_num_op!(vm, builtin, "rem.", |a: f64, b: f64| a % b);
+    bin_num_op!(vm, builtin, "mod", |a: f64, b: f64| ((a % b) + b) % b);
+    bin_num_op!(vm, builtin, "mod.", |a: f64, b: f64| ((a % b) + b) % b);
+    unary_num!(vm, builtin, "abs", f64::abs);
+    unary_num!(vm, builtin, "abs.", f64::abs);
 
-    builtin(vm, "rem.", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("rem. expects two numbers"));
-        }
-        let a = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("rem. expects numbers"))?;
-        let b = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("rem. expects numbers"))?;
-        Ok(Value::number(a % b))
-    });
-
-    builtin(vm, "mod", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("mod expects two numbers"));
-        }
-        let a = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("mod expects numbers"))?;
-        let b = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("mod expects numbers"))?;
-        Ok(Value::number(((a % b) + b) % b))
-    });
-
-    builtin(vm, "mod.", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("mod. expects two numbers"));
-        }
-        let a = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("mod. expects numbers"))?;
-        let b = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("mod. expects numbers"))?;
-        Ok(Value::number(((a % b) + b) % b))
-    });
-
-    builtin(vm, "abs", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("abs expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("abs expects one number"))?;
-        Ok(Value::number(n.abs()))
-    });
-
-    builtin(vm, "abs.", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("abs. expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("abs. expects one number"))?;
-        Ok(Value::number(n.abs()))
-    });
-
-    builtin(vm, "sign", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("sign expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("sign expects one number"))?;
-        Ok(Value::number(if n > 0.0 {
+    fn sign(n: f64) -> f64 {
+        if n > 0.0 {
             1.0
         } else if n < 0.0 {
             -1.0
         } else {
             0.0
-        }))
-    });
-
-    builtin(vm, "sign.", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("sign. expects one number"));
         }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("sign. expects one number"))?;
-        Ok(Value::number(if n > 0.0 {
-            1.0
-        } else if n < 0.0 {
-            -1.0
-        } else {
-            0.0
-        }))
-    });
+    }
+    unary_num!(vm, builtin, "sign", sign);
+    unary_num!(vm, builtin, "sign.", sign);
 
     // Math builtins — Float functions
-    builtin(vm, "pow", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("pow expects two numbers"));
-        }
-        let base = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("pow expects numbers"))?;
-        let exp = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("pow expects numbers"))?;
-        Ok(Value::number(base.powf(exp)))
-    });
-
-    builtin(vm, "sqrt", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("sqrt expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("sqrt expects a number"))?;
-        Ok(Value::number(n.sqrt()))
-    });
-
-    builtin(vm, "exp", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("exp expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("exp expects a number"))?;
-        Ok(Value::number(n.exp()))
-    });
-
-    builtin(vm, "log", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("log expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("log expects a number"))?;
-        Ok(Value::number(n.ln()))
-    });
-
-    builtin(vm, "log10", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("log10 expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("log10 expects a number"))?;
-        Ok(Value::number(n.log10()))
-    });
-
-    builtin(vm, "log2", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("log2 expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("log2 expects a number"))?;
-        Ok(Value::number(n.log2()))
-    });
-
-    builtin(vm, "sin", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("sin expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("sin expects a number"))?;
-        Ok(Value::number(n.sin()))
-    });
-
-    builtin(vm, "cos", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("cos expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("cos expects a number"))?;
-        Ok(Value::number(n.cos()))
-    });
-
-    builtin(vm, "tan", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("tan expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("tan expects a number"))?;
-        Ok(Value::number(n.tan()))
-    });
-
-    builtin(vm, "asin", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("asin expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("asin expects a number"))?;
-        Ok(Value::number(n.asin()))
-    });
-
-    builtin(vm, "acos", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("acos expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("acos expects a number"))?;
-        Ok(Value::number(n.acos()))
-    });
-
-    builtin(vm, "atan", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("atan expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("atan expects a number"))?;
-        Ok(Value::number(n.atan()))
-    });
-
-    builtin(vm, "sinh", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("sinh expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("sinh expects a number"))?;
-        Ok(Value::number(n.sinh()))
-    });
-
-    builtin(vm, "cosh", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("cosh expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("cosh expects a number"))?;
-        Ok(Value::number(n.cosh()))
-    });
-
-    builtin(vm, "tanh", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("tanh expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("tanh expects a number"))?;
-        Ok(Value::number(n.tanh()))
-    });
-
-    builtin(vm, "atan2", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("atan2 expects two numbers"));
-        }
-        let y = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("atan2 expects numbers"))?;
-        let x = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("atan2 expects numbers"))?;
-        Ok(Value::number(y.atan2(x)))
-    });
+    bin_num_op!(vm, builtin, "pow", f64::powf);
+    unary_num!(vm, builtin, "sqrt", f64::sqrt);
+    unary_num!(vm, builtin, "exp", f64::exp);
+    unary_num!(vm, builtin, "log", f64::ln);
+    unary_num!(vm, builtin, "log10", f64::log10);
+    unary_num!(vm, builtin, "log2", f64::log2);
+    unary_num!(vm, builtin, "sin", f64::sin);
+    unary_num!(vm, builtin, "cos", f64::cos);
+    unary_num!(vm, builtin, "tan", f64::tan);
+    unary_num!(vm, builtin, "asin", f64::asin);
+    unary_num!(vm, builtin, "acos", f64::acos);
+    unary_num!(vm, builtin, "atan", f64::atan);
+    unary_num!(vm, builtin, "sinh", f64::sinh);
+    unary_num!(vm, builtin, "cosh", f64::cosh);
+    unary_num!(vm, builtin, "tanh", f64::tanh);
+    bin_num_op!(vm, builtin, "atan2", f64::atan2);
 
     // Conversion builtins — Float -> Int
-    builtin(vm, "floor", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("floor expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("floor expects a number"))?;
-        Ok(Value::number(n.floor()))
-    });
-
-    builtin(vm, "ceil", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("ceil expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("ceil expects a number"))?;
-        Ok(Value::number(n.ceil()))
-    });
-
-    builtin(vm, "round", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("round expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("round expects a number"))?;
-        Ok(Value::number(n.round()))
-    });
-
-    builtin(vm, "truncate", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("truncate expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("truncate expects a number"))?;
-        Ok(Value::number(n.trunc()))
-    });
+    unary_num!(vm, builtin, "floor", f64::floor);
+    unary_num!(vm, builtin, "ceil", f64::ceil);
+    unary_num!(vm, builtin, "round", f64::round);
+    unary_num!(vm, builtin, "truncate", f64::trunc);
 
     // Float check builtins
-    builtin(vm, "is-nan", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("is-nan expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("is-nan expects a number"))?;
-        Ok(Value::boolean(n.is_nan()))
-    });
-
-    builtin(vm, "is-infinite", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("is-infinite expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("is-infinite expects a number"))?;
-        Ok(Value::boolean(n.is_infinite()))
-    });
-
-    builtin(vm, "is-finite", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("is-finite expects one number"));
-        }
-        let n = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("is-finite expects a number"))?;
-        Ok(Value::boolean(n.is_finite()))
-    });
+    unary_num_pred!(vm, builtin, "is-nan", f64::is_nan);
+    unary_num_pred!(vm, builtin, "is-infinite", f64::is_infinite);
+    unary_num_pred!(vm, builtin, "is-finite", f64::is_finite);
 
     // Float comparison builtins
-    builtin(vm, "=.", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("=. expects two numbers"));
-        }
-        let a = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("=. expects two numbers"))?;
-        let b = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("=. expects two numbers"))?;
-        Ok(Value::boolean(a == b))
-    });
-
-    builtin(vm, "<.", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("<. expects two numbers"));
-        }
-        let a = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("<. expects two numbers"))?;
-        let b = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("<. expects two numbers"))?;
-        Ok(Value::boolean(a < b))
-    });
-
-    builtin(vm, ">.", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime(">. expects two numbers"));
-        }
-        let a = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime(">. expects two numbers"))?;
-        let b = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime(">. expects two numbers"))?;
-        Ok(Value::boolean(a > b))
-    });
-
-    builtin(vm, "<=.", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("<=. expects two numbers"));
-        }
-        let a = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("<=. expects two numbers"))?;
-        let b = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime("<=. expects two numbers"))?;
-        Ok(Value::boolean(a <= b))
-    });
-
-    builtin(vm, ">=.", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime(">=. expects two numbers"));
-        }
-        let a = args[0]
-            .as_number()
-            .ok_or_else(|| VMError::runtime(">=. expects two numbers"))?;
-        let b = args[1]
-            .as_number()
-            .ok_or_else(|| VMError::runtime(">=. expects two numbers"))?;
-        Ok(Value::boolean(a >= b))
-    });
+    bin_num_cmp!(vm, builtin, "=.", |a: f64, b: f64| a == b);
+    bin_num_cmp!(vm, builtin, "<.", |a: f64, b: f64| a < b);
+    bin_num_cmp!(vm, builtin, ">.", |a: f64, b: f64| a > b);
+    bin_num_cmp!(vm, builtin, "<=.", |a: f64, b: f64| a <= b);
+    bin_num_cmp!(vm, builtin, ">=.", |a: f64, b: f64| a >= b);
 
     // String comparison builtins
-    builtin(vm, "string=", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("string= expects two strings"));
-        }
-        let a = args[0]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string= expects two strings"))?;
-        let b = args[1]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string= expects two strings"))?;
-        Ok(Value::boolean(a == b))
-    });
-
-    builtin(vm, "string<", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("string< expects two strings"));
-        }
-        let a = args[0]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string< expects two strings"))?;
-        let b = args[1]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string< expects two strings"))?;
-        Ok(Value::boolean(a < b))
-    });
-
-    builtin(vm, "string>", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("string> expects two strings"));
-        }
-        let a = args[0]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string> expects two strings"))?;
-        let b = args[1]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string> expects two strings"))?;
-        Ok(Value::boolean(a > b))
-    });
-
-    builtin(vm, "string<=", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("string<= expects two strings"));
-        }
-        let a = args[0]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string<= expects two strings"))?;
-        let b = args[1]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string<= expects two strings"))?;
-        Ok(Value::boolean(a <= b))
-    });
-
-    builtin(vm, "string>=", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("string>= expects two strings"));
-        }
-        let a = args[0]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string>= expects two strings"))?;
-        let b = args[1]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string>= expects two strings"))?;
-        Ok(Value::boolean(a >= b))
-    });
+    bin_str_cmp!(vm, builtin, "string=", |a: &str, b: &str| a == b);
+    bin_str_cmp!(vm, builtin, "string<", |a: &str, b: &str| a < b);
+    bin_str_cmp!(vm, builtin, "string>", |a: &str, b: &str| a > b);
+    bin_str_cmp!(vm, builtin, "string<=", |a: &str, b: &str| a <= b);
+    bin_str_cmp!(vm, builtin, "string>=", |a: &str, b: &str| a >= b);
 
     // Polymorphic equality
     builtin(vm, "equal?", |_vm, args| {
@@ -795,16 +413,11 @@ pub fn register_builtins(vm: &mut VM) {
         Ok(Value::boolean(s.is_empty()))
     });
 
-    builtin(vm, "string-reverse", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("string-reverse expects 1 argument"));
-        }
-        let s = args[0]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string-reverse expects a string"))?;
-        let reversed: String = s.chars().rev().collect();
-        Ok(Value::string(reversed.as_str()))
-    });
+    unary_str_transform!(vm, builtin, "string-reverse", |s: &str| s
+        .chars()
+        .rev()
+        .collect::<String>(
+    ));
 
     builtin(vm, "string-repeat", |_vm, args| {
         if args.len() != 2 {
@@ -820,94 +433,22 @@ pub fn register_builtins(vm: &mut VM) {
         Ok(Value::string(s.repeat(n).as_str()))
     });
 
-    builtin(vm, "string-to-upper", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("string-to-upper expects 1 argument"));
-        }
-        let s = args[0]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string-to-upper expects a string"))?;
-        Ok(Value::string(s.to_uppercase().as_str()))
-    });
+    unary_str_transform!(vm, builtin, "string-to-upper", |s: &str| s.to_uppercase());
+    unary_str_transform!(vm, builtin, "string-to-lower", |s: &str| s.to_lowercase());
+    unary_str_transform!(vm, builtin, "string-trim", |s: &str| s.trim().to_string());
+    unary_str_transform!(vm, builtin, "string-trim-start", |s: &str| s
+        .trim_start()
+        .to_string());
+    unary_str_transform!(vm, builtin, "string-trim-end", |s: &str| s
+        .trim_end()
+        .to_string());
 
-    builtin(vm, "string-to-lower", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("string-to-lower expects 1 argument"));
-        }
-        let s = args[0]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string-to-lower expects a string"))?;
-        Ok(Value::string(s.to_lowercase().as_str()))
-    });
-
-    builtin(vm, "string-trim", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("string-trim expects 1 argument"));
-        }
-        let s = args[0]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string-trim expects a string"))?;
-        Ok(Value::string(s.trim()))
-    });
-
-    builtin(vm, "string-trim-start", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("string-trim-start expects 1 argument"));
-        }
-        let s = args[0]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string-trim-start expects a string"))?;
-        Ok(Value::string(s.trim_start()))
-    });
-
-    builtin(vm, "string-trim-end", |_vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime("string-trim-end expects 1 argument"));
-        }
-        let s = args[0]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string-trim-end expects a string"))?;
-        Ok(Value::string(s.trim_end()))
-    });
-
-    builtin(vm, "string-starts-with", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("string-starts-with expects 2 arguments"));
-        }
-        let s = args[0]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string-starts-with: first arg must be a string"))?;
-        let prefix = args[1]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string-starts-with: second arg must be a string"))?;
-        Ok(Value::boolean(s.starts_with(prefix)))
-    });
-
-    builtin(vm, "string-ends-with", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("string-ends-with expects 2 arguments"));
-        }
-        let s = args[0]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string-ends-with: first arg must be a string"))?;
-        let suffix = args[1]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string-ends-with: second arg must be a string"))?;
-        Ok(Value::boolean(s.ends_with(suffix)))
-    });
-
-    builtin(vm, "string-contains", |_vm, args| {
-        if args.len() != 2 {
-            return Err(VMError::runtime("string-contains expects 2 arguments"));
-        }
-        let s = args[0]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string-contains: first arg must be a string"))?;
-        let sub = args[1]
-            .as_string()
-            .ok_or_else(|| VMError::runtime("string-contains: second arg must be a string"))?;
-        Ok(Value::boolean(s.contains(sub)))
-    });
+    bin_str_cmp!(vm, builtin, "string-starts-with", |s: &str, p: &str| s
+        .starts_with(p));
+    bin_str_cmp!(vm, builtin, "string-ends-with", |s: &str, p: &str| s
+        .ends_with(p));
+    bin_str_cmp!(vm, builtin, "string-contains", |s: &str, p: &str| s
+        .contains(p));
 
     builtin(vm, "string-index-of", |_vm, args| {
         if args.len() != 2 {
@@ -1333,7 +874,7 @@ pub fn register_builtins(vm: &mut VM) {
             s.to_string()
         } else {
             args.first()
-                .map(|a| format_value(a))
+                .map(format_value)
                 .unwrap_or_else(|| "error".to_string())
         };
         Err(VMError::runtime(msg))
@@ -1403,10 +944,7 @@ pub fn register_builtins(vm: &mut VM) {
 }
 
 #[cfg(feature = "ffi")]
-fn register_ffi_builtins(
-    vm: &mut VM,
-    builtin: fn(&mut VM, &str, fn(&mut VM, &[Value]) -> Result<Value, VMError>),
-) {
+fn register_ffi_builtins(vm: &mut VM, builtin: RegisterFn) {
     use crate::ffi;
     use std::sync::Arc;
 

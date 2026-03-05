@@ -1,13 +1,11 @@
-use std::collections::{HashMap, HashSet};
-
-use marlang_core::ast::{self, Expr, LispValue};
-use marlang_core::intern::{Interner, Symbol};
-
 use crate::bytecode::{
     Chunk, ConstantValue, FfiSigEntry, FunctionPrototype, Instruction, ModuleId, Op, ROOT_MODULE,
     UpvalueDescriptor,
 };
 use crate::errors::CompileError;
+use marlang_core::ast::{self, Expr, LispValue};
+use marlang_core::intern::{Interner, Symbol};
+use std::collections::{HashMap, HashSet};
 
 // --- Known binary operators ---
 
@@ -455,14 +453,12 @@ impl<'a> Compiler<'a> {
             Expr::Atom(LispValue::Symbol(sym), _) => Ok(*sym),
             Expr::List { .. } => {
                 let parts = ast::list_to_array(p);
-                if parts.len() == 3 {
-                    if let Some(sym) = Self::get_symbol(parts[0]) {
-                        if let Some(colon) = Self::get_symbol(parts[1]) {
-                            if colon == self.known_symbols.colon {
-                                return Ok(sym);
-                            }
-                        }
-                    }
+                if parts.len() == 3
+                    && let Some(sym) = Self::get_symbol(parts[0])
+                    && let Some(colon) = Self::get_symbol(parts[1])
+                    && colon == self.known_symbols.colon
+                {
+                    return Ok(sym);
                 }
                 Err(CompileError::new(
                     "Parameter must be a symbol or (symbol : Type)",
@@ -506,14 +502,12 @@ impl<'a> Compiler<'a> {
             Expr::Atom(LispValue::Symbol(sym), _) => Ok(*sym),
             Expr::List { .. } => {
                 let parts = ast::list_to_array(expr);
-                if parts.len() == 3 {
-                    if let Some(sym) = Self::get_symbol(parts[0]) {
-                        if let Some(colon) = Self::get_symbol(parts[1]) {
-                            if colon == self.known_symbols.colon {
-                                return Ok(sym);
-                            }
-                        }
-                    }
+                if parts.len() == 3
+                    && let Some(sym) = Self::get_symbol(parts[0])
+                    && let Some(colon) = Self::get_symbol(parts[1])
+                    && colon == self.known_symbols.colon
+                {
+                    return Ok(sym);
                 }
                 Err(CompileError::new(
                     "define expects a symbol or (symbol : Type)",
@@ -531,12 +525,11 @@ impl<'a> Compiler<'a> {
     fn is_define_form(&self, expr: &Expr) -> Option<Symbol> {
         if let Expr::List { .. } = expr {
             let elements = ast::list_to_array(expr);
-            if elements.len() == 3 {
-                if let Some(sym) = Self::get_symbol(elements[0]) {
-                    if sym == self.known_symbols.define {
-                        return self.get_define_name(elements[1]).ok();
-                    }
-                }
+            if elements.len() == 3
+                && let Some(sym) = Self::get_symbol(elements[0])
+                && sym == self.known_symbols.define
+            {
+                return self.get_define_name(elements[1]).ok();
             }
         }
         None
@@ -578,17 +571,16 @@ impl<'a> Compiler<'a> {
         self.prescan_leading_defines(body_exprs);
 
         // If the body is a single `(begin ...)`, also scan inside it
-        if body_exprs.len() == 1 {
-            if let Expr::List { .. } = body_exprs[0] {
-                let elements = ast::list_to_array(body_exprs[0]);
-                if !elements.is_empty() {
-                    if let Some(sym) = Self::get_symbol(elements[0]) {
-                        if sym == self.known_symbols.begin {
-                            let begin_body: Vec<&Expr> = elements[1..].to_vec();
-                            self.prescan_leading_defines(&begin_body);
-                        }
-                    }
-                }
+        if body_exprs.len() == 1
+            && let Expr::List { .. } = body_exprs[0]
+        {
+            let elements = ast::list_to_array(body_exprs[0]);
+            if !elements.is_empty()
+                && let Some(sym) = Self::get_symbol(elements[0])
+                && sym == self.known_symbols.begin
+            {
+                let begin_body: Vec<&Expr> = elements[1..].to_vec();
+                self.prescan_leading_defines(&begin_body);
             }
         }
     }
@@ -690,13 +682,13 @@ impl<'a> Compiler<'a> {
                     }
 
                     // Binary operator optimization
-                    if let Some(bin_op) = binary_op(sym, self.interner) {
-                        if elements.len() == 3 {
-                            self.compile_expr(elements[1], false)?;
-                            self.compile_expr(elements[2], false)?;
-                            self.emit(bin_op, line);
-                            return Ok(());
-                        }
+                    if let Some(bin_op) = binary_op(sym, self.interner)
+                        && elements.len() == 3
+                    {
+                        self.compile_expr(elements[1], false)?;
+                        self.compile_expr(elements[2], false)?;
+                        self.emit(bin_op, line);
+                        return Ok(());
                     }
 
                     // Unary negate: (- x) or (negate x) or (-. x) or (negate. x)
@@ -747,7 +739,7 @@ impl<'a> Compiler<'a> {
             if self.did_prescan && self.scope_depth == 0 {
                 let name_str = self.interner.resolve(name);
                 return Err(CompileError::new(
-                    &format!(
+                    format!(
                         "define '{}' is not allowed here; internal defines must appear at the beginning of the function body",
                         name_str
                     ),
@@ -957,12 +949,12 @@ impl<'a> Compiler<'a> {
             let result_expr = clause[1];
 
             // Check for else clause
-            if let Some(sym) = Self::get_symbol(test_expr) {
-                if sym == self.known_symbols.else_ {
-                    self.compile_expr(result_expr, is_tail)?;
-                    end_jumps.push(self.emit_jump(Op::Jump, line));
-                    break;
-                }
+            if let Some(sym) = Self::get_symbol(test_expr)
+                && sym == self.known_symbols.else_
+            {
+                self.compile_expr(result_expr, is_tail)?;
+                end_jumps.push(self.emit_jump(Op::Jump, line));
+                break;
             }
 
             self.compile_expr(test_expr, false)?;
@@ -1279,10 +1271,10 @@ impl<'a> Compiler<'a> {
         for element in &elements[2..] {
             if let Expr::List { .. } = element {
                 let op_elements = ast::list_to_array(element);
-                if let Some(&first) = op_elements.first() {
-                    if let Some(op_sym) = Self::get_symbol(first) {
-                        self.known_effect_ops.insert(op_sym, name_sym);
-                    }
+                if let Some(&first) = op_elements.first()
+                    && let Some(op_sym) = Self::get_symbol(first)
+                {
+                    self.known_effect_ops.insert(op_sym, name_sym);
                 }
             }
         }
@@ -1573,15 +1565,14 @@ impl<'a> Compiler<'a> {
             Expr::List { .. } => {
                 let elems = ast::list_to_array(expr);
                 // Check if this is (unquote x)
-                if !elems.is_empty() {
-                    if let Some(sym) = Self::get_symbol(elems[0]) {
-                        if sym == self.known_symbols.unquote {
-                            if elems.len() != 2 {
-                                return Err(CompileError::new("unquote expects 1 argument", line));
-                            }
-                            return self.compile_expr(elems[1], false);
-                        }
+                if !elems.is_empty()
+                    && let Some(sym) = Self::get_symbol(elems[0])
+                    && sym == self.known_symbols.unquote
+                {
+                    if elems.len() != 2 {
+                        return Err(CompileError::new("unquote expects 1 argument", line));
                     }
+                    return self.compile_expr(elems[1], false);
                 }
                 // It's a list — walk the cons structure
                 self.compile_qq_list(expr, line)
@@ -1600,25 +1591,24 @@ impl<'a> Compiler<'a> {
                 // Check if head is (unquote-splicing x)
                 if let Expr::List { .. } = head.as_ref() {
                     let head_elems = ast::list_to_array(head);
-                    if !head_elems.is_empty() {
-                        if let Some(sym) = Self::get_symbol(head_elems[0]) {
-                            if sym == self.known_symbols.unquote_splicing {
-                                if head_elems.len() != 2 {
-                                    return Err(CompileError::new(
-                                        "unquote-splicing expects 1 argument",
-                                        line,
-                                    ));
-                                }
-                                // Push append global, compile spliced expr, compile rest, call append
-                                let append_name =
-                                    self.add_constant(ConstantValue::String("append".to_string()));
-                                self.emit_op(Op::PushGlobal, line, append_name);
-                                self.compile_expr(head_elems[1], false)?;
-                                self.compile_qq_list(tail, line)?;
-                                self.emit_op(Op::Call, line, 2);
-                                return Ok(());
-                            }
+                    if !head_elems.is_empty()
+                        && let Some(sym) = Self::get_symbol(head_elems[0])
+                        && sym == self.known_symbols.unquote_splicing
+                    {
+                        if head_elems.len() != 2 {
+                            return Err(CompileError::new(
+                                "unquote-splicing expects 1 argument",
+                                line,
+                            ));
                         }
+                        // Push append global, compile spliced expr, compile rest, call append
+                        let append_name =
+                            self.add_constant(ConstantValue::String("append".to_string()));
+                        self.emit_op(Op::PushGlobal, line, append_name);
+                        self.compile_expr(head_elems[1], false)?;
+                        self.compile_qq_list(tail, line)?;
+                        self.emit_op(Op::Call, line, 2);
+                        return Ok(());
                     }
                 }
                 // Normal element: compile_qq(head), compile_qq_list(tail), Construct Cons

@@ -3,6 +3,10 @@ name = "marlang-cli"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "marlang_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "mar"
 path = "src/main.rs"

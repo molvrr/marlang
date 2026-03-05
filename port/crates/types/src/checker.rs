@@ -1,14 +1,12 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
-use marlang_core::ast::Expr;
-use marlang_core::intern::Interner;
-
 use crate::ast::{Type, reset_effect_row_var_counter, reset_type_var_counter};
 use crate::env::{TypeEnv, empty_env};
 use crate::errors::TypeError;
 use crate::infer::{infer_program, infer_program_with_context};
+use marlang_core::ast::Expr;
+use marlang_core::intern::Interner;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 // ===== Module Loading Trait =====
 
@@ -29,12 +27,18 @@ pub trait TypeModuleLoader {
 
 enum ModuleCacheEntry {
     Loading,
-    Loaded(TypeEnv),
+    Loaded(Box<TypeEnv>),
 }
 
 /// Cache for type-checked modules, preventing duplicate work and detecting cycles.
 pub struct TypeModuleCache {
     entries: RefCell<HashMap<PathBuf, ModuleCacheEntry>>,
+}
+
+impl Default for TypeModuleCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TypeModuleCache {
@@ -62,13 +66,13 @@ impl TypeModuleCache {
     pub fn mark_loaded(&self, path: PathBuf, env: TypeEnv) {
         self.entries
             .borrow_mut()
-            .insert(path, ModuleCacheEntry::Loaded(env));
+            .insert(path, ModuleCacheEntry::Loaded(Box::new(env)));
     }
 }
 
 pub enum ModuleCacheState {
     Loading,
-    Loaded(TypeEnv),
+    Loaded(Box<TypeEnv>),
 }
 
 // ===== Type Check Entry Points =====

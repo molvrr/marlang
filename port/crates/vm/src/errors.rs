@@ -1,6 +1,5 @@
-use std::fmt;
-
 use marlang_core::span::LineMap;
+use std::fmt;
 
 #[derive(Debug, Clone)]
 pub struct CompileError {

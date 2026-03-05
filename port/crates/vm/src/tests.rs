@@ -1,9 +1,3 @@
-use std::path::{Path, PathBuf};
-
-use marlang_core::intern::Interner;
-use marlang_core::lexer::lex;
-use marlang_core::parser::parse;
-
 use crate::builtins::register_builtins;
 use crate::bytecode::{Chunk, ConstantValue, Op};
 use crate::compiler::{compile, compile_program};
@@ -14,6 +8,10 @@ use crate::modules::{ModuleLoader, expand_macros, run_program, run_program_from_
 use crate::object::VMObject;
 use crate::value::{Value, format_value};
 use crate::vm::VM;
+use marlang_core::intern::Interner;
+use marlang_core::lexer::lex;
+use marlang_core::parser::parse;
+use std::path::{Path, PathBuf};
 
 // --- Test Helpers ---
 

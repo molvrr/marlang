@@ -1,17 +1,15 @@
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-
-use marlang_core::ast::{self, Expr, LispValue};
-use marlang_core::intern::{Interner, Symbol};
-use marlang_core::lexer::lex;
-use marlang_core::parser::parse_with_interner;
-
 use crate::bytecode::ModuleId;
 use crate::compiler::compile_expr_with_context;
 use crate::errors::VMError;
 use crate::expand::MacroExpander;
 use crate::value::Value;
 use crate::vm::{VM, interpret};
+use marlang_core::ast::{self, Expr, LispValue};
+use marlang_core::intern::{Interner, Symbol};
+use marlang_core::lexer::lex;
+use marlang_core::parser::parse_with_interner;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 // --- Module state ---
 
@@ -38,6 +36,12 @@ pub struct ModuleLoader {
     cache: HashMap<PathBuf, ModuleState>,
     pub(crate) virtual_modules: HashMap<PathBuf, String>,
     pub stdlib_dir: Option<PathBuf>,
+}
+
+impl Default for ModuleLoader {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ModuleLoader {
@@ -77,9 +81,8 @@ impl ModuleLoader {
 
     /// Resolve an import path to an absolute path.
     fn resolve_path(&self, import_path: &str, from_file: &Path) -> Result<PathBuf, VMError> {
-        if import_path.starts_with("std:") {
+        if let Some(module_name) = import_path.strip_prefix("std:") {
             // Standard library import
-            let module_name = &import_path[4..];
             let stdlib = self.stdlib_dir.as_ref().ok_or_else(|| {
                 VMError::runtime(format!(
                     "Cannot resolve stdlib module '{}': stdlib directory not found",
@@ -248,8 +251,6 @@ pub fn run_program_from_exprs(
                 loader,
                 interner,
                 &mut known_constructors,
-                &mut known_effect_ops,
-                import_sym,
                 as_sym,
             )?;
             last_value = Value::nil();
@@ -273,10 +274,10 @@ pub fn run_program_from_exprs(
 
         // After prelude expressions, clear dirty_globals so prelude
         // definitions don't leak as module exports
-        if i + 1 == prelude_count {
-            if let Some(ref mut dirty) = vm.dirty_globals {
-                dirty.clear();
-            }
+        if i + 1 == prelude_count
+            && let Some(ref mut dirty) = vm.dirty_globals
+        {
+            dirty.clear();
         }
     }
 
@@ -288,10 +289,10 @@ pub fn run_program_from_exprs(
 fn is_import(expr: &Expr, import_sym: Symbol) -> bool {
     if let Expr::List { .. } = expr {
         let elements = ast::list_to_array(expr);
-        if let Some(first) = elements.first() {
-            if let Expr::Atom(LispValue::Symbol(sym), _) = first {
-                return *sym == import_sym;
-            }
+        if let Some(first) = elements.first()
+            && let Expr::Atom(LispValue::Symbol(sym), _) = first
+        {
+            return *sym == import_sym;
         }
     }
     false
@@ -320,31 +321,29 @@ fn parse_import_form(
     }
 
     // Check for `as alias`
-    if elements.len() == 4 {
-        if let Expr::Atom(LispValue::Symbol(sym), _) = elements[2] {
-            if *sym == as_sym {
-                if let Expr::Atom(LispValue::Symbol(alias), _) = elements[3] {
-                    let alias_name = interner.resolve(*alias).to_string();
-                    return Ok((path, ImportForm::Qualified(alias_name)));
-                }
-            }
-        }
+    if elements.len() == 4
+        && let Expr::Atom(LispValue::Symbol(sym), _) = elements[2]
+        && *sym == as_sym
+        && let Expr::Atom(LispValue::Symbol(alias), _) = elements[3]
+    {
+        let alias_name = interner.resolve(*alias).to_string();
+        return Ok((path, ImportForm::Qualified(alias_name)));
     }
 
     // Check for selective: (import "path" (name1 name2 ...))
-    if elements.len() == 3 {
-        if let Expr::List { .. } = elements[2] {
-            let names_exprs = ast::list_to_array(elements[2]);
-            let mut names = Vec::new();
-            for ne in &names_exprs {
-                if let Expr::Atom(LispValue::Symbol(sym), _) = ne {
-                    names.push(interner.resolve(*sym).to_string());
-                } else {
-                    return Err(VMError::runtime("Selective import expects symbols"));
-                }
+    if elements.len() == 3
+        && let Expr::List { .. } = elements[2]
+    {
+        let names_exprs = ast::list_to_array(elements[2]);
+        let mut names = Vec::new();
+        for ne in &names_exprs {
+            if let Expr::Atom(LispValue::Symbol(sym), _) = ne {
+                names.push(interner.resolve(*sym).to_string());
+            } else {
+                return Err(VMError::runtime("Selective import expects symbols"));
             }
-            return Ok((path, ImportForm::Selective(names)));
         }
+        return Ok((path, ImportForm::Selective(names)));
     }
 
     Err(VMError::runtime("Invalid import form"))
@@ -357,8 +356,6 @@ fn handle_import(
     loader: &mut ModuleLoader,
     interner: &Interner,
     known_constructors: &mut HashSet<Symbol>,
-    _known_effect_ops: &mut HashMap<Symbol, Symbol>,
-    _import_sym: Symbol,
     as_sym: Symbol,
 ) -> Result<(), VMError> {
     let elements = ast::list_to_array(expr);

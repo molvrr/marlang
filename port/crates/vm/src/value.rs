@@ -1,7 +1,6 @@
-use std::sync::Arc;
-
 use crate::bytecode::ConstantValue;
 use crate::object::VMObject;
+use std::sync::Arc;
 
 // NaN-boxing constants
 const QNAN: u64 = 0x7FFC_0000_0000_0000;
