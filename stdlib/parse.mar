@@ -1,0 +1,468 @@
+; Parser Combinator Library — Effect-Based
+;
+; Parsers are thunks (-> Unit {ParseState, Exception} a) that perform
+; effects to consume input and can fail via Exception/throw.
+;
+; Architecture:
+;   - ParseState effect manages input (peek, consume, get-input, set-input)
+;   - Exception/throw is used for parse failure (abort, no resume)
+;   - with-input: recursive handler that threads (List Char) state
+;   - run-safe: runs a parser in a fresh handler scope, catching throw
+;   - try: runs a parser in a fresh scope, restores input on failure
+;
+; Example usage:
+;   (import "std:parse" as p)
+;
+;   (define greeting (lambda ()
+;     (let ((word1 (chars->string (p/many1 p/letter))))
+;       (begin
+;         (p/spaces)
+;         (let ((word2 (chars->string (p/many1 p/letter))))
+;           (MkPair word1 word2))))))
+;
+;   (p/run greeting "hello world")
+;   ;; => (Ok (MkPair "hello" "world"))
+
+; ============================================================
+; Effect Declaration
+; ============================================================
+
+(effect ParseState
+  (peek      (-> Unit (Option Char)))
+  (consume   (-> Unit Char))
+  (get-input (-> Unit (List Char)))
+  (set-input (-> (List Char) Unit)))
+
+; ============================================================
+; Internal: Handler and Runner
+; ============================================================
+
+; with-input : (List Char) -> (-> Unit a) -> a
+; Recursive handler for ParseState. Threads input via handler recursion.
+; On empty consume, throws via Exception/throw.
+(define with-input (lambda (input thunk)
+  (handle
+    (thunk)
+    ((peek k) ->
+      (match input
+        (Nil       (with-input input (lambda () (resume k None))))
+        ((Cons c _) (with-input input (lambda () (resume k (Some c)))))))
+    ((consume k) ->
+      (match input
+        (Nil       (perform throw "unexpected end of input"))
+        ((Cons c rest) (with-input rest (lambda () (resume k c))))))
+    ((get-input k) ->
+      (with-input input (lambda () (resume k input))))
+    ((set-input new-input k) ->
+      (with-input new-input (lambda () (resume k nil)))))))
+
+; run-safe : (List Char) -> (-> Unit a) -> (Result String (Pair a (List Char)))
+; Runs a parser in a fresh handler scope. Returns the result
+; paired with the remaining input, or an error message.
+; NOTE: the inner-thunk is created BEFORE the handle block to work
+; around a compiler limitation with closure captures inside handle bodies.
+(define run-safe (lambda (input parser)
+  (let ((inner-thunk (lambda ()
+    (let ((val (parser)))
+      (let ((remaining (perform get-input)))
+        (MkPair val remaining))))))
+    (handle
+      (Ok (with-input input inner-thunk))
+      ((throw msg k) -> (Err msg))))))
+
+; ============================================================
+; Public: Runner
+; ============================================================
+
+; run : (-> Unit a) -> String -> (Result String a)
+; Run a parser on a string input. Returns (Ok value) or (Err message).
+(define run
+  (lambda (parser input)
+    (match (run-safe (string->chars input) parser)
+      ((Ok (MkPair val _)) (Ok val))
+      ((Err msg) (Err msg)))))
+
+; ============================================================
+; Internal: Char Equality
+; ============================================================
+
+; char= : Char -> Char -> Bool
+; Compare two characters by their codepoints.
+; (equal? is not reliable for Char values)
+(define char= (lambda (a b) (= (char-code a) (char-code b))))
+
+; ============================================================
+; Failure
+; ============================================================
+
+; fail : String -> a
+; Fail the current parse with an error message.
+(define fail (lambda (msg) (perform throw msg)))
+
+; ============================================================
+; Primitive Parsers
+; ============================================================
+
+; any-char : -> Char
+; Consume and return any single character. Fails at end of input.
+(define any-char (lambda () (perform consume)))
+
+; satisfy : (-> Char Bool) -> Char
+; Consume a character satisfying the predicate. Fail otherwise.
+(define satisfy (lambda (pred)
+  (let ((c (perform consume)))
+    (if (pred c) c
+      (fail (string-append "unexpected: " (char->string c)))))))
+
+; char : Char -> Char
+; Consume a specific character.
+(define char (lambda (expected)
+  (let ((c (perform consume)))
+    (if (char= c expected) c
+      (fail (string-append "expected '"
+        (string-append (char->string expected)
+          (string-append "', got '"
+            (string-append (char->string c) "'")))))))))
+
+; string : String -> String
+; Consume a specific string, character by character.
+(define string (lambda (expected)
+  (define go (lambda (chars)
+    (match chars
+      (Nil expected)
+      ((Cons c rest)
+        (let ((got (perform consume)))
+          (if (char= got c)
+            (go rest)
+            (fail (string-append "expected \""
+              (string-append expected
+                (string-append "\", got '"
+                  (string-append (char->string got) "'")))))))))))
+  (go (string->chars expected))))
+
+; peek-char : -> (Option Char)
+; Look at the next character without consuming it.
+(define peek-char (lambda () (perform peek)))
+
+; eof : -> Unit
+; Succeed only if the input is exhausted.
+(define eof (lambda ()
+  (match (perform peek)
+    (None nil)
+    ((Some c) (fail (string-append "expected end of input, got '"
+                (string-append (char->string c) "'")))))))
+
+; ============================================================
+; Core Combinators
+; ============================================================
+
+; try : (-> Unit a) -> (Option a)
+; Try a parser. On failure, restore input and return None.
+; Runs the parser in a fresh handler scope so failures are isolated.
+(define try (lambda (parser)
+  (let ((saved (perform get-input)))
+    (match (run-safe saved parser)
+      ((Ok (MkPair val remaining))
+        (begin
+          (perform set-input remaining)
+          (Some val)))
+      ((Err _) None)))))
+
+; or-else : (-> Unit a) -> (-> Unit a) -> a
+; Try the first parser; if it fails, try the second.
+(define or-else (lambda (p1 p2)
+  (match (try p1)
+    ((Some x) x)
+    (None (p2)))))
+
+; choice : (List (-> Unit a)) -> a
+; Try parsers in order, return the first success. Fail if none succeed.
+(define choice (lambda (parsers)
+  (match parsers
+    (Nil (fail "no alternatives matched"))
+    ((Cons p Nil) (p))
+    ((Cons p rest) (or-else p (lambda () (choice rest)))))))
+
+; many : (-> Unit a) -> (List a)
+; Parse zero or more repetitions.
+(define many (lambda (parser)
+  (match (try parser)
+    (None Nil)
+    ((Some x) (Cons x (many parser))))))
+
+; many1 : (-> Unit a) -> (List a)
+; Parse one or more repetitions.
+(define many1 (lambda (parser)
+  (let ((first (parser)))
+    (Cons first (many parser)))))
+
+; optional : (-> Unit a) -> (Option a)
+; Try to parse; return None on failure (restoring input).
+(define optional (lambda (parser)
+  (try parser)))
+
+; seq : (-> Unit a) -> (-> Unit b) -> (Pair a b)
+; Parse two things in sequence, return both as a Pair.
+(define seq (lambda (p1 p2)
+  (let ((a (p1)))
+    (let ((b (p2)))
+      (MkPair a b)))))
+
+; map : (-> a b) -> (-> Unit a) -> b
+; Apply a function to the result of a parser.
+(define map (lambda (f parser) (f (parser))))
+
+; flat-map : (-> a (-> Unit b)) -> (-> Unit a) -> b
+; Parse, then use the result to choose the next parser.
+(define flat-map (lambda (f parser)
+  ((f (parser)))))
+
+; between : (-> Unit l) -> (-> Unit r) -> (-> Unit a) -> a
+; Parse something between delimiters. Discards delimiter results.
+(define between (lambda (left right parser)
+  (begin
+    (left)
+    (let ((result (parser)))
+      (begin (right) result)))))
+
+; sep-by : (-> Unit s) -> (-> Unit a) -> (List a)
+; Parse zero or more occurrences separated by a separator.
+(define sep-by (lambda (sep parser)
+  (match (try parser)
+    (None Nil)
+    ((Some first) (Cons first (many (lambda () (begin (sep) (parser)))))))))
+
+; sep-by1 : (-> Unit s) -> (-> Unit a) -> (List a)
+; Parse one or more occurrences separated by a separator.
+(define sep-by1 (lambda (sep parser)
+  (let ((first (parser)))
+    (Cons first (many (lambda () (begin (sep) (parser))))))))
+
+; label : String -> (-> Unit a) -> a
+; Give a parser a custom error message on failure.
+(define label (lambda (msg parser)
+  (let ((saved (perform get-input)))
+    (match (run-safe saved parser)
+      ((Ok (MkPair val remaining))
+        (begin
+          (perform set-input remaining)
+          val))
+      ((Err _) (fail msg))))))
+
+; skip : (-> Unit a) -> Unit
+; Run a parser and discard its result.
+(define skip (lambda (parser) (begin (parser) nil)))
+
+; skip-many : (-> Unit a) -> Unit
+; Skip zero or more occurrences.
+(define skip-many (lambda (parser) (begin (many parser) nil)))
+
+; skip-many1 : (-> Unit a) -> Unit
+; Skip one or more occurrences.
+(define skip-many1 (lambda (parser) (begin (many1 parser) nil)))
+
+; ============================================================
+; Character Predicates
+; ============================================================
+
+; is-digit : Char -> Bool
+(define is-digit (lambda (c)
+  (let ((code (char-code c)))
+    (if (>= code 48) (<= code 57) #f))))
+
+; is-lower : Char -> Bool
+(define is-lower (lambda (c)
+  (let ((code (char-code c)))
+    (if (>= code 97) (<= code 122) #f))))
+
+; is-upper : Char -> Bool
+(define is-upper (lambda (c)
+  (let ((code (char-code c)))
+    (if (>= code 65) (<= code 90) #f))))
+
+; is-alpha : Char -> Bool
+(define is-alpha (lambda (c)
+  (if (is-lower c) #t (is-upper c))))
+
+; is-alnum : Char -> Bool
+(define is-alnum (lambda (c)
+  (if (is-alpha c) #t (is-digit c))))
+
+; is-space : Char -> Bool
+(define is-space (lambda (c)
+  (let ((code (char-code c)))
+    (if (= code 32) #t
+    (if (= code 9) #t
+    (if (= code 10) #t
+    (if (= code 13) #t
+    #f)))))))
+
+; is-hex-digit : Char -> Bool
+(define is-hex-digit (lambda (c)
+  (if (is-digit c) #t
+  (let ((code (char-code c)))
+    (if (if (>= code 65) (<= code 70) #f) #t
+    (if (>= code 97) (<= code 102) #f))))))
+
+; ============================================================
+; Character Parsers
+; ============================================================
+
+; digit : -> Char
+(define digit (lambda () (label "expected digit" (lambda () (satisfy is-digit)))))
+
+; lower : -> Char
+(define lower (lambda () (label "expected lowercase letter" (lambda () (satisfy is-lower)))))
+
+; upper : -> Char
+(define upper (lambda () (label "expected uppercase letter" (lambda () (satisfy is-upper)))))
+
+; letter : -> Char
+(define letter (lambda () (label "expected letter" (lambda () (satisfy is-alpha)))))
+
+; alnum : -> Char
+(define alnum (lambda () (label "expected alphanumeric" (lambda () (satisfy is-alnum)))))
+
+; space : -> Char
+(define space (lambda () (satisfy is-space)))
+
+; hex-digit : -> Char
+(define hex-digit (lambda () (label "expected hex digit" (lambda () (satisfy is-hex-digit)))))
+
+; spaces : -> Unit
+; Skip zero or more whitespace characters.
+(define spaces (lambda () (skip-many space)))
+
+; spaces1 : -> Unit
+; Skip one or more whitespace characters.
+(define spaces1 (lambda () (skip-many1 space)))
+
+; one-of : String -> Char
+; Parse any character that appears in the given string.
+(define one-of (lambda (chars)
+  (define member (lambda (c lst)
+    (match lst
+      (Nil #f)
+      ((Cons x rest) (if (char= c x) #t (member c rest))))))
+  (let ((char-list (string->chars chars)))
+    (label (string-append "expected one of \"" (string-append chars "\""))
+      (lambda () (satisfy (lambda (c) (member c char-list))))))))
+
+; none-of : String -> Char
+; Parse any character NOT in the given string.
+(define none-of (lambda (chars)
+  (define member (lambda (c lst)
+    (match lst
+      (Nil #f)
+      ((Cons x rest) (if (char= c x) #t (member c rest))))))
+  (let ((char-list (string->chars chars)))
+    (satisfy (lambda (c) (if (member c char-list) #f #t))))))
+
+; ============================================================
+; Numeric Parsers
+; ============================================================
+
+; nat : -> Float
+; Parse a natural number (one or more digits).
+(define nat (lambda ()
+  (let ((digits (many1 digit)))
+    (let ((s (chars->string digits)))
+      (match (__try-string->number s)
+        ((Some n) n)
+        (None (fail (string-append "invalid number: " s))))))))
+
+; integer : -> Float
+; Parse an integer (optional minus sign, then digits).
+(define integer (lambda ()
+  (let ((sign (try (lambda () (char (char-from-code 45))))))
+    (let ((n (nat)))
+      (match sign
+        (None n)
+        ((Some _) (negate. n)))))))
+
+; ============================================================
+; Higher-Order Combinators
+; ============================================================
+
+; chainl1 : (-> Unit (-> a a a)) -> (-> Unit a) -> a
+; Left-associative operator chain: p (op p)*
+; NOTE: go takes op and parser explicitly to work around a compiler
+; limitation where inner define doesn't capture enclosing lambda params.
+(define chainl1 (lambda (op parser)
+  (define go (lambda (op parser acc)
+    (match (try (lambda () (let ((f (op))) (let ((x (parser))) (MkPair f x)))))
+      (None acc)
+      ((Some (MkPair f x)) (go op parser (f acc x))))))
+  (go op parser (parser))))
+
+; chainr1 : (-> Unit (-> a a a)) -> (-> Unit a) -> a
+; Right-associative operator chain.
+(define chainr1 (lambda (op parser)
+  (define go (lambda (op parser)
+    (let ((x (parser)))
+      (match (try (lambda () (let ((f (op))) (MkPair f (go op parser)))))
+        (None x)
+        ((Some (MkPair f rest)) (f x rest))))))
+  (go op parser)))
+
+; not-followed-by : (-> Unit a) -> Unit
+; Succeed without consuming if the parser fails. Fail if it succeeds.
+(define not-followed-by (lambda (parser)
+  (match (try parser)
+    (None nil)
+    ((Some _) (fail "unexpected")))))
+
+; lookahead : (-> Unit a) -> a
+; Run parser and return its result, but restore the input position.
+(define lookahead (lambda (parser)
+  (let ((saved (perform get-input)))
+    (let ((result (parser)))
+      (begin (perform set-input saved) result)))))
+
+; count : Int -> (-> Unit a) -> (List a)
+; Parse exactly n occurrences.
+(define count (lambda (n parser)
+  (if (<= n 0) Nil
+    (let ((x (parser)))
+      (Cons x (count (- n 1) parser))))))
+
+; many-till : (-> Unit a) -> (-> Unit e) -> (List a)
+; Parse p repeatedly until end succeeds. Consumes the end token.
+(define many-till (lambda (parser end)
+  (match (try end)
+    ((Some _) Nil)
+    (None (let ((x (parser)))
+            (Cons x (many-till parser end)))))))
+
+; token : (-> Unit a) -> (-> Unit a)
+; Wrap a parser to skip trailing whitespace.
+(define token (lambda (parser)
+  (lambda ()
+    (let ((result (parser)))
+      (begin (spaces) result)))))
+
+; symbol : String -> (-> Unit String)
+; Parse a specific string token, skipping trailing whitespace.
+(define symbol (lambda (s)
+  (token (lambda () (string s)))))
+
+; parens : (-> Unit a) -> a
+; Parse something between parentheses.
+(define parens (lambda (parser)
+  (between (lambda () (begin (char (char-from-code 40)) (spaces)))
+           (lambda () (char (char-from-code 41)))
+           parser)))
+
+; braces : (-> Unit a) -> a
+; Parse something between curly braces.
+(define braces (lambda (parser)
+  (between (lambda () (begin (char (char-from-code 123)) (spaces)))
+           (lambda () (char (char-from-code 125)))
+           parser)))
+
+; brackets : (-> Unit a) -> a
+; Parse something between square brackets.
+(define brackets (lambda (parser)
+  (between (lambda () (begin (char (char-from-code 91)) (spaces)))
+           (lambda () (char (char-from-code 93)))
+           parser)))

@@ -1,13 +1,37 @@
+- [ ] match on ADTs (Option, List, etc.) doesn't work inside defmacro bodies.
+      The expansion VM compiles each prelude expression independently via
+      compile_program, which starts with an empty known_constructors set.
+      So data definitions (e.g. (data (Option a) None (Some a))) don't carry
+      constructor knowledge forward to subsequent compilations. In match
+      patterns, None/Some are treated as variable patterns instead of
+      constructors, causing (Some 5) to match the None branch.
+      Workaround: avoid match on Option/List inside macros; use string-contains,
+      nil?, car/cdr, etc. instead.
 - [ ] Cleanup code
+- [ ] equal? broken for Char — values_equal in vm.rs doesn't handle the Char case,
+      falls through to false. Chars are NaN-boxed but aren't numbers, bools, nil,
+      or objects. Workaround: compare via (= (char-code a) (char-code b)).
+- [ ] Inner define doesn't capture enclosing lambda parameters — closures created
+      by `define` inside a lambda body fail to capture variables from the enclosing
+      lambda's parameters when the closure is later executed in a different handler
+      scope (e.g. passed through run-safe/try which runs it in a fresh handle block).
+      Workaround: pass captured variables explicitly as function arguments to the
+      inner define'd function.
+- [ ] Cons and List internal implementations
 - [ ] Exhaustiveness check for strings
 - [ ] JIT
 - [ ] Remove NIL:   self.emit_constant(ConstantValue::Nil, line);
 - [ ] Cross process messaging
+- [ ] stdlib: json
+- [x] stdlib: parser combinators
 - [ ] stdlib: persistent data structures
 - [ ] stdlib: synchronization primitives
 - [ ] stdlib: add bytewise operators
 - [ ] stdlib: add byte manipulation functions
 - [ ] parse error filename, line number and column
+- [ ] mutable references
+- [ ] first class handler values
+- [ ] multi shot continuations?
 - [x] mar disasm when importing something doesn't work
 - [x] Suggestion for disambiguating same operation name for effect handler isn't deterministic
         Maybe we should order effects somehow, so we aways suggest the same operation?

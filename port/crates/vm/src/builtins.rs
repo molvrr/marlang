@@ -868,6 +868,45 @@ pub fn register_builtins(vm: &mut VM) {
         });
     }
 
+    // (unshadow context-symbol datum-symbol)
+    // Copies the hygiene marks from context-symbol onto datum-symbol.
+    // Use this in macros that intentionally introduce new bindings visible
+    // at the call site (e.g. defrecord generating accessor functions).
+    builtin(vm, "unshadow", |_vm, args| {
+        if args.len() != 2 {
+            return Err(VMError::runtime("unshadow expects 2 arguments"));
+        }
+        let ctx = match args[0].as_object() {
+            Some(VMObject::Symbol(s)) => s.as_str().to_string(),
+            _ => {
+                return Err(VMError::runtime(
+                    "unshadow: first argument must be a symbol",
+                ));
+            }
+        };
+        let datum = match args[1].as_object() {
+            Some(VMObject::Symbol(s)) => s.as_str().to_string(),
+            _ => {
+                return Err(VMError::runtime(
+                    "unshadow: second argument must be a symbol",
+                ));
+            }
+        };
+        // Extract the mark suffix from the context symbol (e.g. "name~1" → "~1")
+        let mark_suffix = match ctx.find('~') {
+            Some(pos) => {
+                let rest = &ctx[pos..];
+                if rest[1..].bytes().all(|b| b.is_ascii_digit() || b == b'~') {
+                    rest
+                } else {
+                    ""
+                }
+            }
+            None => "",
+        };
+        Ok(Value::symbol(format!("{}{}", datum, mark_suffix)))
+    });
+
     // Error
     builtin(vm, "error", |_vm, args| {
         let msg = if let Some(s) = args.first().and_then(|a| a.as_string()) {

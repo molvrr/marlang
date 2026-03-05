@@ -1,0 +1,130 @@
+;; defrecord: generates an ADT and accessor functions for each field.
+;;
+;; Usage:
+;;   (defrecord User
+;;     (name : String)
+;;     (age : Int))
+;;
+;; Expands to:
+;;   (data User (User String Int))
+;;   (define user-name (lambda (r) (match r ((User f0 f1) f0))))
+;;   (define user-age  (lambda (r) (match r ((User f0 f1) f1))))
+
+(defmacro defrecord (record-name . fields)
+  ;; --- helpers ---
+
+  ;; Extract field name from a spec like (name : String)
+  (define field-name (lambda (spec) (car spec)))
+
+  ;; Extract field type from a spec like (name : String)
+  (define field-type (lambda (spec) (car (cdr (cdr spec)))))
+
+  ;; Build a list of n gensyms: (f0 f1 f2 ...)
+  (define make-vars
+    (lambda (n i)
+      (if (= i n) Nil
+        (Cons (string->symbol (string-append "f" (number->string i)))
+              (make-vars n (+ i 1))))))
+
+  ;; Build the data form: (data RecordName (RecordName Type1 Type2 ...))
+  (define build-data-form
+    (lambda (name field-types)
+      (cons 'data (cons name (cons (cons name field-types) Nil)))))
+
+  ;; Build an accessor: (define <acc-name> (lambda (r) (match r ((Ctor v0 v1 ...) vi))))
+  (define build-accessor
+    (lambda (acc-name ctor-name vars target-var)
+      (define r-sym (gensym))
+      (cons 'define
+        (cons acc-name
+          (cons
+            (cons 'lambda
+              (cons (cons r-sym Nil)
+                (cons
+                  (cons 'match
+                    (cons r-sym
+                      (cons
+                        (cons (cons ctor-name vars)
+                          (cons target-var Nil))
+                        Nil)))
+                  Nil)))
+            Nil)))))
+
+  ;; Strip hygiene marks from a symbol's string (e.g. "name~1" → "name")
+  (define strip-sym
+    (lambda (sym)
+      (define s (symbol->string sym))
+      (if (string-contains s "~")
+        (car (string-split s "~"))
+        s)))
+
+  ;; Build accessor name: "recordname-fieldname"
+  (define make-accessor-name
+    (lambda (rec-name field-sym ctx)
+      (unshadow ctx
+        (string->symbol
+          (string-append
+            (string-to-lower (strip-sym rec-name))
+            (string-append "-" (strip-sym field-sym)))))))
+
+  ;; Get the i-th element of a list
+  (define list-ref
+    (lambda (lst i)
+      (if (= i 0) (car lst)
+        (list-ref (cdr lst) (- i 1)))))
+
+  ;; Build all accessor defines
+  (define build-accessors
+    (lambda (rec-name field-specs vars ctx i)
+      (if (nil? field-specs) Nil
+        (Cons
+          (build-accessor
+            (make-accessor-name rec-name (field-name (car field-specs)) ctx)
+            rec-name
+            vars
+            (list-ref vars i))
+          (build-accessors rec-name (cdr field-specs) vars ctx (+ i 1))))))
+
+  ;; Count fields
+  (define count-fields
+    (lambda (fs)
+      (if (nil? fs) 0 (+ 1 (count-fields (cdr fs))))))
+
+  ;; Collect field types into a list
+  (define collect-types
+    (lambda (fs)
+      (if (nil? fs) Nil
+        (Cons (field-type (car fs)) (collect-types (cdr fs))))))
+
+  ;; --- main expansion ---
+  (define n (count-fields fields))
+  (define vars (make-vars n 0))
+  (define types (collect-types fields))
+  (define data-form (build-data-form record-name types))
+  (define accessor-forms (build-accessors record-name fields vars record-name 0))
+
+  ;; Return (begin data-form accessor1 accessor2 ...)
+  (cons 'begin (Cons data-form accessor-forms)))
+
+;; --- Test ---
+
+(import "std:io" as io)
+
+(defrecord User
+  (name : String)
+  (age : Int))
+
+(define alice (User "Alice" 30))
+
+(io/println (user-name alice))
+(io/println (show (user-age alice)))
+
+(defrecord Point
+  (x : Float)
+  (y : Float)
+  (z : Float))
+
+(define p (Point 1.0 2.0 3.0))
+(io/println (show (point-x p)))
+(io/println (show (point-y p)))
+(io/println (show (point-z p)))

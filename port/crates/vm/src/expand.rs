@@ -49,6 +49,7 @@ pub struct MacroExpander<'a> {
     #[allow(dead_code)]
     quasiquote_sym: Symbol,
     import_sym: Symbol,
+    begin_sym: Symbol,
     as_sym: Symbol,
     next_mark: u64,
     expansion_depth: u32,
@@ -85,6 +86,7 @@ impl<'a> MacroExpander<'a> {
             quote_sym: interner.intern("quote"),
             quasiquote_sym: interner.intern("quasiquote"),
             import_sym: interner.intern("import"),
+            begin_sym: interner.intern("begin"),
             as_sym: interner.intern("as"),
             next_mark: 1,
             expansion_depth: 0,
@@ -153,6 +155,10 @@ impl<'a> MacroExpander<'a> {
 
     /// Expand all top-level expressions.
     /// Returns the expanded expressions and any macro definitions found (for cross-module use).
+    ///
+    /// Per R5RS §5.1, top-level `(begin ...)` is a splicing form: its children
+    /// are flattened into the enclosing sequence of top-level forms. This allows
+    /// macros to expand into multiple top-level definitions.
     pub fn expand_all(&mut self, exprs: Vec<Expr>) -> Result<Vec<Expr>, MacroError> {
         let mut result = Vec::new();
 
@@ -165,11 +171,45 @@ impl<'a> MacroExpander<'a> {
                 result.push(expr);
             } else {
                 let expanded = self.expand_expr(expr)?;
-                result.push(expanded);
+                self.splice_top_level(expanded, &mut result)?;
             }
         }
 
         Ok(result)
+    }
+
+    /// If `expr` is a top-level `(begin ...)`, recursively splice its children
+    /// into `out`. Otherwise push the expression as-is.
+    fn splice_top_level(&mut self, expr: Expr, out: &mut Vec<Expr>) -> Result<(), MacroError> {
+        if self.is_begin(&expr) {
+            let children: Vec<Expr> = ast::list_to_array(&expr)
+                .into_iter()
+                .skip(1)
+                .cloned()
+                .collect();
+            for child in children {
+                if self.is_defmacro(&child) {
+                    self.register_macro(&child)?;
+                } else {
+                    self.splice_top_level(child, out)?;
+                }
+            }
+        } else {
+            out.push(expr);
+        }
+        Ok(())
+    }
+
+    fn is_begin(&self, expr: &Expr) -> bool {
+        if let Expr::List { .. } = expr {
+            let elements = ast::list_to_array(expr);
+            if let Some(first) = elements.first()
+                && let Expr::Atom(LispValue::Symbol(sym), _) = first
+            {
+                return *sym == self.begin_sym;
+            }
+        }
+        false
     }
 
     /// Get the exported macros (for cross-module imports).
@@ -307,10 +347,20 @@ impl<'a> MacroExpander<'a> {
             .cloned()
             .ok_or_else(|| MacroError::new("Macro transformer not found"))?;
 
-        // Check arity for closures
+        // Check arity for closures (support variadic macros with dot params)
         if let Some(VMObject::Closure(closure)) = transformer.as_object() {
             let expected = closure.proto.arity as usize;
-            if arg_values.len() != expected {
+            if closure.proto.is_variadic {
+                if arg_values.len() < expected {
+                    let name = self.interner.resolve(macro_sym);
+                    return Err(MacroError::new(format!(
+                        "Macro '{}' expects at least {} arguments, got {}",
+                        name,
+                        expected,
+                        arg_values.len()
+                    )));
+                }
+            } else if arg_values.len() != expected {
                 let name = self.interner.resolve(macro_sym);
                 return Err(MacroError::new(format!(
                     "Macro '{}' expects {} arguments, got {}",
@@ -321,7 +371,33 @@ impl<'a> MacroExpander<'a> {
             }
         }
 
-        let result = call_value(&mut self.vm, &transformer, &arg_values)
+        // Pack variadic rest args into a Cons/Nil chain (matching VM's Op::Call
+        // behavior, but using ADT values so car/cdr/nil? work in macro bodies)
+        let call_args = if let Some(VMObject::Closure(closure)) = transformer.as_object() {
+            if closure.proto.is_variadic {
+                let required = closure.proto.arity as usize;
+                let mut packed = arg_values[..required].to_vec();
+                // Build a Cons/Nil list from the rest args
+                let mut rest_list = Value::object(VMObject::AdtValue {
+                    tag: "Nil".to_string(),
+                    fields: vec![],
+                });
+                for val in arg_values[required..].iter().rev() {
+                    rest_list = Value::object(VMObject::AdtValue {
+                        tag: "Cons".to_string(),
+                        fields: vec![val.clone(), rest_list],
+                    });
+                }
+                packed.push(rest_list);
+                packed
+            } else {
+                arg_values
+            }
+        } else {
+            arg_values
+        };
+
+        let result = call_value(&mut self.vm, &transformer, &call_args)
             .map_err(|e| MacroError::new(format!("Macro expansion runtime error: {}", e)))?;
 
         // 4. Convert back to AST (use the macro call site span so type errors
@@ -725,6 +801,7 @@ fn build_immune_set(interner: &Interner) -> HashSet<Symbol> {
         "unquote",
         "unquote-splicing",
         "defmacro",
+        "unshadow",
     ];
     names.iter().map(|n| interner.intern(n)).collect()
 }
