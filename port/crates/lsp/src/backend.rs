@@ -1,4 +1,4 @@
-use crate::definition::find_definition;
+use crate::definition::find_definitions;
 use crate::diagnostics::check_document;
 use crate::document::DocumentState;
 use crate::hover::{span_to_range, type_at_position};
@@ -267,17 +267,50 @@ impl LanguageServer for MarlangBackend {
             None => return Ok(None),
         };
 
-        let def_span = match find_definition(context, &source, position) {
-            Some(s) => s,
-            None => return Ok(None),
-        };
+        let def_locs = find_definitions(context, &source, position);
+        if def_locs.is_empty() {
+            return Ok(None);
+        }
 
-        let line_map = LineMap::new(&source);
-        let range = span_to_range(&line_map, def_span);
+        let mut locations = Vec::new();
+        let same_file_line_map = LineMap::new(&source);
 
-        Ok(Some(GotoDefinitionResponse::Scalar(Location {
-            uri: uri.clone(),
-            range,
-        })))
+        for def_loc in def_locs {
+            match def_loc.file_path {
+                None => {
+                    // Same-file definition
+                    let range = span_to_range(&same_file_line_map, def_loc.span);
+                    locations.push(Location {
+                        uri: uri.clone(),
+                        range,
+                    });
+                }
+                Some(file_path) => {
+                    // Cross-file definition — read the target file to build a LineMap
+                    let target_source = match std::fs::read_to_string(&file_path) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    let target_uri = match Url::from_file_path(&file_path) {
+                        Ok(u) => u,
+                        Err(_) => continue,
+                    };
+                    let line_map = LineMap::new(&target_source);
+                    let range = span_to_range(&line_map, def_loc.span);
+                    locations.push(Location {
+                        uri: target_uri,
+                        range,
+                    });
+                }
+            }
+        }
+
+        match locations.len() {
+            0 => Ok(None),
+            1 => Ok(Some(GotoDefinitionResponse::Scalar(
+                locations.into_iter().next().unwrap(),
+            ))),
+            _ => Ok(Some(GotoDefinitionResponse::Array(locations))),
+        }
     }
 }

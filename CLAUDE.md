@@ -126,6 +126,10 @@ Without a handler, `throw` crashes the fiber. Note: `string->number` (defined in
 - Keep all `use` statements in a single group with no blank lines between them. Do not separate std, external, and crate imports into separate groups.
 - Declare `mod` items only in `lib.rs` (or `mod.rs` for submodules), never in `main.rs`. Binary crates should have a `lib.rs` that owns the module tree; `main.rs` imports from the lib crate.
 
+## General Principles
+
+- Never take hacky approaches. Always implement the proper, clean solution.
+
 ## Workflow
 
 ### After writing Rust code

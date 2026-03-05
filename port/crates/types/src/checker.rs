@@ -124,12 +124,18 @@ pub fn type_check_with_modules(
 ///
 /// Like `type_check_with_modules`, but also populates the provided `InferContext`
 /// with type information, definitions, and references for hover and go-to-definition.
+///
+/// `prelude_count` is the number of top-level expressions that came from the prelude.
+/// These are always the first `prelude_count` elements in `exprs`. After processing them,
+/// the context's `prelude_definition_count` is set so the LSP can distinguish prelude
+/// definitions (which have spans in `prelude.mar`) from user definitions.
 pub fn type_check_with_context(
     exprs: &[Expr],
     interner: &Interner,
     file_path: Option<&Path>,
     loader: &dyn TypeModuleLoader,
     context: &RefCell<InferContext>,
+    prelude_count: usize,
 ) -> Result<TypeCheckOutput, TypeError> {
     reset_type_var_counter();
     reset_effect_row_var_counter();
@@ -137,7 +143,14 @@ pub fn type_check_with_context(
     let env = empty_env();
     let cache = TypeModuleCache::new();
     let session = InferSession::with_context(interner, context);
-    let (env, types) =
-        infer_program_with_session(&env, exprs, &session, file_path, loader, &cache)?;
+    let (env, types) = infer_program_with_session(
+        &env,
+        exprs,
+        &session,
+        file_path,
+        loader,
+        &cache,
+        prelude_count,
+    )?;
     Ok(TypeCheckOutput { env, types })
 }

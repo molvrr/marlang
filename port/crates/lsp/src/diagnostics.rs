@@ -249,13 +249,22 @@ pub fn check_document(source: &str, file_path: Option<&Path>) -> CheckResult {
     // Stage 4: Type check with context collection
     let context = RefCell::new(InferContext::new());
     let type_loader = LspModuleLoader::new(&loader);
-    match type_check_with_context(
+    let result = type_check_with_context(
         &expanded.exprs,
         &interner,
         file_path,
         &type_loader,
         &context,
-    ) {
+        expanded.prelude_count,
+    );
+
+    // Set the prelude path so find_definitions can route prelude definitions
+    // to the actual prelude.mar file on disk for cross-file navigation.
+    if let Some(stdlib_dir) = &loader.stdlib_dir {
+        context.borrow_mut().prelude_path = Some(stdlib_dir.join("prelude.mar"));
+    }
+
+    match result {
         Ok(_) => {
             let context = context.into_inner();
             CheckResult {

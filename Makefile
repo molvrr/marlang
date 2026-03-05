@@ -11,6 +11,7 @@ build:
 install: build
 	@mkdir -p $(BIN_DIR) $(STDLIB_DIR)
 	cp $(CARGO_TARGET) $(BIN_DIR)/mar
+	@if command -v codesign >/dev/null 2>&1; then codesign --force --sign - $(BIN_DIR)/mar; fi
 	cp stdlib/*.mar $(STDLIB_DIR)/
 	@echo ""
 	@echo "Installed to $(MARLANG_HOME)"

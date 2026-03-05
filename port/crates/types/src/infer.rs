@@ -8,9 +8,23 @@ use marlang_core::intern::Interner;
 use marlang_core::span::Span;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ===== Inference Session =====
+
+/// The kind of symbol being defined or referenced.
+/// Used to distinguish between different namespaces so that, e.g.,
+/// a variable `println` and an effect operation `println` don't collide
+/// in go-to-definition lookups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolKind {
+    /// A variable binding: top-level define, let binding, lambda parameter.
+    Variable,
+    /// An effect operation: declared inside an `(effect ...)` form.
+    EffectOp,
+    /// An effect name: the name in `(effect Name ...)`.
+    Effect,
+}
 
 /// Bundles the interner with an optional context collector for LSP features.
 ///
@@ -48,16 +62,20 @@ impl<'a> InferSession<'a> {
     }
 
     /// Record a definition site, if context collection is active.
-    fn record_definition(&self, name: &str, span: Span) {
+    fn record_definition(&self, name: &str, span: Span, kind: SymbolKind) {
         if let Some(ctx) = &self.context {
-            ctx.borrow_mut().definitions.push((name.to_string(), span));
+            ctx.borrow_mut()
+                .definitions
+                .push((name.to_string(), span, kind));
         }
     }
 
     /// Record a reference to a name, if context collection is active.
-    fn record_reference(&self, name: &str, span: Span) {
+    fn record_reference(&self, name: &str, span: Span, kind: SymbolKind) {
         if let Some(ctx) = &self.context {
-            ctx.borrow_mut().references.push((span, name.to_string()));
+            ctx.borrow_mut()
+                .references
+                .push((span, name.to_string(), kind));
         }
     }
 }
@@ -68,11 +86,26 @@ impl<'a> InferSession<'a> {
 pub struct InferContext {
     /// Every inferred expression: span -> type.
     pub type_map: Vec<(Span, Type)>,
-    /// Definition sites: (name, span). Recorded in program order.
+    /// Definition sites: (name, span, kind). Recorded in program order.
     /// For scoped definitions (lambda params, let bindings), later entries shadow earlier ones.
-    pub definitions: Vec<(String, Span)>,
-    /// Reference sites: (use_span, name). Recorded when a variable/constructor/effect-op is resolved.
-    pub references: Vec<(Span, String)>,
+    pub definitions: Vec<(String, Span, SymbolKind)>,
+    /// Reference sites: (use_span, name, kind). Recorded when a variable/constructor/effect-op is resolved.
+    pub references: Vec<(Span, String, SymbolKind)>,
+    /// Cross-file definitions: maps an imported name (possibly qualified like "L/map")
+    /// to (original_name, file_path, span_in_that_file, kind).
+    /// Populated during import processing for go-to-definition across files.
+    pub cross_file_definitions: Vec<(String, String, PathBuf, Span, SymbolKind)>,
+    /// Per-module definition cache: maps a resolved module path to the definitions
+    /// recorded during its type-checking. Used to serve cross-file definitions
+    /// when a module is loaded from the TypeModuleCache on subsequent imports.
+    pub module_definitions: HashMap<PathBuf, Vec<(String, Span, SymbolKind)>>,
+    /// Number of definitions that came from the prelude. These definitions have
+    /// spans that are byte offsets within `prelude.mar`, not the user's file.
+    /// Set by the LSP after type-checking the prelude portion of the expression list.
+    pub prelude_definition_count: usize,
+    /// Path to the prelude file on disk. Used by `find_definitions` to route
+    /// prelude definitions to the correct file for cross-file navigation.
+    pub prelude_path: Option<PathBuf>,
 }
 
 impl InferContext {
@@ -81,6 +114,20 @@ impl InferContext {
             type_map: Vec::new(),
             definitions: Vec::new(),
             references: Vec::new(),
+            cross_file_definitions: Vec::new(),
+            module_definitions: HashMap::new(),
+            prelude_definition_count: 0,
+            prelude_path: None,
+        }
+    }
+
+    /// Apply a substitution to all recorded types, resolving type variables.
+    ///
+    /// Called at the end of type inference to replace unresolved type variables
+    /// (e.g. `t0`, `t1`) with their final concrete types (e.g. `Int`, `String`).
+    pub fn apply_substitution(&mut self, subst: &Substitution) {
+        for entry in &mut self.type_map {
+            entry.1 = apply_subst(subst, &entry.1);
         }
     }
 }
@@ -727,7 +774,7 @@ fn infer_atom(
                     span: Some(span),
                 })?;
             let ty = instantiate(&scheme);
-            session.record_reference(strip_marks(name), span);
+            session.record_reference(strip_marks(name), span, SymbolKind::Variable);
             Ok(pure_result(ty))
         }
     }
@@ -857,7 +904,7 @@ fn infer_lambda(
                 let ty = parse_type_expr(param_elements[2], env, session.interner)?;
                 params.push((name.to_string(), ty.clone()));
                 param_env.bindings.insert(name.to_string(), monotype(ty));
-                session.record_definition(name, param_elements[0].span());
+                session.record_definition(name, param_elements[0].span(), SymbolKind::Variable);
                 continue;
             }
         }
@@ -873,7 +920,7 @@ fn infer_lambda(
         param_env
             .bindings
             .insert(name.to_string(), monotype(param_type));
-        session.record_definition(name, param.span());
+        session.record_definition(name, param.span(), SymbolKind::Variable);
     }
 
     // Handle rest parameter
@@ -1061,7 +1108,7 @@ fn infer_let(
                 )?;
                 name = n.to_string();
                 annotated_type = Some(parse_type_expr(name_elements[2], env, session.interner)?);
-                session.record_definition(&name, name_elements[0].span());
+                session.record_definition(&name, name_elements[0].span(), SymbolKind::Variable);
             } else {
                 return Err(TypeError::InvalidTypeAnnotation {
                     message: "Invalid let binding name".into(),
@@ -1076,7 +1123,7 @@ fn infer_let(
                 },
             )?;
             name = n.to_string();
-            session.record_definition(&name, name_expr.span());
+            session.record_definition(&name, name_expr.span(), SymbolKind::Variable);
         }
 
         let env_for_value = apply_subst_env(&subst, &let_env);
@@ -1901,6 +1948,8 @@ fn infer_perform(
                 span: Some(elements[1].span()),
             },
         )?;
+        // Record reference using the unqualified operation name (matches definition)
+        session.record_reference(op_name_only, elements[1].span(), SymbolKind::EffectOp);
         (effect_decl, op)
     } else {
         let possible_effects = find_effects_with_op(env, op_name);
@@ -1912,10 +1961,13 @@ fn infer_perform(
                 span: Some(elements[1].span()),
             });
         }
-        lookup_effect_op(env, op_name).ok_or(TypeError::UndefinedVariable {
+        let result = lookup_effect_op(env, op_name).ok_or(TypeError::UndefinedVariable {
             name: format!("effect operation '{op_name}' (declare with (effect EffectName ({op_name} : ArgType -> ResultType)))"),
             span: Some(elements[1].span()),
-        })?
+        })?;
+        // Record reference for the operation name
+        session.record_reference(op_name, elements[1].span(), SymbolKind::EffectOp);
+        result
     };
 
     let arg_exprs = &elements[2..];
@@ -2343,7 +2395,7 @@ fn process_data_def(
 fn process_declare(
     env: &TypeEnv,
     elements: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<TypeEnv, TypeError> {
     if elements.len() != 3 {
         return Err(TypeError::ArityMismatch {
@@ -2354,13 +2406,19 @@ fn process_declare(
         });
     }
 
-    let name =
-        ast::get_symbol_name(elements[1], interner).ok_or(TypeError::InvalidTypeAnnotation {
+    let name = ast::get_symbol_name(elements[1], session.interner).ok_or(
+        TypeError::InvalidTypeAnnotation {
             message: "declare expects a symbol name".into(),
             span: Some(elements[1].span()),
-        })?;
+        },
+    )?;
 
-    let ty = parse_type_expr(elements[2], env, interner)?;
+    // Record the declared name as a definition for go-to-definition support.
+    // This is important for builtins declared in the prelude — the LSP needs
+    // a definition site to jump to.
+    session.record_definition(name, elements[1].span(), SymbolKind::Variable);
+
+    let ty = parse_type_expr(elements[2], env, session.interner)?;
 
     // Generalize: quantify over all free type variables
     let free_vars: Vec<String> = free_type_vars(&ty).into_iter().collect();
@@ -2414,7 +2472,7 @@ fn process_define(
         name_span = name_expr.span();
     }
 
-    session.record_definition(&name, name_span);
+    session.record_definition(&name, name_span, SymbolKind::Variable);
 
     // Add placeholder for recursive functions
     let placeholder_type = annotated_type.clone().unwrap_or_else(fresh_type_var);
@@ -2445,8 +2503,9 @@ fn process_define(
 fn process_effect_def(
     env: &TypeEnv,
     elements: &[&Expr],
-    interner: &Interner,
+    session: &InferSession,
 ) -> Result<TypeEnv, TypeError> {
+    let interner = session.interner;
     if elements.len() < 2 {
         return Err(TypeError::ArityMismatch {
             expected: 1,
@@ -2467,9 +2526,21 @@ fn process_effect_def(
         }
     };
 
+    // Record the effect name as a definition
+    session.record_definition(&effect_name, name_expr.span(), SymbolKind::Effect);
+
     let mut operations = Vec::new();
     for e in &elements[2..] {
-        operations.push(parse_effect_op(e, env, interner)?);
+        let op = parse_effect_op(e, env, interner)?;
+
+        // Record each operation name as a definition.
+        // The op name is the first element of the operation form (e.g., `print` in `(print (-> String Unit))`).
+        let op_elements = ast::list_to_array(e);
+        if !op_elements.is_empty() {
+            session.record_definition(&op.name, op_elements[0].span(), SymbolKind::EffectOp);
+        }
+
+        operations.push(op);
     }
 
     let effect_decl = EffectDeclaration {
@@ -2754,7 +2825,7 @@ pub fn infer_program(
     interner: &Interner,
 ) -> Result<(TypeEnv, Vec<Type>), TypeError> {
     let session = InferSession::new(interner);
-    infer_program_inner(env, exprs, &session, None, None, None)
+    infer_program_inner(env, exprs, &session, None, None, None, 0)
 }
 
 /// Type-check a program with module/import support.
@@ -2767,7 +2838,15 @@ pub fn infer_program_with_context(
     cache: &TypeModuleCache,
 ) -> Result<(TypeEnv, Vec<Type>), TypeError> {
     let session = InferSession::new(interner);
-    infer_program_inner(env, exprs, &session, file_path, Some(loader), Some(cache))
+    infer_program_inner(
+        env,
+        exprs,
+        &session,
+        file_path,
+        Some(loader),
+        Some(cache),
+        0,
+    )
 }
 
 /// Type-check a program with module/import support and an InferSession (for LSP context collection).
@@ -2778,8 +2857,17 @@ pub fn infer_program_with_session(
     file_path: Option<&Path>,
     loader: &dyn TypeModuleLoader,
     cache: &TypeModuleCache,
+    prelude_count: usize,
 ) -> Result<(TypeEnv, Vec<Type>), TypeError> {
-    infer_program_inner(env, exprs, session, file_path, Some(loader), Some(cache))
+    infer_program_inner(
+        env,
+        exprs,
+        session,
+        file_path,
+        Some(loader),
+        Some(cache),
+        prelude_count,
+    )
 }
 
 fn infer_program_inner(
@@ -2789,87 +2877,115 @@ fn infer_program_inner(
     file_path: Option<&Path>,
     loader: Option<&dyn TypeModuleLoader>,
     cache: Option<&TypeModuleCache>,
+    prelude_count: usize,
 ) -> Result<(TypeEnv, Vec<Type>), TypeError> {
     let mut current_env = env.clone();
     let mut types = Vec::new();
     let mut global_subst = empty_subst();
 
-    for expr in exprs {
-        if let Expr::List { .. } = expr {
-            let elements = ast::list_to_array(expr);
-            if !elements.is_empty() {
-                let first_sym = ast::get_symbol_name(elements[0], session.interner);
+    // Use a closure so `?` inside the loop captures the error without returning
+    // from the outer function. This lets us apply the (possibly partial) substitution
+    // to the context's type_map on both success and error paths.
+    let loop_result: Result<(), TypeError> = (|| {
+        for (expr_idx, expr) in exprs.iter().enumerate() {
+            // After processing all prelude expressions, snapshot the definition count.
+            // Definitions with index < prelude_definition_count have spans that are
+            // byte offsets within prelude.mar, not the user's file.
+            if expr_idx == prelude_count
+                && let Some(ctx) = &session.context
+            {
+                let count = ctx.borrow().definitions.len();
+                ctx.borrow_mut().prelude_definition_count = count;
+            }
+            if let Expr::List { .. } = expr {
+                let elements = ast::list_to_array(expr);
+                if !elements.is_empty() {
+                    let first_sym = ast::get_symbol_name(elements[0], session.interner);
 
-                if first_sym == Some("data") {
-                    current_env = process_data_def(&current_env, &elements, session.interner)?;
-                    types.push(t_unit());
-                    continue;
-                }
-
-                if first_sym == Some("define") && elements.len() >= 3 {
-                    // Check if this define is binding an ffi-struct call
-                    if let Some(info) = try_extract_ffi_struct_info(elements[2], session.interner) {
-                        let name = info.name.clone();
-                        register_ffi_struct_type(&mut current_env, &name, info);
+                    if first_sym == Some("data") {
+                        current_env = process_data_def(&current_env, &elements, session.interner)?;
+                        types.push(t_unit());
+                        continue;
                     }
-                    let (new_env, new_subst) =
-                        process_define(&current_env, &elements, &global_subst, session)?;
-                    current_env = new_env;
-                    global_subst = new_subst;
-                    types.push(t_unit());
-                    continue;
-                }
 
-                if first_sym == Some("declare") && elements.len() >= 3 {
-                    current_env = process_declare(&current_env, &elements, session.interner)?;
-                    types.push(t_unit());
-                    continue;
-                }
-
-                if first_sym == Some("effect") && elements.len() >= 2 {
-                    current_env = process_effect_def(&current_env, &elements, session.interner)?;
-                    types.push(t_unit());
-                    continue;
-                }
-
-                if first_sym == Some("foreign") && elements.len() >= 2 {
-                    current_env = process_foreign_def(&current_env, &elements, session.interner)?;
-                    types.push(t_unit());
-                    continue;
-                }
-
-                if first_sym == Some("foreign-lib") && elements.len() >= 3 {
-                    current_env = process_ffi_lib_def(&current_env, &elements, session.interner)?;
-                    types.push(t_unit());
-                    continue;
-                }
-
-                if first_sym == Some("import") {
-                    if let (Some(loader), Some(cache)) = (loader, cache) {
-                        current_env = process_import(
-                            &current_env,
-                            &elements,
-                            session,
-                            file_path,
-                            loader,
-                            cache,
-                        )?;
+                    if first_sym == Some("define") && elements.len() >= 3 {
+                        // Check if this define is binding an ffi-struct call
+                        if let Some(info) =
+                            try_extract_ffi_struct_info(elements[2], session.interner)
+                        {
+                            let name = info.name.clone();
+                            register_ffi_struct_type(&mut current_env, &name, info);
+                        }
+                        let (new_env, new_subst) =
+                            process_define(&current_env, &elements, &global_subst, session)?;
+                        current_env = new_env;
+                        global_subst = new_subst;
+                        types.push(t_unit());
+                        continue;
                     }
-                    // If no loader, silently skip (backward compat)
-                    types.push(t_unit());
-                    continue;
+
+                    if first_sym == Some("declare") && elements.len() >= 3 {
+                        current_env = process_declare(&current_env, &elements, session)?;
+                        types.push(t_unit());
+                        continue;
+                    }
+
+                    if first_sym == Some("effect") && elements.len() >= 2 {
+                        current_env = process_effect_def(&current_env, &elements, session)?;
+                        types.push(t_unit());
+                        continue;
+                    }
+
+                    if first_sym == Some("foreign") && elements.len() >= 2 {
+                        current_env =
+                            process_foreign_def(&current_env, &elements, session.interner)?;
+                        types.push(t_unit());
+                        continue;
+                    }
+
+                    if first_sym == Some("foreign-lib") && elements.len() >= 3 {
+                        current_env =
+                            process_ffi_lib_def(&current_env, &elements, session.interner)?;
+                        types.push(t_unit());
+                        continue;
+                    }
+
+                    if first_sym == Some("import") {
+                        if let (Some(loader), Some(cache)) = (loader, cache) {
+                            current_env = process_import(
+                                &current_env,
+                                &elements,
+                                session,
+                                file_path,
+                                loader,
+                                cache,
+                            )?;
+                        }
+                        // If no loader, silently skip (backward compat)
+                        types.push(t_unit());
+                        continue;
+                    }
                 }
             }
+
+            // Regular expression
+            let applied_env = apply_subst_env(&global_subst, &current_env);
+            let result = infer_expr(&applied_env, expr, session)?;
+
+            global_subst = compose_subst(&result.subst, &global_subst);
+            types.push(apply_subst(&global_subst, &result.ty));
         }
 
-        // Regular expression
-        let applied_env = apply_subst_env(&global_subst, &current_env);
-        let result = infer_expr(&applied_env, expr, session)?;
+        Ok(())
+    })();
 
-        global_subst = compose_subst(&result.subst, &global_subst);
-        types.push(apply_subst(&global_subst, &result.ty));
+    // Apply the final (or partial, on error) substitution to the context's type_map
+    // so hover shows resolved types like `Int` instead of unresolved vars like `t0`.
+    if let Some(ctx) = &session.context {
+        ctx.borrow_mut().apply_substitution(&global_subst);
     }
 
+    loop_result?;
     Ok((current_env, types))
 }
 
@@ -2937,6 +3053,116 @@ fn parse_import_form(
     })
 }
 
+/// Record cross-file definition entries for an imported module.
+///
+/// Takes the module's definitions (name + span pairs), the import form, the module's
+/// file path, and the module's exported binding names. For each exported binding that
+/// has a matching definition, records a cross-file entry mapping the imported name
+/// (possibly qualified) to the original name, file path, and definition span.
+fn record_cross_file_definitions(
+    session: &InferSession,
+    module_defs: &[(String, Span, SymbolKind)],
+    module_exports: &TypeEnv,
+    form: &ImportForm,
+    resolved_path: &Path,
+) {
+    let ctx = match &session.context {
+        Some(c) => c,
+        None => return,
+    };
+
+    // For each exported binding, find the last definition with that name in module_defs
+    // (last = innermost/most recent in program order)
+    for export_name in module_exports.bindings.keys() {
+        let def = module_defs
+            .iter()
+            .rev()
+            .find(|(name, _, _)| name == export_name);
+
+        if let Some((_, span, kind)) = def {
+            let imported_name = match form {
+                ImportForm::Qualified(alias) => format!("{}/{}", alias, export_name),
+                ImportForm::All => export_name.clone(),
+                ImportForm::Selective(names) => {
+                    if names.iter().any(|n| n == export_name) {
+                        export_name.clone()
+                    } else {
+                        continue;
+                    }
+                }
+            };
+            ctx.borrow_mut().cross_file_definitions.push((
+                imported_name,
+                export_name.clone(),
+                resolved_path.to_path_buf(),
+                *span,
+                *kind,
+            ));
+        }
+    }
+
+    // Also handle constructors (data type constructors like Some, None, Cons, etc.)
+    for export_name in module_exports.constructors.keys() {
+        let def = module_defs
+            .iter()
+            .rev()
+            .find(|(name, _, _)| name == export_name);
+
+        if let Some((_, span, kind)) = def {
+            let imported_name = match form {
+                ImportForm::Qualified(alias) => format!("{}/{}", alias, export_name),
+                ImportForm::All => export_name.clone(),
+                ImportForm::Selective(names) => {
+                    if names.iter().any(|n| n == export_name) {
+                        export_name.clone()
+                    } else {
+                        continue;
+                    }
+                }
+            };
+            ctx.borrow_mut().cross_file_definitions.push((
+                imported_name,
+                export_name.clone(),
+                resolved_path.to_path_buf(),
+                *span,
+                *kind,
+            ));
+        }
+    }
+
+    // Also handle effect operations (e.g., print, println from IO effect)
+    for effect_decl in module_exports.effects.values() {
+        for op in &effect_decl.operations {
+            let export_name = &op.name;
+            let def = module_defs
+                .iter()
+                .rev()
+                .find(|(name, _, kind)| name == export_name && *kind == SymbolKind::EffectOp);
+
+            if let Some((_, span, kind)) = def {
+                let imported_name = match form {
+                    ImportForm::Qualified(alias) => format!("{}/{}", alias, export_name),
+                    ImportForm::All => export_name.clone(),
+                    ImportForm::Selective(names) => {
+                        if names.iter().any(|n| n == export_name) {
+                            export_name.clone()
+                        } else {
+                            continue;
+                        }
+                    }
+                };
+                ctx.borrow_mut().cross_file_definitions.push((
+                    imported_name,
+                    export_name.clone(),
+                    resolved_path.to_path_buf(),
+                    *span,
+                    *kind,
+                ));
+            }
+        }
+    }
+}
+
 fn process_import(
     env: &TypeEnv,
     elements: &[&Expr],
@@ -2960,6 +3186,19 @@ fn process_import(
             });
         }
         Some(ModuleCacheState::Loaded(module_env)) => {
+            // Module was already type-checked — use cached module_definitions for cross-file defs
+            if let Some(ctx) = &session.context {
+                let module_defs = ctx.borrow().module_definitions.get(&resolved_path).cloned();
+                if let Some(defs) = module_defs {
+                    record_cross_file_definitions(
+                        session,
+                        &defs,
+                        &module_env,
+                        &form,
+                        &resolved_path,
+                    );
+                }
+            }
             return Ok(merge_module_env(env, &module_env, &form));
         }
         None => {}
@@ -2967,6 +3206,13 @@ fn process_import(
 
     // Mark as loading
     cache.mark_loading(resolved_path.clone());
+
+    // Snapshot the definitions count so we can extract module-specific definitions after type-checking
+    let defs_before = session
+        .context
+        .as_ref()
+        .map(|c| c.borrow().definitions.len())
+        .unwrap_or(0);
 
     // Use the current env (builtins + prelude + prior imports) as the baseline.
     // After type-checking the module, we extract everything it added on top
@@ -2979,6 +3225,7 @@ fn process_import(
 
     // Type-check the module using the current env as base (has builtins + prelude).
     // The prelude types (Option, Result, etc.) are available for the module code.
+    // prelude_count is 0 because imported modules have their prelude stripped by the loader.
     let (module_env, _) = infer_program_inner(
         env,
         &module_exprs,
@@ -2986,6 +3233,7 @@ fn process_import(
         Some(&resolved_path),
         Some(loader),
         Some(cache),
+        0,
     )?;
 
     // Extract everything the module defines beyond the baseline env.
@@ -2997,6 +3245,29 @@ fn process_import(
         &baseline_effect_keys,
         &baseline_alias_keys,
     );
+
+    // Extract module definitions recorded during type-checking and cache them
+    if let Some(ctx) = &session.context {
+        // Clone the module's definitions out of the borrow before mutating the context
+        let module_defs: Vec<(String, Span, SymbolKind)> = {
+            let defs = &ctx.borrow().definitions;
+            defs[defs_before..].to_vec()
+        };
+
+        // Record cross-file definitions for this import
+        record_cross_file_definitions(
+            session,
+            &module_defs,
+            &module_own_env,
+            &form,
+            &resolved_path,
+        );
+
+        // Cache the module's definitions for future cached imports
+        ctx.borrow_mut()
+            .module_definitions
+            .insert(resolved_path.clone(), module_defs);
+    }
 
     cache.mark_loaded(resolved_path, module_own_env.clone());
 

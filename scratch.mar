@@ -109,6 +109,7 @@
 ;; --- Test ---
 
 (import "std:io" as io)
+(import "std:actor" as actor)
 
 (defrecord User
   (name : String)

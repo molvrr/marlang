@@ -31,6 +31,13 @@
 - [ ] first class handler values
 - [ ] multi shot continuations?
 - [ ] Look into miette
+- [ ] LSP: find references
+- [ ] LSP: document symbols
+- [ ] LSP: completion
+- [ ] LSP: signature help
+- [ ] LSP: rename
+- [ ] LSP: diagnostics for imported modules
+- [ ] LSP: workspace-wide features
 - [x] Cleanup code
 - [x] when a program crashes we don't have stacktraces
 - [x] stdlib: parser combinators
