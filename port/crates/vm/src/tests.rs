@@ -4230,6 +4230,60 @@ fn macro_hygiene_constructor_none() {
     );
 }
 
+#[test]
+fn defmacro_match_on_option_some_in_body() {
+    // Regression: the expansion VM must carry constructor knowledge (Option, List)
+    // across prelude compilations. Without this, match patterns like None/Some in
+    // macro bodies are treated as variable bindings, causing incorrect branches.
+    // The macro constructs an actual Option value at expansion time and matches on it.
+    assert_int(
+        r#"
+(defmacro test-option-match ()
+  (define val (Some 42))
+  (define r (match val
+    (None       0)
+    ((Some x)   x)))
+  `(quote ,r))
+(test-option-match)
+"#,
+        42,
+    );
+}
+
+#[test]
+fn defmacro_match_on_option_none_in_body() {
+    // Same regression test but verifying the None branch is reachable.
+    assert_int(
+        r#"
+(defmacro test-none-match ()
+  (define val None)
+  (define r (match val
+    (None       99)
+    ((Some x)   x)))
+  `(quote ,r))
+(test-none-match)
+"#,
+        99,
+    );
+}
+
+#[test]
+fn defmacro_match_on_list_adt_in_body() {
+    // Verify List constructors (Nil, Cons) are also known in macro bodies.
+    assert_int(
+        r#"
+(defmacro test-list-match ()
+  (define val (Cons 7 Nil))
+  (define r (match val
+    ((Cons x _) x)
+    (Nil        0)))
+  `(quote ,r))
+(test-list-match)
+"#,
+        7,
+    );
+}
+
 // ===== Cross-Module Macro Tests =====
 
 #[test]

@@ -1,14 +1,4 @@
-- [ ] match on ADTs (Option, List, etc.) doesn't work inside defmacro bodies.
-      The expansion VM compiles each prelude expression independently via
-      compile_program, which starts with an empty known_constructors set.
-      So data definitions (e.g. (data (Option a) None (Some a))) don't carry
-      constructor knowledge forward to subsequent compilations. In match
-      patterns, None/Some are treated as variable patterns instead of
-      constructors, causing (Some 5) to match the None branch.
-      Workaround: avoid match on Option/List inside macros; use string-contains,
-      nil?, car/cdr, etc. instead.
-      falls through to false. Chars are NaN-boxed but aren't numbers, bools, nil,
-      or objects. Workaround: compare via (= (char-code a) (char-code b)).
+- [ ] parse error filename, line number and column
 - [ ] Inner define doesn't capture enclosing lambda parameters — closures created
       by `define` inside a lambda body fail to capture variables from the enclosing
       lambda's parameters when the closure is later executed in a different handler
@@ -25,7 +15,6 @@
 - [ ] stdlib: synchronization primitives
 - [ ] stdlib: add bytewise operators
 - [ ] stdlib: add byte manipulation functions
-- [ ] parse error filename, line number and column
 - [ ] mutable references
 - [ ] first class handler values
 - [ ] multi shot continuations?
@@ -40,4 +29,28 @@
 - [ ] LSP: fix go-to definition bindings introduced through pattern matching
 - [ ] ADTs with effect anotations on fields
 - [ ] existential types
-- [x] equal? broken for Char — values_equal in vm.rs doesn't handle the Char case,
+- [ ] arbitrary IO in macro
+- [ ] fix macro expansion error display
+            (defmacro test-match ()
+              (define val (Some 42))
+              (match val
+                ((Some x) (list (quote quote) x))
+                (None     (quote (quote "none")))))
+            (test-match)
+            EOF
+            cargo run -p marlang-cli -- run /tmp/test_macro_adt.mar 2>&1
+            Compiling marlang-vm v0.1.0 (/Users/mateus/projects/marlang/port/crates/vm)
+               Compiling marlang-lsp v0.1.0 (/Users/mateus/projects/marlang/port/crates/lsp)
+               Compiling marlang-cli v0.1.0 (/Users/mateus/projects/marlang/port/crates/cli)
+                Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.13s
+                 Running `target/debug/mar run /tmp/test_macro_adt.mar`
+            Macro expansion error: Runtime error: Macro expansion error: Cannot convert VM value to AST: (quote 42)
+- [x] match on ADTs (Option, List, etc.) doesn't work inside defmacro bodies.
+      The expansion VM compiles each prelude expression independently via
+      compile_program, which starts with an empty known_constructors set.
+      So data definitions (e.g. (data (Option a) None (Some a))) don't carry
+      constructor knowledge forward to subsequent compilations. In match
+      patterns, None/Some are treated as variable patterns instead of
+      constructors, causing (Some 5) to match the None branch.
+      Workaround: avoid match on Option/List inside macros; use string-contains,
+      nil?, car/cdr, etc.

@@ -1,5 +1,6 @@
 use crate::builtins::register_builtins;
-use crate::compiler::compile_program;
+use crate::bytecode::ROOT_MODULE;
+use crate::compiler::compile_expr_with_context;
 use crate::object::VMObject;
 use crate::value::Value;
 use crate::vm::{VM, call_value, interpret};
@@ -58,6 +59,10 @@ pub struct MacroExpander<'a> {
     module_macro_cache: HashMap<PathBuf, MacroExports>,
     expanding_paths: HashSet<PathBuf>,
     virtual_modules: HashMap<PathBuf, String>,
+    /// Accumulated constructor knowledge across compilations in the expansion VM.
+    known_constructors: HashSet<Symbol>,
+    /// Accumulated effect-op knowledge across compilations in the expansion VM.
+    known_effect_ops: HashMap<Symbol, Symbol>,
 }
 
 /// Cached macro exports for a module
@@ -95,6 +100,8 @@ impl<'a> MacroExpander<'a> {
             module_macro_cache: HashMap::new(),
             expanding_paths: HashSet::new(),
             virtual_modules: HashMap::new(),
+            known_constructors: HashSet::new(),
+            known_effect_ops: HashMap::new(),
         }
     }
 
@@ -124,10 +131,22 @@ impl<'a> MacroExpander<'a> {
 
     /// Run prelude expressions in the expansion VM so it has access to
     /// data constructors (Nil, Cons, etc.) and utility functions for quasiquote.
+    ///
+    /// Uses `compile_expr_with_context` to accumulate constructor and effect-op
+    /// knowledge across expressions, so that `match` patterns in later expressions
+    /// (and in macro bodies) correctly recognise ADT constructors.
     pub fn run_prelude_in_vm(&mut self, exprs: &[Expr]) {
         for expr in exprs {
-            if let Ok(chunk) = compile_program(std::slice::from_ref(expr), self.interner) {
-                let _ = interpret(&mut self.vm, &chunk);
+            if let Ok(result) = compile_expr_with_context(
+                expr,
+                self.interner,
+                &self.known_constructors,
+                &self.known_effect_ops,
+                ROOT_MODULE,
+            ) {
+                self.known_constructors = result.known_constructors;
+                self.known_effect_ops = result.known_effect_ops;
+                let _ = interpret(&mut self.vm, &result.chunk);
             }
         }
     }
@@ -284,15 +303,26 @@ impl<'a> MacroExpander<'a> {
         let name_str = self.interner.resolve(name_sym);
         let lambda_source = self.build_macro_lambda_source(name_str, &elements[2..])?;
 
-        // Compile and run in expansion VM
+        // Compile and run in expansion VM, using accumulated constructor knowledge
+        // so that match patterns in macro bodies correctly recognise ADT constructors.
         let tokens = lex(&lambda_source, self.interner)
             .map_err(|e| MacroError::new(format!("defmacro compile error: {}", e)))?;
         let exprs =
             parse(&tokens).map_err(|e| MacroError::new(format!("defmacro parse error: {}", e)))?;
-        let chunk = compile_program(&exprs, self.interner)
+        for expr in &exprs {
+            let result = compile_expr_with_context(
+                expr,
+                self.interner,
+                &self.known_constructors,
+                &self.known_effect_ops,
+                ROOT_MODULE,
+            )
             .map_err(|e| MacroError::new(format!("defmacro compile error: {}", e)))?;
-        interpret(&mut self.vm, &chunk)
-            .map_err(|e| MacroError::new(format!("defmacro execution error: {}", e)))?;
+            self.known_constructors = result.known_constructors;
+            self.known_effect_ops = result.known_effect_ops;
+            interpret(&mut self.vm, &result.chunk)
+                .map_err(|e| MacroError::new(format!("defmacro execution error: {}", e)))?;
+        }
 
         // Retrieve the transformer closure from globals (root module)
         let transformer = self.vm.globals().get(name_str).cloned().ok_or_else(|| {
