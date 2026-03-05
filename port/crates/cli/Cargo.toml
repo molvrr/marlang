@@ -15,6 +15,7 @@ path = "src/main.rs"
 marlang-core = { path = "../core" }
 marlang-types = { path = "../types" }
 marlang-vm = { path = "../vm" }
+marlang-lsp = { path = "../lsp" }
 clap = { version = "4", features = ["derive"] }
 rustyline = "14"
 dirs = "6"

@@ -7,7 +7,6 @@
       constructors, causing (Some 5) to match the None branch.
       Workaround: avoid match on Option/List inside macros; use string-contains,
       nil?, car/cdr, etc. instead.
-- [ ] Cleanup code
 - [ ] equal? broken for Char — values_equal in vm.rs doesn't handle the Char case,
       falls through to false. Chars are NaN-boxed but aren't numbers, bools, nil,
       or objects. Workaround: compare via (= (char-code a) (char-code b)).
@@ -32,6 +31,7 @@
 - [ ] first class handler values
 - [ ] multi shot continuations?
 - [ ] Look into miette
+- [x] Cleanup code
 - [x] when a program crashes we don't have stacktraces
 - [x] stdlib: parser combinators
 - [x] mar disasm when importing something doesn't work

@@ -1,0 +1,13 @@
+[package]
+name = "marlang-lsp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+marlang-core = { path = "../core" }
+marlang-types = { path = "../types" }
+marlang-vm = { path = "../vm" }
+tower-lsp = { version = "0.20", features = ["proposed"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+dashmap = "5"
+tracing = "0.1"

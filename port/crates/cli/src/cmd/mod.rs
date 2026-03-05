@@ -1,5 +1,6 @@
 pub mod disasm;
 pub mod expand;
+pub mod lsp;
 pub mod repl;
 pub mod run;
 pub mod typecheck;

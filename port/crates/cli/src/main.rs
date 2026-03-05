@@ -37,6 +37,8 @@ enum Command {
         #[arg(long)]
         clean: bool,
     },
+    /// Start Language Server Protocol server
+    Lsp,
 }
 
 fn main() -> ExitCode {
@@ -48,5 +50,6 @@ fn main() -> ExitCode {
         Command::Typecheck { file } => cmd::typecheck::cmd_typecheck(&file),
         Command::Disasm { file } => cmd::disasm::cmd_disasm(&file),
         Command::Expand { file, clean } => cmd::expand::cmd_expand(&file, clean),
+        Command::Lsp => cmd::lsp::cmd_lsp(),
     }
 }
