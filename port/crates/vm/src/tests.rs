@@ -2591,6 +2591,314 @@ fn stdlib_io_println_effect() {
     assert_eq!(output, "hello from stdlib\n");
 }
 
+// ===== Stdlib Codec Tests =====
+
+fn run_codec_test(source: &str) -> String {
+    let interner = Interner::new();
+    let mut vm = VM::new();
+    register_builtins(&mut vm);
+    let mut loader = ModuleLoader::new();
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let test_file = workspace.join("stdlib").join("_test.mar");
+    let full_source = format!(
+        r#"(import "std:codec" as c)
+           {}"#,
+        source
+    );
+    let result = run_program(
+        &mut vm,
+        &full_source,
+        Some(&test_file),
+        &mut loader,
+        &interner,
+    )
+    .expect("stdlib codec test failed");
+    format_value(&result)
+}
+
+#[test]
+fn stdlib_codec_parse_any_char() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/parse c/any-char "A"))"#),
+        r#""(Ok 'A')""#
+    );
+}
+
+#[test]
+fn stdlib_codec_print_any_char() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/print c/any-char (char-from-code 65)))"#),
+        r#""(Ok "A")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_parse_lit_char() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/parse (c/lit-char (char-from-code 40)) "("))"#),
+        r#""(Ok nil)""#
+    );
+}
+
+#[test]
+fn stdlib_codec_print_lit_char() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/print (c/lit-char (char-from-code 40)) nil))"#),
+        r#""(Ok "(")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_parse_lit_string() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/parse (c/lit-string "hello") "hello"))"#),
+        r#""(Ok nil)""#
+    );
+}
+
+#[test]
+fn stdlib_codec_print_lit_string() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/print (c/lit-string "hello") nil))"#),
+        r#""(Ok "hello")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_parse_nat() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/parse c/nat "42"))"#),
+        r#""(Ok 42)""#
+    );
+}
+
+#[test]
+fn stdlib_codec_print_nat() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/print c/nat 42.0))"#),
+        r#""(Ok "42")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_roundtrip_nat() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/round-trip c/nat "42"))"#),
+        r#""(Ok "42")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_parse_integer_negative() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/parse c/integer "-7"))"#),
+        r#""(Ok -7)""#
+    );
+}
+
+#[test]
+fn stdlib_codec_print_integer_negative() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/print c/integer -7.0))"#),
+        r#""(Ok "-7")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_roundtrip_integer() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/round-trip c/integer "-7"))"#),
+        r#""(Ok "-7")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_parse_many() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/parse (c/many c/digit) "123"))"#),
+        r#""(Ok (Cons '1' (Cons '2' (Cons '3' Nil))))""#
+    );
+}
+
+#[test]
+fn stdlib_codec_print_many() {
+    assert_eq!(
+        run_codec_test(
+            r#"(show (c/print (c/many c/digit)
+                (Cons (char-from-code 49) (Cons (char-from-code 50) (Cons (char-from-code 51) Nil)))))"#
+        ),
+        r#""(Ok "123")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_parse_seq() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/parse (c/seq c/letter c/letter) "AB"))"#),
+        r#""(Ok (MkPair 'A' 'B'))""#
+    );
+}
+
+#[test]
+fn stdlib_codec_print_seq() {
+    assert_eq!(
+        run_codec_test(
+            r#"(show (c/print (c/seq c/letter c/letter) (MkPair (char-from-code 65) (char-from-code 66))))"#
+        ),
+        r#""(Ok "AB")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_parse_parens() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/parse (c/parens c/digit) "(5)"))"#),
+        r#""(Ok '5')""#
+    );
+}
+
+#[test]
+fn stdlib_codec_print_parens() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/print (c/parens c/digit) (char-from-code 53)))"#),
+        r#""(Ok "(5)")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_roundtrip_parens() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/round-trip (c/parens c/digit) "(5)"))"#),
+        r#""(Ok "(5)")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_parse_sep_by() {
+    assert_eq!(
+        run_codec_test(
+            r#"(show (c/parse (c/sep-by (c/lit-char (char-from-code 44)) c/digit) "1,2,3"))"#
+        ),
+        r#""(Ok (Cons '1' (Cons '2' (Cons '3' Nil))))""#
+    );
+}
+
+#[test]
+fn stdlib_codec_print_sep_by() {
+    assert_eq!(
+        run_codec_test(
+            r#"(show (c/print (c/sep-by (c/lit-char (char-from-code 44)) c/digit)
+                (Cons (char-from-code 49) (Cons (char-from-code 50) (Cons (char-from-code 51) Nil)))))"#
+        ),
+        r#""(Ok "1,2,3")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_parse_optional_some() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/parse (c/optional c/digit) "5"))"#),
+        r#""(Ok (Some '5'))""#
+    );
+}
+
+#[test]
+fn stdlib_codec_parse_optional_none() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/parse (c/optional c/digit) ""))"#),
+        r#""(Ok None)""#
+    );
+}
+
+#[test]
+fn stdlib_codec_roundtrip_quoted_string() {
+    // A complex codec: quoted string between double quotes
+    // Test parse and print separately for clarity
+    assert_eq!(
+        run_codec_test(
+            r#"(define quoted
+                 (c/between
+                   (c/lit-char (char-from-code 34))
+                   (c/lit-char (char-from-code 34))
+                   (c/iso c/iso-chars
+                     (c/many (c/satisfy
+                       (lambda (ch) (not (c/char= ch (char-from-code 34))))
+                       "non-quote")))))
+               (show (c/parse quoted "\"hello world\""))"#
+        ),
+        r#""(Ok "hello world")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_print_quoted_string() {
+    assert_eq!(
+        run_codec_test(
+            r#"(define quoted
+                 (c/between
+                   (c/lit-char (char-from-code 34))
+                   (c/lit-char (char-from-code 34))
+                   (c/iso c/iso-chars
+                     (c/many (c/satisfy
+                       (lambda (ch) (not (c/char= ch (char-from-code 34))))
+                       "non-quote")))))
+               (show (c/print quoted "hello world"))"#
+        ),
+        // show wraps in quotes, and the inner quotes appear unescaped in Marlang's show
+        "\"(Ok \"\"hello world\"\")\""
+    );
+}
+
+#[test]
+fn stdlib_codec_iso_chars() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/parse (c/iso c/iso-chars (c/many1 c/digit)) "42"))"#),
+        r#""(Ok "42")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_print_iso_chars() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/print (c/iso c/iso-chars (c/many1 c/digit)) "42"))"#),
+        r#""(Ok "42")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_parse_error() {
+    assert_eq!(
+        run_codec_test(r#"(show (c/parse c/digit "a"))"#),
+        r#""(Err "expected digit, got 'a'")""#
+    );
+}
+
+#[test]
+fn stdlib_codec_alt_first() {
+    assert_eq!(
+        run_codec_test(
+            r#"(show (c/parse (c/alt (c/lit-char (char-from-code 97)) (c/lit-char (char-from-code 98))) "a"))"#
+        ),
+        r#""(Ok nil)""#
+    );
+}
+
+#[test]
+fn stdlib_codec_alt_second() {
+    assert_eq!(
+        run_codec_test(
+            r#"(show (c/parse (c/alt (c/lit-char (char-from-code 97)) (c/lit-char (char-from-code 98))) "b"))"#
+        ),
+        r#""(Ok nil)""#
+    );
+}
+
 // =====================================================================
 // ===== FFI Tests (Phase 5b) ==========================================
 // =====================================================================

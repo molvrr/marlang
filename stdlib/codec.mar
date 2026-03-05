@@ -1,0 +1,1176 @@
+; Bidirectional Codec Library — Effect-Based
+;
+; A codec is a value that can both **parse** (String -> a) and **print** (a -> String)
+; from a single definition. Build one codec, get serialization and deserialization
+; for free — no separate parser and printer to keep in sync.
+;
+;
+; ## Quick Start
+;
+;   (import "std:codec" as c)
+;
+;   ;; Parse a natural number (nat produces Float — Marlang's number type)
+;   (c/parse c/nat "42")              ;; => (Ok 42)
+;   (c/print c/nat 42.0)              ;; => (Ok "42")
+;   (c/round-trip c/nat "42")         ;; => (Ok "42")
+;
+;   ;; Build a codec for a quoted string
+;   (define quoted
+;     (c/between
+;       (c/lit-char (char-from-code 34))
+;       (c/lit-char (char-from-code 34))
+;       (c/iso c/iso-chars
+;         (c/many (c/satisfy
+;           (lambda (ch) (not (c/char= ch (char-from-code 34))))
+;           "non-quote")))))
+;
+;   (c/parse quoted "\"hello\"")      ;; => (Ok "hello")
+;   (c/print quoted "hello")          ;; => (Ok "\"hello\"")
+;
+;   ;; Parse comma-separated integers in brackets
+;   (define int-list
+;     (c/brackets
+;       (c/sep-by (c/symbol ",") (c/token c/integer))))
+;
+;   (c/parse int-list "[1,2,3]")      ;; => (Ok (Cons 1 (Cons 2 (Cons 3 Nil))))
+;   (c/print int-list (list 1.0 2.0)) ;; => (Ok "[1,2]")
+;
+;
+; ## Reading the Types
+;
+; There is no `Codec a` type alias. Codecs are bare Pairs:
+;
+;   (Pair (-> Unit {ParseState, Exception | e} a)    ; parser thunk
+;         (-> a {PrintState, Exception | e} Unit))    ; printer function
+;
+; This is because Marlang's type system does not support storing effectful
+; functions in ADT constructor fields — a `(data (Codec a) ...)` with effect
+; rows in the fields would be rejected. See "Type Representation" below.
+;
+; So when the type checker reports a codec's type, you'll see something like:
+;
+;   c/nat : (Pair (-> Unit {Exception, ParseState} Float)
+;                 (-> Float {Exception, PrintState} Unit))
+;
+; This is just a "Codec Float". Throughout this doc we use the shorthand
+; "Codec a" to mean that Pair shape, to keep things readable.
+;
+; Similarly, when a combinator takes a codec argument, its inferred type
+; will show the full Pair — for example `many` looks like:
+;
+;   c/many : (-> (Pair (-> Unit {e} a) (-> b {e2} Unit))
+;                {}
+;                (Pair (-> Unit {ParseState | e} (List a))
+;                      (-> (List b) {e2} Unit)))
+;
+; Read: takes a Codec a, returns a Codec (List a). The effect variables
+; (e, e2) are row-polymorphic — they unify with whatever effects the
+; inner codec has.
+;
+;
+; ## Core Concepts
+;
+; **Iso a b** — A partial isomorphism (data type defined in this module):
+;   (data (Iso a b) (MkIso (-> a (Option b)) (-> b (Option a))))
+;   Used to transform the value type of a codec. For example, iso-chars
+;   converts (List Char) <-> String, and iso-number converts String <-> Float.
+;
+; **Effects** — ParseState manages input (peek/consume/get-input/set-input).
+;   PrintState manages output (emit/emit-char). Exception handles failures.
+;   The runners (parse, print, round-trip) install handlers for all of these,
+;   so callers don't need to manage them.
+;
+; **Canonical printing** — Printers always produce the same output for the
+;   same value. Original formatting (whitespace, etc.) is not preserved.
+;   For example, `spaces` parses any whitespace but always prints one space.
+;
+;
+; ## How to Compose Codecs
+;
+; Sequencing:
+;   (seq c1 c2)         — parse both, get (Pair a b)
+;   (seq-left c1 c2)    — parse both, keep left  (c2 must be Codec Unit)
+;   (seq-right c1 c2)   — parse both, keep right (c1 must be Codec Unit)
+;
+; Alternatives:
+;   (alt c1 c2)          — try c1, fall back to c2
+;   (choice (list c1 c2 c3)) — try each in order
+;
+; Repetition:
+;   (many c)             — zero or more -> (List a)
+;   (many1 c)            — one or more  -> (List a)
+;   (sep-by sep c)       — separated list
+;   (count n c)          — exactly n
+;
+; Transformation (the key to bidirectional mapping):
+;   (iso some-iso codec) — apply an Iso to change the codec's value type
+;
+; Common pattern to get a String from many Chars:
+;   (iso iso-chars (many letter))        ;; Codec String
+;
+; Common pattern to get a Float from digit chars:
+;   (iso iso-number (iso iso-chars (many1 digit)))  ;; same as `nat`
+;
+;
+; ## Syntax vs. Data Codecs
+;
+; A key design rule: seq-left and seq-right require the discarded side
+; to be Codec Unit. This separates "syntax" (things like delimiters and
+; whitespace that carry no data) from "data" (the values you care about).
+;
+;   lit-char c   -> Codec Unit   (syntax: parses/prints a fixed char)
+;   lit-string s -> Codec Unit   (syntax: parses/prints a fixed string)
+;   spaces       -> Codec Unit   (syntax: whitespace)
+;   digit        -> Codec Char   (data: the actual character)
+;
+; To discard data, use `skip`:
+;   (skip digit)   -> Codec Unit   (parse a digit, throw away the result)
+;
+;
+; ## Parse-Only Combinators
+;
+; Some combinators like chainl1/chainr1 are inherently parse-only (used for
+; expression parsing with operator precedence). Use parser-of to extract the
+; parser thunk from a codec when combining with these:
+;
+;   (define expr
+;     (c/chainl1
+;       (lambda () (c/or-else
+;         (lambda () ((c/parser-of (c/token (c/symbol "+"))) (lambda (a b) (+ a b))))
+;         (lambda () ((c/parser-of (c/token (c/symbol "-"))) (lambda (a b) (- a b))))))
+;       (c/parser-of (c/token c/nat))))
+;
+;
+; ## Type Representation
+;
+; Codecs are (Pair parser printer) rather than a proper ADT because
+; Marlang's type system does not support effectful functions in ADT fields.
+; A declaration like:
+;
+;   (data (Codec a) (MkCodec (-> Unit {ParseState, Exception} a)
+;                             (-> a {PrintState, Exception} Unit)))
+;
+; fails because ADT constructor fields must have pure (empty effect row {})
+; types. This is a known limitation. Once the type system gains existential
+; types or effect-annotated ADT fields, this module can be rewritten to use
+; a proper Codec ADT — which would make inferred types much more readable
+; and enable better error messages.
+;
+; In the meantime, use mk-codec/codec-parser/codec-printer as smart
+; constructors rather than pattern-matching on MkPair directly.
+;
+;
+; ## API Reference
+;
+; In the signatures below, "Codec a" is shorthand for:
+;   (Pair (-> Unit {ParseState, Exception | e} a) (-> a {PrintState, Exception | e} Unit))
+; The actual inferred types will show the full Pair with effect variables.
+; Effect row variables (e, e2, ...) are omitted here for clarity.
+;
+; Runners (these handle all effects internally, callers stay pure):
+;   parse      : Codec a -> String -> (Result String a)
+;   print      : Codec a -> a -> (Result String String)
+;   round-trip : Codec a -> String -> (Result String String)
+;
+; Smart constructors:
+;   mk-codec      : (-> Unit a) -> (-> a Unit) -> Codec a
+;   codec-parser   : Codec a -> (-> Unit a)
+;   codec-printer  : Codec a -> (-> a Unit)
+;
+; Value codecs:
+;   pure  : a -> Codec a              always succeeds with value, prints nothing
+;   fail  : String -> Codec a         always fails with message
+;
+; Literal codecs (Codec Unit — syntax, not data):
+;   lit-char    : Char -> Codec Unit         match/emit one char
+;   lit-string  : String -> Codec Unit       match/emit a string
+;
+; Character codecs (Codec Char — data):
+;   satisfy     : (-> Char Bool) -> String -> Codec Char
+;                 ^predicate       ^description for errors
+;   any-char    : Codec Char
+;   digit       : Codec Char                 [0-9]
+;   letter      : Codec Char                 [a-zA-Z]
+;   lower       : Codec Char                 [a-z]
+;   upper       : Codec Char                 [A-Z]
+;   alnum       : Codec Char                 [a-zA-Z0-9]
+;   hex-digit   : Codec Char                 [0-9a-fA-F]
+;   one-of      : String -> Codec Char       any char in the string
+;   none-of     : String -> Codec Char       any char NOT in the string
+;
+; Whitespace codecs (Codec Unit):
+;   space       : Codec Unit                 one whitespace char, prints " "
+;   spaces      : Codec Unit                 0+ whitespace, prints " "
+;   spaces0     : Codec Unit                 0+ whitespace, prints ""
+;
+; End of input:
+;   eof         : Codec Unit                 succeeds at end, prints nothing
+;   peek-char   : Codec (Option Char)        look ahead without consuming
+;
+; Sequencing:
+;   seq         : Codec a -> Codec b -> Codec (Pair a b)
+;   seq-left    : Codec a -> Codec Unit -> Codec a
+;   seq-right   : Codec Unit -> Codec a -> Codec a
+;
+; Alternatives:
+;   alt         : Codec a -> Codec a -> Codec a
+;   choice      : (List (Codec a)) -> Codec a
+;
+; Repetition:
+;   many        : Codec a -> Codec (List a)        0 or more
+;   many1       : Codec a -> Codec (List a)        1 or more
+;   optional    : Codec a -> Codec (Option a)
+;   count       : Int -> Codec a -> Codec (List a) exactly n
+;   many-till   : Codec a -> Codec Unit -> Codec (List a)
+;
+; Wrapping:
+;   between     : Codec Unit -> Codec Unit -> Codec a -> Codec a
+;   parens      : Codec a -> Codec a                 between ( )
+;   braces      : Codec a -> Codec a                 between { }
+;   brackets    : Codec a -> Codec a                 between [ ]
+;
+; Transformation:
+;   iso         : (Iso a b) -> Codec a -> Codec b
+;   skip        : Codec a -> Codec Unit              discard parsed value
+;   label       : String -> Codec a -> Codec a       custom error message
+;   token       : Codec a -> Codec a                 skip trailing whitespace
+;   symbol      : String -> Codec Unit               lit-string + skip whitespace
+;
+; Lookahead:
+;   lookahead       : Codec a -> Codec a             parse without consuming
+;   not-followed-by : (-> Unit a) -> Codec Unit      succeed if parser fails
+;
+; Numeric codecs (these produce Float because iso-number uses
+; __try-string->number which returns Float; show displays whole
+; numbers without a decimal, so (parse nat "42") prints as (Ok 42)):
+;   nat-string     : Codec String              digits as string
+;   nat            : Codec Float               natural number (1+ digits)
+;   integer-string : Codec String              optional "-" + digits
+;   integer        : Codec Float               signed integer
+;
+; Isomorphisms (Iso a b — used with the `iso` combinator):
+;   iso-id         : (Iso a a)
+;   iso-inverse    : (Iso a b) -> (Iso b a)
+;   iso-compose    : (Iso a b) -> (Iso b c) -> (Iso a c)
+;   iso-chars      : (Iso (List Char) String)
+;   iso-number     : (Iso String Float)
+;   iso-cons       : (Iso (Pair a (List a)) (List a))
+;   iso-nil        : (Iso Unit (List a))
+;   iso-some       : (Iso a (Option a))
+;   iso-none       : (Iso Unit (Option a))
+;   iso-result-ok  : (Iso a (Result e a))
+;   iso-result-err : (Iso e (Result e a))
+;   iso-pair-flip  : (Iso (Pair a b) (Pair b a))
+;
+; Parse-only (not bidirectional — for expression parsers):
+;   chainl1    : (-> Unit (-> a a a)) -> (-> Unit a) -> {ParseState | e} a
+;   chainr1    : (-> Unit (-> a a a)) -> (-> Unit a) -> {ParseState | e} a
+;   or-else    : (-> Unit a) -> (-> Unit a) -> {ParseState | e} a
+;   parser-of  : Codec a -> (-> Unit a)     extract parser thunk
+;   printer-of : Codec a -> (-> a Unit)     extract printer function
+;
+; Character predicates (for use with satisfy or manual parsing):
+;   is-digit, is-alpha, is-lower, is-upper, is-alnum, is-space, is-hex-digit
+;   char=      : Char -> Char -> Bool
+
+; ============================================================
+; Data Types
+; ============================================================
+
+; Iso a b — partial isomorphism between types a and b
+(data (Iso a b) (MkIso (-> a (Option b)) (-> b (Option a))))
+
+; Codecs are represented as (Pair parser printer):
+;   parser  : (-> Unit a)    — performs ParseState + Exception effects
+;   printer : (-> a Unit)    — performs PrintState + Exception effects
+; Use mk-codec, codec-parser, codec-printer to construct and access.
+
+; ============================================================
+; Effects
+; ============================================================
+
+; ParseState: manages input during parsing
+(effect ParseState
+  (peek      (-> Unit (Option Char)))
+  (consume   (-> Unit Char))
+  (get-input (-> Unit (List Char)))
+  (set-input (-> (List Char) Unit)))
+
+; PrintState: manages output during printing
+(effect PrintState
+  (emit      (-> String Unit))
+  (emit-char (-> Char Unit)))
+
+; ============================================================
+; Codec Constructors / Accessors
+; ============================================================
+
+; mk-codec : (-> Unit a) -> (-> a Unit) -> Codec a
+(define mk-codec (lambda (parser printer) (MkPair parser printer)))
+
+; codec-parser : Codec a -> (-> Unit a)
+(define codec-parser (lambda (codec) (match codec ((MkPair p _) p))))
+
+; codec-printer : Codec a -> (-> a Unit)
+(define codec-printer (lambda (codec) (match codec ((MkPair _ r) r))))
+
+; ============================================================
+; Internal: Char Equality
+; ============================================================
+
+(define char= (lambda (a b) (= (char-code a) (char-code b))))
+
+; ============================================================
+; Internal: Parse Handlers
+; ============================================================
+
+; with-input : (List Char) -> (-> Unit a) -> a
+; Recursive handler for ParseState. Threads input via handler recursion.
+(define with-input (lambda (input thunk)
+  (handle
+    (thunk)
+    ((peek k) ->
+      (match input
+        (Nil       (with-input input (lambda () (resume k None))))
+        ((Cons c _) (with-input input (lambda () (resume k (Some c)))))))
+    ((consume k) ->
+      (match input
+        (Nil       (perform throw "unexpected end of input"))
+        ((Cons c rest) (with-input rest (lambda () (resume k c))))))
+    ((get-input k) ->
+      (with-input input (lambda () (resume k input))))
+    ((set-input new-input k) ->
+      (with-input new-input (lambda () (resume k nil)))))))
+
+; run-parse-safe : (List Char) -> (-> Unit a) -> (Result String (Pair a (List Char)))
+; Runs a parser in a fresh handler scope.
+; NOTE: inner-thunk is created BEFORE the handle block to work around
+; a compiler limitation with closure captures inside handle bodies.
+(define run-parse-safe (lambda (input parser)
+  (let ((inner-thunk (lambda ()
+    (let ((val (parser)))
+      (let ((remaining (perform get-input)))
+        (MkPair val remaining))))))
+    (handle
+      (Ok (with-input input inner-thunk))
+      ((throw msg k) -> (Err msg))))))
+
+; try-parse : (-> Unit a) -> (Option a)
+; Try a parser; on failure restore input and return None.
+(define try-parse (lambda (parser)
+  (let ((saved (perform get-input)))
+    (match (run-parse-safe saved parser)
+      ((Ok (MkPair val remaining))
+        (begin
+          (perform set-input remaining)
+          (Some val)))
+      ((Err _) None)))))
+
+; ============================================================
+; Internal: Print Handlers
+; ============================================================
+
+; with-output : (-> Unit Unit) -> String
+; Runs a printer, accumulating emitted output into a string.
+; Uses deep handler semantics — resume continues in the same handler.
+(define with-output (lambda (thunk)
+  (handle
+    (begin (thunk) "")
+    ((emit s k) ->
+      (let ((rest (resume k nil)))
+        (string-append s rest)))
+    ((emit-char c k) ->
+      (let ((rest (resume k nil)))
+        (string-append (char->string c) rest))))))
+
+; try-print : (-> Unit Unit) -> (Option String)
+; Run a printer in a fresh scope. Returns Some output on success, None on failure.
+(define try-print (lambda (thunk)
+  (handle
+    (Some (with-output thunk))
+    ((throw msg k) -> None))))
+
+; ============================================================
+; Public: Runners
+; ============================================================
+
+; parse : Codec a -> String -> (Result String a)
+; Run the parser half of a codec on a string.
+(define parse (lambda (codec input)
+  (let ((parser (codec-parser codec)))
+    (let ((chars (string->chars input)))
+      (match (run-parse-safe chars parser)
+        ((Ok (MkPair val _remaining)) (Ok val))
+        ((Err msg) (Err msg)))))))
+
+; print : Codec a -> a -> (Result String String)
+; Run the printer half of a codec on a value.
+; NOTE: print-thunk is created BEFORE the handle block (compiler limitation).
+(define print (lambda (codec value)
+  (let ((printer (codec-printer codec)))
+    (let ((print-thunk (lambda () (printer value))))
+      (handle
+        (Ok (with-output print-thunk))
+        ((throw msg k) -> (Err msg)))))))
+
+; round-trip : Codec a -> String -> (Result String String)
+; Parse then print. Useful for testing codec correctness.
+(define round-trip (lambda (codec input)
+  (match (parse codec input)
+    ((Err msg) (Err msg))
+    ((Ok val) (print codec val)))))
+
+; ============================================================
+; Public: Extractors
+; ============================================================
+
+; parser-of : Codec a -> (-> Unit a)
+; Extract just the parser thunk from a codec.
+(define parser-of (lambda (codec) (codec-parser codec)))
+
+; printer-of : Codec a -> (-> a Unit)
+; Extract just the printer function from a codec.
+(define printer-of (lambda (codec) (codec-printer codec)))
+
+; ============================================================
+; Primitive Codecs
+; ============================================================
+
+; pure : a -> Codec a
+; Always succeeds with the given value. Prints nothing.
+(define pure (lambda (val)
+  (mk-codec
+    (lambda () val)
+    (lambda (_) nil))))
+
+; fail : String -> Codec a
+; Always fails with the given message.
+(define fail (lambda (msg)
+  (mk-codec
+    (lambda () (perform throw msg))
+    (lambda (_) (perform throw msg)))))
+
+; lit-char : Char -> Codec Unit
+; Literal character: parse consumes it, print emits it.
+(define lit-char (lambda (expected)
+  (mk-codec
+    (lambda ()
+      (let ((c (perform consume)))
+        (if (char= c expected) nil
+          (perform throw (string-append "expected '"
+            (string-append (char->string expected)
+              (string-append "', got '"
+                (string-append (char->string c) "'"))))))))
+    (lambda (_) (perform emit-char expected)))))
+
+; lit-string : String -> Codec Unit
+; Literal string: parse consumes it char by char, print emits it.
+(define lit-string (lambda (expected)
+  (define go (lambda (chars)
+    (match chars
+      (Nil nil)
+      ((Cons c rest)
+        (let ((got (perform consume)))
+          (if (char= got c)
+            (go rest)
+            (perform throw (string-append "expected \""
+              (string-append expected
+                (string-append "\", got '"
+                  (string-append (char->string got) "'")))))))))))
+  (mk-codec
+    (lambda () (go (string->chars expected)))
+    (lambda (_) (perform emit expected)))))
+
+; satisfy : (Char -> Bool) -> String -> Codec Char
+; Character matching a predicate. Prints the character back.
+(define satisfy (lambda (pred desc)
+  (mk-codec
+    (lambda ()
+      (let ((c (perform consume)))
+        (if (pred c) c
+          (perform throw (string-append "expected " desc
+            (string-append ", got '"
+              (string-append (char->string c) "'")))))))
+    (lambda (c)
+      (if (pred c) (perform emit-char c)
+        (perform throw (string-append "satisfy: value doesn't match " desc)))))))
+
+; any-char : Codec Char
+; Any single character.
+(define any-char
+  (mk-codec
+    (lambda () (perform consume))
+    (lambda (c) (perform emit-char c))))
+
+; eof : Codec Unit
+; End of input. Prints nothing.
+(define eof
+  (mk-codec
+    (lambda ()
+      (match (perform peek)
+        (None nil)
+        ((Some c) (perform throw (string-append "expected end of input, got '"
+                    (string-append (char->string c) "'"))))))
+    (lambda (_) nil)))
+
+; peek-char : Codec (Option Char)
+; Look at the next character without consuming it.
+(define peek-char
+  (mk-codec
+    (lambda () (perform peek))
+    (lambda (_) nil)))
+
+; ============================================================
+; Character Predicates
+; ============================================================
+
+(define is-digit (lambda (c)
+  (let ((code (char-code c)))
+    (if (>= code 48) (<= code 57) #f))))
+
+(define is-lower (lambda (c)
+  (let ((code (char-code c)))
+    (if (>= code 97) (<= code 122) #f))))
+
+(define is-upper (lambda (c)
+  (let ((code (char-code c)))
+    (if (>= code 65) (<= code 90) #f))))
+
+(define is-alpha (lambda (c)
+  (if (is-lower c) #t (is-upper c))))
+
+(define is-alnum (lambda (c)
+  (if (is-alpha c) #t (is-digit c))))
+
+(define is-space (lambda (c)
+  (let ((code (char-code c)))
+    (if (= code 32) #t
+    (if (= code 9) #t
+    (if (= code 10) #t
+    (if (= code 13) #t
+    #f)))))))
+
+(define is-hex-digit (lambda (c)
+  (if (is-digit c) #t
+  (let ((code (char-code c)))
+    (if (if (>= code 65) (<= code 70) #f) #t
+    (if (>= code 97) (<= code 102) #f))))))
+
+; ============================================================
+; Character Codecs
+; ============================================================
+
+; digit : Codec Char
+(define digit (satisfy is-digit "digit"))
+
+; lower : Codec Char
+(define lower (satisfy is-lower "lowercase letter"))
+
+; upper : Codec Char
+(define upper (satisfy is-upper "uppercase letter"))
+
+; letter : Codec Char
+(define letter (satisfy is-alpha "letter"))
+
+; alnum : Codec Char
+(define alnum (satisfy is-alnum "alphanumeric"))
+
+; hex-digit : Codec Char
+(define hex-digit (satisfy is-hex-digit "hex digit"))
+
+; space : Codec Unit
+; Single whitespace character. Canonical print: one space.
+(define space
+  (mk-codec
+    (lambda ()
+      (let ((c (perform consume)))
+        (if (is-space c) nil
+          (perform throw (string-append "expected space, got '"
+            (string-append (char->string c) "'"))))))
+    (lambda (_) (perform emit " "))))
+
+; spaces : Codec Unit
+; Zero or more whitespace. Canonical print: single space.
+(define spaces
+  (mk-codec
+    (lambda ()
+      (define skip-ws (lambda ()
+        (match (perform peek)
+          (None nil)
+          ((Some c)
+            (if (is-space c)
+              (begin (perform consume) (skip-ws))
+              nil)))))
+      (skip-ws))
+    (lambda (_) (perform emit " "))))
+
+; spaces0 : Codec Unit
+; Zero or more whitespace. Canonical print: nothing.
+(define spaces0
+  (mk-codec
+    (lambda ()
+      (define skip-ws (lambda ()
+        (match (perform peek)
+          (None nil)
+          ((Some c)
+            (if (is-space c)
+              (begin (perform consume) (skip-ws))
+              nil)))))
+      (skip-ws))
+    (lambda (_) nil)))
+
+; one-of : String -> Codec Char
+; Parse any character in the given string. Print emits the char.
+(define one-of (lambda (chars)
+  (define member (lambda (c lst)
+    (match lst
+      (Nil #f)
+      ((Cons x rest) (if (char= c x) #t (member c rest))))))
+  (let ((char-list (string->chars chars)))
+    (satisfy
+      (lambda (c) (member c char-list))
+      (string-append "one of \"" (string-append chars "\""))))))
+
+; none-of : String -> Codec Char
+; Parse any character NOT in the given string.
+(define none-of (lambda (chars)
+  (define member (lambda (c lst)
+    (match lst
+      (Nil #f)
+      ((Cons x rest) (if (char= c x) #t (member c rest))))))
+  (let ((char-list (string->chars chars)))
+    (satisfy
+      (lambda (c) (if (member c char-list) #f #t))
+      (string-append "none of \"" (string-append chars "\""))))))
+
+; ============================================================
+; Isomorphism Constructors
+; ============================================================
+
+; iso-id : Iso a a
+(define iso-id (MkIso (lambda (x) (Some x)) (lambda (x) (Some x))))
+
+; iso-inverse : (Iso a b) -> (Iso b a)
+(define iso-inverse (lambda (i)
+  (match i
+    ((MkIso fwd bwd) (MkIso bwd fwd)))))
+
+; iso-compose : (Iso a b) -> (Iso b c) -> (Iso a c)
+(define iso-compose (lambda (i1 i2)
+  (match i1
+    ((MkIso fwd1 bwd1)
+      (match i2
+        ((MkIso fwd2 bwd2)
+          (MkIso
+            (lambda (a)
+              (match (fwd1 a)
+                (None None)
+                ((Some b) (fwd2 b))))
+            (lambda (c)
+              (match (bwd2 c)
+                (None None)
+                ((Some b) (bwd1 b)))))))))))
+
+; iso-chars : Iso (List Char) String
+(define iso-chars
+  (MkIso
+    (lambda (chars) (Some (chars->string chars)))
+    (lambda (s) (Some (string->chars s)))))
+
+; iso-number : Iso String Float
+; String of digits <-> Float number
+(define iso-number
+  (MkIso
+    (lambda (s)
+      (match (__try-string->number s)
+        ((Some n) (Some n))
+        (None None)))
+    (lambda (n) (Some (number->string n)))))
+
+; iso-cons : Iso (Pair a (List a)) (List a)
+; (MkPair head tail) <-> (Cons head tail)
+(define iso-cons
+  (MkIso
+    (lambda (pair)
+      (match pair
+        ((MkPair h t) (Some (Cons h t)))))
+    (lambda (lst)
+      (match lst
+        (Nil None)
+        ((Cons h t) (Some (MkPair h t)))))))
+
+; iso-nil : Iso Unit (List a)
+; Unit <-> Nil
+(define iso-nil
+  (MkIso
+    (lambda (_) (Some Nil))
+    (lambda (lst)
+      (match lst
+        (Nil (Some nil))
+        ((Cons _ _) None)))))
+
+; iso-some : Iso a (Option a)
+; a <-> (Some a)
+(define iso-some
+  (MkIso
+    (lambda (x) (Some (Some x)))
+    (lambda (opt)
+      (match opt
+        (None None)
+        ((Some x) (Some x))))))
+
+; iso-none : Iso Unit (Option a)
+; Unit <-> None
+(define iso-none
+  (MkIso
+    (lambda (_) (Some None))
+    (lambda (opt)
+      (match opt
+        (None (Some nil))
+        ((Some _) None)))))
+
+; iso-result-ok : Iso a (Result e a)
+(define iso-result-ok
+  (MkIso
+    (lambda (x) (Some (Ok x)))
+    (lambda (res)
+      (match res
+        ((Ok x) (Some x))
+        ((Err _) None)))))
+
+; iso-result-err : Iso e (Result e a)
+(define iso-result-err
+  (MkIso
+    (lambda (e) (Some (Err e)))
+    (lambda (res)
+      (match res
+        ((Err e) (Some e))
+        ((Ok _) None)))))
+
+; iso-pair-flip : Iso (Pair a b) (Pair b a)
+(define iso-pair-flip
+  (MkIso
+    (lambda (p) (match p ((MkPair a b) (Some (MkPair b a)))))
+    (lambda (p) (match p ((MkPair b a) (Some (MkPair a b)))))))
+
+; ============================================================
+; Core Combinators
+; ============================================================
+
+; iso : (Iso a b) -> Codec a -> Codec b
+; Map a codec through a partial isomorphism.
+(define iso (lambda (i codec)
+  (match i
+    ((MkIso fwd bwd)
+      (let ((parser (codec-parser codec)))
+        (let ((printer (codec-printer codec)))
+          (mk-codec
+            (lambda ()
+              (let ((a (parser)))
+                (match (fwd a)
+                  ((Some b) b)
+                  (None (perform throw "iso: forward mapping failed")))))
+            (lambda (b)
+              (match (bwd b)
+                ((Some a) (printer a))
+                (None (perform throw "iso: backward mapping failed")))))))))))
+
+; seq : Codec a -> Codec b -> Codec (Pair a b)
+; Sequence two codecs, keeping both results as a Pair.
+(define seq (lambda (c1 c2)
+  (let ((p1 (codec-parser c1)))
+    (let ((pr1 (codec-printer c1)))
+      (let ((p2 (codec-parser c2)))
+        (let ((pr2 (codec-printer c2)))
+          (mk-codec
+            (lambda () (let ((a (p1))) (let ((b (p2))) (MkPair a b))))
+            (lambda (pair)
+              (match pair
+                ((MkPair a b) (begin (pr1 a) (pr2 b))))))))))))
+
+; seq-left : Codec a -> Codec Unit -> Codec a
+; Sequence two codecs, keeping only the left result.
+; The right codec must be Codec Unit — syntax only.
+(define seq-left (lambda (data-codec syntax-codec)
+  (let ((p1 (codec-parser data-codec)))
+    (let ((pr1 (codec-printer data-codec)))
+      (let ((p2 (codec-parser syntax-codec)))
+        (let ((pr2 (codec-printer syntax-codec)))
+          (mk-codec
+            (lambda () (let ((a (p1))) (begin (p2) a)))
+            (lambda (a) (begin (pr1 a) (pr2 nil))))))))))
+
+; seq-right : Codec Unit -> Codec a -> Codec a
+; Sequence two codecs, keeping only the right result.
+; The left codec must be Codec Unit — syntax only.
+(define seq-right (lambda (syntax-codec data-codec)
+  (let ((p1 (codec-parser syntax-codec)))
+    (let ((pr1 (codec-printer syntax-codec)))
+      (let ((p2 (codec-parser data-codec)))
+        (let ((pr2 (codec-printer data-codec)))
+          (mk-codec
+            (lambda () (begin (p1) (p2)))
+            (lambda (a) (begin (pr1 nil) (pr2 a))))))))))
+
+; alt : Codec a -> Codec a -> Codec a
+; Ordered choice. Parse: try first, then second. Print: try first printer, then second.
+(define alt (lambda (c1 c2)
+  (let ((p1 (codec-parser c1)))
+    (let ((pr1 (codec-printer c1)))
+      (let ((p2 (codec-parser c2)))
+        (let ((pr2 (codec-printer c2)))
+          (mk-codec
+            (lambda ()
+              (match (try-parse p1)
+                ((Some x) x)
+                (None (p2))))
+            (lambda (v)
+              (match (try-print (lambda () (pr1 v)))
+                ((Some _output) (pr1 v))
+                (None (pr2 v)))))))))))
+
+; many-parse : (-> Unit a) -> (List a)
+; Helper: greedily parse until failure.
+(define many-parse (lambda (p)
+  (match (try-parse p)
+    (None Nil)
+    ((Some x) (Cons x (many-parse p))))))
+
+; many-print : (-> a Unit) -> (List a) -> Unit
+; Helper: print each element in the list.
+(define many-print (lambda (pr items)
+  (match items
+    (Nil nil)
+    ((Cons x rest) (begin (pr x) (many-print pr rest))))))
+
+; many : Codec a -> Codec (List a)
+; Zero or more repetitions.
+; Parse: greedily parse until failure.
+; Print: iterate the list and print each element.
+(define many (lambda (codec)
+  (let ((parser (codec-parser codec)))
+    (let ((printer (codec-printer codec)))
+      (mk-codec
+        (lambda () (many-parse parser))
+        (lambda (lst) (many-print printer lst)))))))
+
+; many1 : Codec a -> Codec (List a)
+; One or more repetitions.
+(define many1 (lambda (codec)
+  (let ((parser (codec-parser codec)))
+    (let ((many-codec (many codec)))
+      (let ((many-parser (codec-parser many-codec)))
+        (let ((many-printer (codec-printer many-codec)))
+          (mk-codec
+            (lambda ()
+              (let ((first (parser)))
+                (let ((rest (many-parser)))
+                  (Cons first rest))))
+            (lambda (lst)
+              (match lst
+                (Nil (perform throw "many1: expected non-empty list"))
+                ((Cons _ _) (many-printer lst)))))))))))
+
+; optional : Codec a -> Codec (Option a)
+; Parse: try the codec, return None on failure.
+; Print: print (Some x) with the codec, print None as nothing.
+(define optional (lambda (codec)
+  (let ((parser (codec-parser codec)))
+    (let ((printer (codec-printer codec)))
+      (mk-codec
+        (lambda ()
+          (match (try-parse parser)
+            ((Some x) (Some x))
+            (None None)))
+        (lambda (opt)
+          (match opt
+            (None nil)
+            ((Some x) (printer x)))))))))
+
+; between : Codec Unit -> Codec Unit -> Codec a -> Codec a
+; Parse/print something between delimiters.
+(define between (lambda (left right inner)
+  (let ((pl (codec-parser left)))
+    (let ((prl (codec-printer left)))
+      (let ((pr (codec-parser right)))
+        (let ((prr (codec-printer right)))
+          (let ((pi (codec-parser inner)))
+            (let ((pri (codec-printer inner)))
+              (mk-codec
+                (lambda () (begin (pl) (let ((result (pi))) (begin (pr) result))))
+                (lambda (a) (begin (prl nil) (pri a) (prr nil))))))))))))
+
+; sep-parse-rest : (-> Unit Unit) -> (-> Unit a) -> (List a)
+; Helper: parse (sep item)* until failure.
+(define sep-parse-rest (lambda (sp ip)
+  (match (try-parse (lambda () (begin (sp) (ip))))
+    (None Nil)
+    ((Some x) (Cons x (sep-parse-rest sp ip))))))
+
+; sep-print-items : (-> Unit Unit) -> (-> a Unit) -> (List a) -> Bool -> Unit
+; Helper: print items with separator between them.
+(define sep-print-items (lambda (sp ip items is-first)
+  (match items
+    (Nil nil)
+    ((Cons x rest)
+      (begin
+        (if is-first nil (sp nil))
+        (ip x)
+        (sep-print-items sp ip rest #f))))))
+
+; sep-by : Codec Unit -> Codec a -> Codec (List a)
+; Zero or more items separated by a separator.
+; Parse: parse item, then (sep item)* until failure.
+; Print: print items with separator between them.
+(define sep-by (lambda (sep-codec item-codec)
+  (let ((sep-parser (codec-parser sep-codec)))
+    (let ((sep-printer (codec-printer sep-codec)))
+      (let ((item-parser (codec-parser item-codec)))
+        (let ((item-printer (codec-printer item-codec)))
+          (mk-codec
+            (lambda ()
+              (match (try-parse item-parser)
+                (None Nil)
+                ((Some first) (Cons first (sep-parse-rest sep-parser item-parser)))))
+            (lambda (lst) (sep-print-items sep-printer item-printer lst #t)))))))))
+
+; sep-by1 : Codec Unit -> Codec a -> Codec (List a)
+; One or more items separated by a separator.
+(define sep-by1 (lambda (sep-codec item-codec)
+  (let ((sb (sep-by sep-codec item-codec)))
+    (let ((sb-parser (codec-parser sb)))
+      (let ((sb-printer (codec-printer sb)))
+        (mk-codec
+          (lambda ()
+            (let ((result (sb-parser)))
+              (match result
+                (Nil (perform throw "sep-by1: expected at least one item"))
+                ((Cons _ _) result))))
+          (lambda (lst)
+            (match lst
+              (Nil (perform throw "sep-by1: expected non-empty list"))
+              ((Cons _ _) (sb-printer lst))))))))))
+
+; label : String -> Codec a -> Codec a
+; Give a codec a custom error message on parse failure.
+(define label (lambda (msg codec)
+  (let ((parser (codec-parser codec)))
+    (let ((printer (codec-printer codec)))
+      (mk-codec
+        (lambda ()
+          (let ((saved (perform get-input)))
+            (match (run-parse-safe saved parser)
+              ((Ok (MkPair val remaining))
+                (begin
+                  (perform set-input remaining)
+                  val))
+              ((Err _) (perform throw msg)))))
+        printer)))))
+
+; ============================================================
+; Higher-Order Combinators (Parse-only compat)
+; ============================================================
+
+; chainl1 : (-> Unit (-> a a a)) -> (-> Unit a) -> a
+; Left-associative operator chain. Parse-only (no bidirectional form).
+; Use with parser-of when building expression parsers.
+(define chainl1 (lambda (op parser)
+  (define go (lambda (op parser acc)
+    (match (try-parse (lambda () (let ((f (op))) (let ((x (parser))) (MkPair f x)))))
+      (None acc)
+      ((Some (MkPair f x)) (go op parser (f acc x))))))
+  (go op parser (parser))))
+
+; chainr1 : (-> Unit (-> a a a)) -> (-> Unit a) -> a
+; Right-associative operator chain. Parse-only.
+(define chainr1 (lambda (op parser)
+  (define go (lambda (op parser)
+    (let ((x (parser)))
+      (match (try-parse (lambda () (let ((f (op))) (MkPair f (go op parser)))))
+        (None x)
+        ((Some (MkPair f rest)) (f x rest))))))
+  (go op parser)))
+
+; or-else : (-> Unit a) -> (-> Unit a) -> a
+; Try the first parser; if it fails, try the second. Parse-only compat.
+(define or-else (lambda (p1 p2)
+  (match (try-parse p1)
+    ((Some x) x)
+    (None (p2)))))
+
+; ============================================================
+; Convenience Combinators
+; ============================================================
+
+; skip : Codec a -> Codec Unit
+; Run a codec and discard its result. Print emits nothing.
+; Useful for converting data codecs to syntax codecs.
+(define skip (lambda (codec)
+  (let ((parser (codec-parser codec)))
+    (mk-codec
+      (lambda () (begin (parser) nil))
+      (lambda (_) nil)))))
+
+; token : Codec a -> Codec a
+; Wrap a codec to skip trailing whitespace (canonical: nothing).
+(define token (lambda (codec)
+  (seq-left codec spaces0)))
+
+; symbol : String -> Codec Unit
+; Parse a specific string token, skipping trailing whitespace.
+(define symbol (lambda (s)
+  (seq-left (lit-string s) spaces0)))
+
+; parens : Codec a -> Codec a
+; Parse/print something between parentheses.
+(define parens (lambda (codec)
+  (between
+    (lit-char (char-from-code 40))
+    (lit-char (char-from-code 41))
+    codec)))
+
+; braces : Codec a -> Codec a
+; Parse/print something between curly braces.
+(define braces (lambda (codec)
+  (between
+    (lit-char (char-from-code 123))
+    (lit-char (char-from-code 125))
+    codec)))
+
+; brackets : Codec a -> Codec a
+; Parse/print something between square brackets.
+(define brackets (lambda (codec)
+  (between
+    (lit-char (char-from-code 91))
+    (lit-char (char-from-code 93))
+    codec)))
+
+; ============================================================
+; Numeric Codecs
+; ============================================================
+
+; nat-string : Codec String
+; Parse one or more digits as a string. Print emits the digits.
+(define nat-string
+  (iso iso-chars (many1 digit)))
+
+; nat : Codec Float
+; Parse a natural number.
+(define nat
+  (iso iso-number nat-string))
+
+; integer-string : Codec String
+; Parse an integer (optional minus, digits) as a string.
+(define integer-string
+  (let ((minus-char (char-from-code 45)))
+    (mk-codec
+      (lambda ()
+        (let ((sign (match (perform peek)
+                (None "")
+                ((Some c) (if (char= c minus-char)
+                  (begin (perform consume) "-")
+                  "")))))
+          (let ((digits (chars->string
+                  (let ((p (codec-parser (many1 digit))))
+                    (p)))))
+            (string-append sign digits))))
+      (lambda (s)
+        (define go (lambda (chars)
+          (match chars
+            (Nil nil)
+            ((Cons c rest) (begin (perform emit-char c) (go rest))))))
+        (go (string->chars s))))))
+
+; integer : Codec Float
+; Parse/print an integer.
+(define integer
+  (iso iso-number integer-string))
+
+; ============================================================
+; Lookahead / Negation
+; ============================================================
+
+; not-followed-by : (-> Unit a) -> Codec Unit
+; Succeed (parse) without consuming if parser fails. Parse-only semantics.
+(define not-followed-by (lambda (parser)
+  (mk-codec
+    (lambda ()
+      (match (try-parse parser)
+        (None nil)
+        ((Some _) (perform throw "unexpected"))))
+    (lambda (_) nil))))
+
+; lookahead : Codec a -> Codec a
+; Parse and return result, but restore input. Print works normally.
+(define lookahead (lambda (codec)
+  (let ((parser (codec-parser codec)))
+    (let ((printer (codec-printer codec)))
+      (mk-codec
+        (lambda ()
+          (let ((saved (perform get-input)))
+            (let ((result (parser)))
+              (begin (perform set-input saved) result))))
+        printer)))))
+
+; count-parse : (-> Unit a) -> Int -> (List a)
+; Helper: parse exactly n occurrences.
+(define count-parse (lambda (p remaining)
+  (if (<= remaining 0) Nil
+    (let ((x (p)))
+      (Cons x (count-parse p (- remaining 1)))))))
+
+; count-print : (-> a Unit) -> (List a) -> Int -> Unit
+; Helper: print exactly n items.
+(define count-print (lambda (pr items remaining)
+  (if (<= remaining 0) nil
+    (match items
+      (Nil (perform throw "count: list too short"))
+      ((Cons x rest) (begin (pr x) (count-print pr rest (- remaining 1))))))))
+
+; count : Int -> Codec a -> Codec (List a)
+; Parse/print exactly n occurrences.
+(define count (lambda (n codec)
+  (let ((parser (codec-parser codec)))
+    (let ((printer (codec-printer codec)))
+      (mk-codec
+        (lambda () (count-parse parser n))
+        (lambda (lst) (count-print printer lst n)))))))
+
+; till-parse : (-> Unit a) -> (-> Unit Unit) -> (List a)
+; Helper: parse items until end parser succeeds.
+(define till-parse (lambda (ip ep)
+  (match (try-parse ep)
+    ((Some _) Nil)
+    (None (let ((x (ip)))
+            (Cons x (till-parse ip ep)))))))
+
+; till-print : (-> a Unit) -> (-> Unit Unit) -> (List a) -> Unit
+; Helper: print items then end.
+(define till-print (lambda (ip ep items)
+  (match items
+    (Nil (ep nil))
+    ((Cons x rest) (begin (ip x) (till-print ip ep rest))))))
+
+; many-till : Codec a -> Codec Unit -> Codec (List a)
+; Parse items until end succeeds. Print items then end.
+(define many-till (lambda (item-codec end-codec)
+  (let ((item-parser (codec-parser item-codec)))
+    (let ((item-printer (codec-printer item-codec)))
+      (let ((end-parser (codec-parser end-codec)))
+        (let ((end-printer (codec-printer end-codec)))
+          (mk-codec
+            (lambda () (till-parse item-parser end-parser))
+            (lambda (lst) (till-print item-printer end-printer lst)))))))))
+
+; choice : (List Codec a) -> Codec a
+; Try codecs in order, return first success.
+; Note: empty list case uses a codec that touches ParseState to keep
+; effect rows consistent with the non-empty case.
+(define choice (lambda (codecs)
+  (match codecs
+    (Nil
+      (mk-codec
+        (lambda () (begin (perform get-input) (perform throw "no alternatives matched")))
+        (lambda (_) (perform throw "no alternatives matched"))))
+    ((Cons c Nil) c)
+    ((Cons c rest) (alt c (choice rest))))))

@@ -1,4 +1,4 @@
-; Calculator Example — using std:parse
+; Calculator Example — using std:codec
 ;
 ; Parses and evaluates simple arithmetic expressions:
 ;   1 + 2 * 3       => 7
@@ -10,32 +10,13 @@
 ;   term   = factor (('*' | '/') factor)*
 ;   factor = '(' expr ')' | integer
 ;
+; This example uses codec's parse-only compat functions (chainl1, or-else)
+; since expression evaluation is inherently one-directional.
+;
 ; Run with: cargo run -p marlang-cli -- run examples/parse-calc.mar
 
-(import "std:parse" as p)
+(import "std:codec" as c)
 (import "std:io" as io)
-
-; === Forward-declare expr so factor can reference it ===
-; Use a mutable-like thunk. Since we don't have mutation,
-; we'll structure the parsers to avoid mutual recursion by
-; inlining the grammar recursion.
-
-; Actually: define expr first, having it call term, which calls factor,
-; which calls expr. Since lambdas delay evaluation, all we need is for
-; the *names* to be bound before any of them are *called*.
-; In Marlang, top-level defines are sequential, so 'expr' is not yet
-; bound when 'factor' is defined. But since 'factor' is a lambda,
-; 'expr' only needs to be bound when 'factor' is *called*, not defined.
-; Let's check if Marlang closes over the variable name lazily...
-
-; Actually, closures capture from the lexical scope at *definition* time.
-; If 'expr' isn't defined yet, the closure can't capture it.
-; Solution: put everything in a single let-rec-like structure,
-; or use the classic trick of passing self as an argument.
-
-; Simplest: just don't use mutual recursion. Have expr/term/factor
-; all be lambdas in a letrec, or define a single recursive function
-; that dispatches on a "level" parameter.
 
 ; Approach: single function with a level parameter
 ; level 0 = expr, level 1 = term, level 2 = factor
@@ -43,36 +24,40 @@
 (define parse-expr (lambda (level)
   (if (= level 0)
     ; expr: term chained with + and -
-    (p/chainl1
+    (c/chainl1
       (lambda ()
         (begin
-          (p/spaces)
-          (p/choice (list
-            (lambda () (begin (p/char (char-from-code 43)) (p/spaces) +.))
-            (lambda () (begin (p/char (char-from-code 45)) (p/spaces) -.))))))
+          ((c/codec-parser c/spaces0))
+          (c/or-else
+            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 43)))) ((c/codec-parser c/spaces0)) +.))
+            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 45)))) ((c/codec-parser c/spaces0)) -.)))))
       (lambda () (parse-expr 1)))
   (if (= level 1)
     ; term: factor chained with * and /
-    (p/chainl1
+    (c/chainl1
       (lambda ()
         (begin
-          (p/spaces)
-          (p/choice (list
-            (lambda () (begin (p/char (char-from-code 42)) (p/spaces) *.))
-            (lambda () (begin (p/char (char-from-code 47)) (p/spaces) /.))))))
+          ((c/codec-parser c/spaces0))
+          (c/or-else
+            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 42)))) ((c/codec-parser c/spaces0)) *.))
+            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 47)))) ((c/codec-parser c/spaces0)) /.)))))
       (lambda () (parse-expr 2)))
     ; factor: parens or integer
     (begin
-      (p/spaces)
-      (p/or-else
-        (lambda () (p/parens (lambda () (parse-expr 0))))
-        (lambda () (p/integer))))))))
+      ((c/codec-parser c/spaces0))
+      (c/or-else
+        (lambda () ((c/codec-parser (c/parens
+          (c/mk-codec (lambda () (parse-expr 0)) (lambda (_) nil))))))
+        (lambda () ((c/codec-parser c/integer)))))))))
 
-; Top-level parser
+; Top-level parser: wrap in a codec and use c/parse
 (define calc (lambda (input)
-  (p/run (lambda ()
-    (let ((result (parse-expr 0)))
-      (begin (p/spaces) (p/eof) result)))
+  (c/parse
+    (c/mk-codec
+      (lambda ()
+        (let ((result (parse-expr 0)))
+          (begin ((c/codec-parser c/spaces0)) ((c/codec-parser c/eof)) result)))
+      (lambda (_) nil))
     input)))
 
 ; === Tests ===

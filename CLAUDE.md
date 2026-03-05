@@ -52,6 +52,7 @@ Located in `stdlib/`:
 - `math.mar` - Math utilities: constants (pi, e, tau), basic ops (min-of, max-of, clamp — Int and Float versions), powers (square, cube), int division (div, div., even, odd), logarithms (log-base), angles (degrees, radians), number theory (gcd, lcm, factorial). Trig/exp/log builtins (sqrt, pow, sin, cos, etc.) are available globally without import.
 - `concurrent.mar` - Concurrency wrappers (fibers, channels)
 - `actor.mar` - Actor model (mailboxes, supervision)
+- `codec.mar` - Bidirectional parser/printer: Iso type, Codec (parse/print/round-trip), combinators (seq, alt, many, between, sep-by, choice), character codecs (satisfy, digit, letter, space), numeric codecs (nat, integer), isomorphisms (iso-chars, iso-number, iso-cons, iso-some), convenience (token, symbol, parens, braces, brackets), parse-only compat (chainl1, chainr1, or-else)
 - `net.mar` - TCP networking wrappers (listen, accept, connect, send, recv, close)
 - `http.mar` - HTTP client/server (UNIMPLEMENTED — no runtime handlers)
 
