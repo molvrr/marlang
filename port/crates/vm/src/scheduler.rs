@@ -324,6 +324,7 @@ fn install_handler_frame(vm: &mut VM) {
             op_name: name.to_string(),
             closure: dummy.clone(),
             arity: 1,
+            tail_resume_closure: None,
         })
         .collect();
 
@@ -336,6 +337,7 @@ fn install_handler_frame(vm: &mut VM) {
         capture_stack_start: vm.stack_top,
         id: next_handler_id(),
         is_scheduler: true,
+        is_tail_resumptive: false,
     };
     vm.handler_stack.push(handler_frame);
 }

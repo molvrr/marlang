@@ -196,6 +196,11 @@ pub struct HandlerEntry {
     pub op_name: String,
     pub closure: Closure,
     pub arity: u8,
+    /// For tail-resumptive handlers: a closure that computes the resume value
+    /// without needing the continuation. Takes the effect args (but not k) and
+    /// returns the value to resume with. When set, `Perform` can skip
+    /// continuation capture entirely.
+    pub tail_resume_closure: Option<Closure>,
 }
 
 /// A handler frame installed on the handler stack by `handle`.
@@ -214,6 +219,10 @@ pub struct VMHandlerFrame {
     /// True for scheduler-installed dummy handlers. These use the EffectSignal path.
     /// False for user `handle` blocks, which are dispatched inline via CPS.
     pub is_scheduler: bool,
+    /// True when ALL handler clauses are tail-resumptive (body is `(k expr)` where
+    /// expr is a simple expression that doesn't reference k). When true, `Perform`
+    /// can skip continuation capture and call the tail-resume closure directly.
+    pub is_tail_resumptive: bool,
 }
 
 /// A handler dispatch marker — tracks that we're inside a handler clause invocation.

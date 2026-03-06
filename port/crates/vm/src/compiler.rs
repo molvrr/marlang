@@ -1370,6 +1370,8 @@ impl<'a> Compiler<'a> {
             op_name_idx: u32,
             proto_idx: u32,
             arity: u8,
+            /// Prototype index for the tail-resume-value closure, or None.
+            tail_resume_proto_idx: Option<u32>,
         }
         let mut handler_infos: Vec<HandlerInfo> = Vec::new();
         let mut return_proto_idx: Option<u32> = None;
@@ -1462,7 +1464,7 @@ impl<'a> Compiler<'a> {
                     &handler_name,
                     self.interner,
                     self.known_symbols,
-                    Some(parent_scope),
+                    Some(parent_scope.clone()),
                     self.known_constructors.clone(),
                     self.known_effect_ops.clone(),
                     self.module_id,
@@ -1477,13 +1479,55 @@ impl<'a> Compiler<'a> {
 
                 let arity = (params.len() + 1) as u8; // params + continuation
                 let proto = FunctionPrototype {
-                    name: handler_name,
+                    name: handler_name.clone(),
                     arity,
                     is_variadic: false,
                     upvalues: fn_compiler.upvalues,
                     chunk: fn_compiler.chunk,
                     module_id: self.module_id,
                 };
+
+                // Check if this clause is tail-resumptive: body is (resume k <expr>)
+                // where <expr> does not reference k and is a simple expression.
+                let tail_resume_proto_idx =
+                    if Self::is_tail_resumptive_body(handler_body, cont_param, self.interner) {
+                        // Extract the resume-value expression (third element of (resume k <expr>))
+                        let body_elements = ast::list_to_array(handler_body);
+                        let resume_value_expr = body_elements[2];
+
+                        // Compile a separate closure that takes just the effect args
+                        // (not k) and returns the resume value.
+                        let resume_name = format!("<tail-resume:{}>", full_name);
+                        let mut resume_compiler = Compiler::new(
+                            &resume_name,
+                            self.interner,
+                            self.known_symbols,
+                            Some(parent_scope),
+                            self.known_constructors.clone(),
+                            self.known_effect_ops.clone(),
+                            self.module_id,
+                        );
+                        // Same params as the handler clause, but without the continuation
+                        for &p in &params {
+                            resume_compiler.add_local(p);
+                        }
+                        resume_compiler.compile_expr(resume_value_expr, true)?;
+                        resume_compiler.emit(Op::Return, line);
+                        resume_compiler.chunk.local_count = resume_compiler.local_count;
+
+                        let resume_arity = params.len() as u8;
+                        let resume_proto = FunctionPrototype {
+                            name: resume_name,
+                            arity: resume_arity,
+                            is_variadic: false,
+                            upvalues: resume_compiler.upvalues,
+                            chunk: resume_compiler.chunk,
+                            module_id: self.module_id,
+                        };
+                        Some(self.add_constant(ConstantValue::Prototype(resume_proto)))
+                    } else {
+                        None
+                    };
 
                 let effect_name_idx = self.add_constant(ConstantValue::String(effect_name));
                 let op_name_idx = self.add_constant(ConstantValue::String(op_name));
@@ -1493,6 +1537,7 @@ impl<'a> Compiler<'a> {
                     op_name_idx,
                     proto_idx,
                     arity,
+                    tail_resume_proto_idx,
                 });
             }
         }
@@ -1522,13 +1567,20 @@ impl<'a> Compiler<'a> {
         };
         let body_proto_idx = self.add_constant(ConstantValue::Prototype(body_proto));
 
+        // Check if all handler clauses are tail-resumptive
+        let all_tail_resumptive = !handler_infos.is_empty()
+            && handler_infos
+                .iter()
+                .all(|h| h.tail_resume_proto_idx.is_some());
+
         // Encode handler descriptor as JSON string constant
         let handlers_json: Vec<String> = handler_infos
             .iter()
             .map(|h| {
+                let tail_resume_idx = h.tail_resume_proto_idx.map_or(-1, |idx| idx as i32);
                 format!(
-                    "{{\"effectNameIdx\":{},\"opNameIdx\":{},\"protoIdx\":{},\"arity\":{}}}",
-                    h.effect_name_idx, h.op_name_idx, h.proto_idx, h.arity
+                    "{{\"effectNameIdx\":{},\"opNameIdx\":{},\"protoIdx\":{},\"arity\":{},\"tailResumeProtoIdx\":{}}}",
+                    h.effect_name_idx, h.op_name_idx, h.proto_idx, h.arity, tail_resume_idx
                 )
             })
             .collect();
@@ -1536,11 +1588,13 @@ impl<'a> Compiler<'a> {
             Some(idx) => idx.to_string(),
             None => "-1".to_string(),
         };
+        let tail_resumptive_flag = if all_tail_resumptive { 1 } else { 0 };
         let descriptor = format!(
-            "{{\"bodyProtoIdx\":{},\"handlers\":[{}],\"returnProtoIdx\":{}}}",
+            "{{\"bodyProtoIdx\":{},\"handlers\":[{}],\"returnProtoIdx\":{},\"tailResumptive\":{}}}",
             body_proto_idx,
             handlers_json.join(","),
-            return_idx_str
+            return_idx_str,
+            tail_resumptive_flag
         );
         let descriptor_const = format!("\0handler:{}", descriptor);
         let descriptor_idx = self.add_constant(ConstantValue::String(descriptor_const));
@@ -1557,6 +1611,75 @@ impl<'a> Compiler<'a> {
         self.compile_expr(elements[2], false)?; // value
         self.emit(Op::Resume, line);
         Ok(())
+    }
+
+    // --- Tail-resumptive handler analysis ---
+
+    /// Conservative check: is this handler body of the form `(resume k <expr>)` where:
+    /// - `resume` is the resume keyword
+    /// - `k` is the continuation parameter
+    /// - `<expr>` is a single expression that does not reference `k`
+    /// - `<expr>` does not contain `perform`, `handle`, or `lambda` (conservative)
+    fn is_tail_resumptive_body(body: &Expr, cont_param: Symbol, interner: &Interner) -> bool {
+        let elements = ast::list_to_array(body);
+        // Must be exactly (resume k <expr>) — a 3-element list
+        if elements.len() != 3 {
+            return false;
+        }
+        // First element must be "resume"
+        let head_sym = match Self::get_symbol(elements[0]) {
+            Some(s) => s,
+            None => return false,
+        };
+        if interner.resolve(head_sym) != "resume" {
+            return false;
+        }
+        // Second element must be the continuation parameter
+        let k_sym = match Self::get_symbol(elements[1]) {
+            Some(s) => s,
+            None => return false,
+        };
+        if k_sym != cont_param {
+            return false;
+        }
+        // The resume-value expression must not reference k
+        let resume_value = elements[2];
+        if Self::expr_references_symbol(resume_value, cont_param) {
+            return false;
+        }
+        // Conservative: reject if the expression contains perform, handle, or lambda
+        if Self::expr_contains_effect_forms(resume_value, interner) {
+            return false;
+        }
+        true
+    }
+
+    /// Check if an expression contains any reference to a given symbol.
+    fn expr_references_symbol(expr: &Expr, sym: Symbol) -> bool {
+        match expr {
+            Expr::Atom(LispValue::Symbol(s), _) => *s == sym,
+            Expr::Atom(_, _) | Expr::Nil(_) => false,
+            Expr::List { head, tail, .. } => {
+                Self::expr_references_symbol(head, sym) || Self::expr_references_symbol(tail, sym)
+            }
+        }
+    }
+
+    /// Conservative check: does an expression contain perform, handle, or lambda forms?
+    /// These could interact with effect handler state in ways that make the
+    /// tail-resumptive fast path unsafe.
+    fn expr_contains_effect_forms(expr: &Expr, interner: &Interner) -> bool {
+        match expr {
+            Expr::Atom(LispValue::Symbol(s), _) => {
+                let name = interner.resolve(*s);
+                matches!(name, "perform" | "handle" | "lambda")
+            }
+            Expr::Atom(_, _) | Expr::Nil(_) => false,
+            Expr::List { head, tail, .. } => {
+                Self::expr_contains_effect_forms(head, interner)
+                    || Self::expr_contains_effect_forms(tail, interner)
+            }
+        }
     }
 
     // --- Quote and Quasiquote ---

@@ -425,6 +425,7 @@ fn rebase_handler(h: &VMHandlerFrame, frame_offset: i64, stack_offset: i64) -> V
         capture_stack_start: (h.capture_stack_start as i64 + stack_offset) as usize,
         id: h.id,
         is_scheduler: h.is_scheduler,
+        is_tail_resumptive: h.is_tail_resumptive,
     }
 }
 
@@ -488,6 +489,8 @@ struct HandlerDescriptor {
     body_proto_idx: u32,
     handlers: Vec<HandlerClauseDescriptor>,
     return_proto_idx: i32,
+    /// True when all handler clauses are tail-resumptive.
+    tail_resumptive: bool,
 }
 
 struct HandlerClauseDescriptor {
@@ -495,6 +498,8 @@ struct HandlerClauseDescriptor {
     op_name_idx: u32,
     proto_idx: u32,
     arity: u8,
+    /// Prototype index for the tail-resume-value closure, or -1 if not tail-resumptive.
+    tail_resume_proto_idx: i32,
 }
 
 fn parse_handler_descriptor(json: &str) -> Result<HandlerDescriptor, String> {
@@ -543,10 +548,16 @@ fn parse_handler_descriptor(json: &str) -> Result<HandlerDescriptor, String> {
         }
     }
 
+    // Parse optional tail-resumptive flag (defaults to false)
+    let tail_resumptive = extract_number(inner, "tailResumptive")
+        .map(|n| n as i32 != 0)
+        .unwrap_or(false);
+
     Ok(HandlerDescriptor {
         body_proto_idx,
         handlers,
         return_proto_idx,
+        tail_resumptive,
     })
 }
 
@@ -560,11 +571,16 @@ fn parse_handler_clause(json: &str) -> Result<HandlerClauseDescriptor, String> {
     let op_name_idx = extract_number(inner, "opNameIdx")? as u32;
     let proto_idx = extract_number(inner, "protoIdx")? as u32;
     let arity = extract_number(inner, "arity")? as u8;
+    // Parse optional tail-resume prototype index (defaults to -1)
+    let tail_resume_proto_idx = extract_number(inner, "tailResumeProtoIdx")
+        .map(|n| n as i32)
+        .unwrap_or(-1);
     Ok(HandlerClauseDescriptor {
         effect_name_idx,
         op_name_idx,
         proto_idx,
         arity,
+        tail_resume_proto_idx,
     })
 }
 
@@ -1761,11 +1777,22 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             ));
                         }
                     };
+                    let tail_resume_closure = if h.tail_resume_proto_idx >= 0 {
+                        match unsafe { &*constants.add(h.tail_resume_proto_idx as usize) } {
+                            ConstantValue::Prototype(p) => {
+                                Some(create_closure_from_proto(&mut vm.frames[frame_idx], p))
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
                     handler_entries.push(HandlerEntry {
                         effect_name,
                         op_name,
                         closure: create_closure_from_proto(&mut vm.frames[frame_idx], proto),
                         arity: h.arity,
+                        tail_resume_closure,
                     });
                 }
 
@@ -1793,6 +1820,10 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 // CPS dispatch: install handler frame and call body thunk inline.
                 // No Rust-level recursion — the handler dispatch is entirely in VM state.
                 let handler_id = next_handler_id();
+                let is_tail_resumptive = descriptor.tail_resumptive
+                    && handler_entries
+                        .iter()
+                        .all(|e| e.tail_resume_closure.is_some());
                 let handler_frame = VMHandlerFrame {
                     handlers: handler_entries.clone(),
                     return_handler: return_closure.clone(),
@@ -1802,6 +1833,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     capture_stack_start: vm.stack_top,
                     id: handler_id,
                     is_scheduler: false,
+                    is_tail_resumptive,
                 };
                 vm.handler_stack.push(handler_frame);
 
@@ -1897,6 +1929,53 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     {
                         vm.push(result);
                         continue;
+                    }
+
+                    // ── Tail-resumptive fast path ──
+                    // When the handler is tail-resumptive, the handler clause is of the
+                    // form `((op args k) -> (k <expr>))`. Instead of capturing the
+                    // continuation (expensive: clones frames, stack, handlers), unwinding,
+                    // calling the clause, and resuming, we short-circuit: evaluate <expr>
+                    // with the effect args and push the result directly. The handler stays
+                    // installed (deep handler semantics) and execution continues at the
+                    // perform site — no stack manipulation at all.
+                    if !is_scheduler && vm.handler_stack[handler_idx].is_tail_resumptive {
+                        // Find the matching entry with a tail-resume closure
+                        let tail_closure = vm.handler_stack[handler_idx]
+                            .handlers
+                            .iter()
+                            .find(|e| {
+                                if e.effect_name.is_empty() {
+                                    e.op_name == performed_op
+                                } else {
+                                    e.effect_name == performed_effect && e.op_name == performed_op
+                                }
+                            })
+                            .and_then(|e| e.tail_resume_closure.clone());
+
+                        if let Some(resume_closure) = tail_closure {
+                            // Save current frame before calling the resume-value closure
+                            vm.frames[frame_idx].ip = ip;
+
+                            // Set up locals for the tail-resume closure (effect args only, no k)
+                            let local_count = resume_closure.proto.chunk.local_count as usize;
+                            let mut resume_locals = vm.take_locals(local_count);
+                            let copy_count = args.len().min(local_count);
+                            resume_locals[..copy_count].clone_from_slice(&args[..copy_count]);
+
+                            // Call the resume-value closure inline
+                            let new_frame = CallFrame {
+                                closure: resume_closure,
+                                ip: 0,
+                                open_upvalues: Vec::new(),
+                                locals: resume_locals,
+                            };
+                            vm.push_frame(new_frame);
+                            frame_idx = vm.frame_count - 1;
+                            ip = 0;
+                            cache_frame!();
+                            continue;
+                        }
                     }
 
                     let handler_id = vm.handler_stack[handler_idx].id;
@@ -2018,6 +2097,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         capture_stack_start: vm.stack_top,
                         id: new_handler_id,
                         is_scheduler: false,
+                        is_tail_resumptive: false, // normal (non-fast-path) dispatch
                     };
                     vm.handler_stack.push(new_handler_frame);
 
