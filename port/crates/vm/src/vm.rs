@@ -642,7 +642,7 @@ fn default_make_err(msg: &str) -> Value {
 /// parallel scheduler). IO effects (print, println, read-file, etc.)
 /// are intentionally excluded here so they propagate to the scheduler,
 /// which correctly handles both single-threaded and multi-threaded contexts.
-fn try_fast_path_handler(vm: &mut VM, op_name: &str, _args: &[Value]) -> Option<Value> {
+pub(crate) fn try_fast_path_handler(vm: &mut VM, op_name: &str, _args: &[Value]) -> Option<Value> {
     match op_name {
         "fiber-self" => {
             let pid = vm.current_pid?;
@@ -654,7 +654,7 @@ fn try_fast_path_handler(vm: &mut VM, op_name: &str, _args: &[Value]) -> Option<
 
 /// Default handler for effects when no user handler is found (outside any
 /// scheduler context). This is the fallback for top-level programs.
-fn try_default_handler(vm: &mut VM, op_name: &str, args: &[Value]) -> Option<Value> {
+pub(crate) fn try_default_handler(vm: &mut VM, op_name: &str, args: &[Value]) -> Option<Value> {
     match op_name {
         "fiber-self" => {
             let pid = vm.current_pid?;
@@ -1138,6 +1138,25 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                         let locals_ptr = jit_locals.as_mut_ptr() as *mut u8;
                                         jit_fn(vm_ptr, closure_ptr, locals_ptr)
                                     };
+
+                                    // Check for bail sentinel — JIT function encountered
+                                    // a non-tail-resumptive Perform and needs the interpreter
+                                    if result.tag == crate::jit::runtime::JIT_BAIL_TAG {
+                                        // Fall back to interpreter: push a frame with the
+                                        // already-populated locals and run from the start
+                                        let new_frame = CallFrame {
+                                            closure: (**closure).clone(),
+                                            ip: 0,
+                                            locals: jit_locals,
+                                            open_upvalues: Vec::new(),
+                                        };
+                                        vm.push_frame(new_frame);
+                                        frame_idx = vm.frame_count - 1;
+                                        ip = 0;
+                                        cache_frame!();
+                                        continue;
+                                    }
+
                                     // Drop the locals to free any Arc references
                                     drop(jit_locals);
                                     cache_frame!();
@@ -1358,6 +1377,22 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             #[cfg(feature = "jit")]
                             {
                                 let proto_key = Arc::as_ptr(&closure.proto) as usize;
+                                if !vm.jit_code.contains_key(&proto_key) {
+                                    // Profile: increment call counter for JIT compilation
+                                    let count = vm.jit_call_counts.entry(proto_key).or_insert(0);
+                                    *count += 1;
+                                    if *count == crate::jit::JIT_THRESHOLD {
+                                        let proto_clone = closure.proto.clone();
+                                        if vm.jit_engine.is_none() {
+                                            vm.jit_engine = crate::jit::JitEngine::new().ok();
+                                        }
+                                        if let Some(ref mut engine) = vm.jit_engine
+                                            && let Some(jit_fn) = engine.compile(&proto_clone)
+                                        {
+                                            vm.jit_code.insert(proto_key, jit_fn);
+                                        }
+                                    }
+                                }
                                 if let Some(&jit_fn) = vm.jit_code.get(&proto_key) {
                                     let local_count = closure.proto.chunk.local_count as usize;
                                     let mut jit_locals =
@@ -1377,6 +1412,20 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                         let locals_ptr = jit_locals.as_mut_ptr() as *mut u8;
                                         jit_fn(vm_ptr, closure_ptr, locals_ptr)
                                     };
+
+                                    // Check for bail sentinel
+                                    if result.tag == crate::jit::runtime::JIT_BAIL_TAG {
+                                        // Fall back to interpreter: replace current frame
+                                        // with the callee (tail-call semantics)
+                                        vm.frames[frame_idx].closure = (**closure).clone();
+                                        vm.frames[frame_idx].ip = 0;
+                                        vm.frames[frame_idx].locals = jit_locals;
+                                        vm.frames[frame_idx].open_upvalues.clear();
+                                        ip = 0;
+                                        cache_frame!();
+                                        continue;
+                                    }
+
                                     // Restore locals to frame for reuse
                                     vm.frames[frame_idx].locals = jit_locals;
 

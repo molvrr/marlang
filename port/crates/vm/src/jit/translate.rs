@@ -82,16 +82,14 @@ pub(crate) fn can_jit(proto: &FunctionPrototype) -> bool {
             | Op::Closure
             | Op::Construct
             | Op::GetField
-            | Op::MatchTag => {}
-
-            // Tail calls break TCO when going through the runtime trampoline
-            Op::TailCall => return false,
+            | Op::MatchTag
+            | Op::TailCall
+            | Op::Perform => {}
 
             // Unsupported — bail out
             Op::SetUpvalue // mutable upvalues
             | Op::PushHandler
             | Op::PopHandler
-            | Op::Perform
             | Op::Resume
             | Op::Halt => return false,
         }
@@ -128,9 +126,11 @@ fn stack_effect(inst: &Instruction) -> (usize, usize) {
         }
         Op::GetField => (0, 1), // peeks top (doesn't pop), pushes field
         Op::MatchTag => (0, 0), // peeks top (doesn't pop), branches
-        Op::SetUpvalue | Op::PushHandler | Op::PopHandler | Op::Perform | Op::Resume | Op::Halt => {
-            (0, 0)
-        } // rejected by can_jit
+        Op::Perform => {
+            let arity = inst.operand2 as usize;
+            (arity, 1) // pops N args, pushes result
+        }
+        Op::SetUpvalue | Op::PushHandler | Op::PopHandler | Op::Resume | Op::Halt => (0, 0), // rejected by can_jit
     }
 }
 
@@ -243,7 +243,7 @@ fn find_self_recursive_calls(
                 }
                 stack_depth += 1;
             }
-            Op::Call => {
+            Op::Call | Op::TailCall => {
                 let arity = inst.operand as usize;
                 // The callee is at stack position (stack_depth - arity - 1)
                 // It was a self-ref if self_ref_depth == stack_depth - arity - 1
@@ -387,7 +387,18 @@ pub(crate) fn translate_function(
         }
     }
 
-    let entry_block = bc_to_block[&0];
+    // Check if we have any self-recursive tail calls — if so we need a loop header
+    // for proper TCO in native code.
+    let has_self_recursive_tailcalls = code
+        .iter()
+        .enumerate()
+        .any(|(i, inst)| inst.op == Op::TailCall && self_recursive_calls.contains(&i));
+
+    // Create entry trampoline block (receives function params).
+    // This is separate from the bytecode block at IP 0, which allows self-recursive
+    // tail calls to jump back to a loop header for proper TCO without needing
+    // to pass function params as block arguments.
+    let entry_block = bcx.create_block();
     bcx.switch_to_block(entry_block);
     bcx.append_block_params_for_function_params(entry_block);
 
@@ -395,6 +406,24 @@ pub(crate) fn translate_function(
     let vm_ptr = bcx.block_params(entry_block)[0];
     let closure_ptr = bcx.block_params(entry_block)[1];
     let locals_ptr = bcx.block_params(entry_block)[2];
+
+    // If self-recursive tail calls exist, create a loop header between entry and
+    // bytecode IP 0. Self-recursive TailCalls store new args to locals memory and
+    // jump to this block, giving us proper native TCO.
+    let loop_header = if has_self_recursive_tailcalls {
+        let lh = bcx.create_block();
+        bcx.ins().jump(lh, &[]);
+        bcx.switch_to_block(lh);
+        Some(lh)
+    } else {
+        None
+    };
+
+    // Jump to the first bytecode block (which has depth 0 → no block params)
+    // and switch the builder to it so the translation loop can start emitting code.
+    let first_bytecode_block = bc_to_block[&0];
+    bcx.ins().jump(first_bytecode_block, &[]);
+    bcx.switch_to_block(first_bytecode_block);
 
     // Virtual stack for stack machine → SSA translation
     let mut vstack: Vec<JitValue> = Vec::new();
@@ -822,8 +851,31 @@ pub(crate) fn translate_function(
             }
 
             Op::TailCall => {
-                // Should have been rejected by can_jit
-                unreachable!("TailCall should have been rejected by can_jit");
+                let call_ip = ip - 1;
+                let arity = inst.operand as usize;
+                let mut args: Vec<JitValue> = Vec::with_capacity(arity);
+                for _ in 0..arity {
+                    args.push(vstack.pop().unwrap());
+                }
+                args.reverse();
+                let _callee = vstack.pop().unwrap();
+
+                if self_recursive_calls.contains(&call_ip)
+                    && let Some(lh) = loop_header
+                {
+                    // Self-recursive tail call with TCO: store new args to locals
+                    // and jump back to the loop header. No native stack growth.
+                    for (i, arg) in args.iter().enumerate() {
+                        emit_store_local(&mut bcx, locals_ptr, i, arg);
+                    }
+                    bcx.ins().jump(lh, &[]);
+                } else {
+                    // General tail call: go through the runtime trampoline and return.
+                    // TCO is maintained by the interpreter's dispatch logic.
+                    let result =
+                        emit_call(&mut bcx, vm_ptr, &_callee, &args, ptr_type, runtime_funcs);
+                    bcx.ins().return_(&[result.tag, result.payload]);
+                }
             }
 
             Op::Closure => {
@@ -886,13 +938,26 @@ pub(crate) fn translate_function(
                 );
             }
 
+            // --- Effect operations ---
+            Op::Perform => {
+                let op_name = match &constants[inst.operand as usize] {
+                    ConstantValue::String(s) => s.as_str(),
+                    _ => panic!("Perform expects string constant for op name"),
+                };
+                let arity = inst.operand2 as usize;
+                let mut args: Vec<JitValue> = Vec::with_capacity(arity);
+                for _ in 0..arity {
+                    args.push(vstack.pop().unwrap());
+                }
+                args.reverse();
+
+                let result =
+                    emit_perform(&mut bcx, vm_ptr, op_name, &args, ptr_type, runtime_funcs);
+                vstack.push(result);
+            }
+
             // These should have been rejected by can_jit
-            Op::SetUpvalue
-            | Op::PushHandler
-            | Op::PopHandler
-            | Op::Perform
-            | Op::Resume
-            | Op::Halt => {
+            Op::SetUpvalue | Op::PushHandler | Op::PopHandler | Op::Resume | Op::Halt => {
                 unreachable!(
                     "Unsupported opcode {:?} should have been rejected by can_jit",
                     inst.op
@@ -1360,6 +1425,93 @@ fn emit_match_tag_with_args(
         .brif(is_match, success_block, success_args, fail_block, fail_args);
 }
 
+/// Emit a Perform effect operation call.
+///
+/// Calls the `marlang_jit_perform` runtime helper which attempts the tail-resumptive
+/// fast path. If the handler requires full continuation capture (status == 2), the
+/// function returns a bail sentinel (tag = 0xFF) to its caller.
+fn emit_perform(
+    bcx: &mut FunctionBuilder,
+    vm_ptr: cranelift_codegen::ir::Value,
+    op_name: &str,
+    args: &[JitValue],
+    ptr_type: types::Type,
+    runtime_funcs: &RuntimeFuncRefs,
+) -> JitValue {
+    let num_args = args.len();
+
+    // Spill args to a stack slot (array of Values, 16 bytes each)
+    let args_slot = if num_args > 0 {
+        let slot = bcx.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            (num_args * 16) as u32,
+            8,
+        ));
+        for (i, arg) in args.iter().enumerate() {
+            let offset = (i * 16) as i32;
+            bcx.ins().stack_store(arg.tag, slot, offset);
+            bcx.ins().stack_store(arg.payload, slot, offset + 8);
+        }
+        Some(slot)
+    } else {
+        None
+    };
+
+    // Result slot (tag + payload)
+    let result_slot =
+        bcx.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 8));
+
+    let op_name_ptr = bcx.ins().iconst(ptr_type, op_name.as_ptr() as i64);
+    let op_name_len = bcx.ins().iconst(types::I32, op_name.len() as i64);
+    let args_ptr = if let Some(slot) = args_slot {
+        bcx.ins().stack_addr(ptr_type, slot, 0)
+    } else {
+        bcx.ins().iconst(ptr_type, 0)
+    };
+    let num_args_val = bcx.ins().iconst(types::I32, num_args as i64);
+    let out_tag_ptr = bcx.ins().stack_addr(ptr_type, result_slot, 0);
+    let out_payload_ptr = bcx.ins().stack_addr(ptr_type, result_slot, 8);
+
+    let call = bcx.ins().call(
+        runtime_funcs.perform,
+        &[
+            vm_ptr,
+            op_name_ptr,
+            op_name_len,
+            args_ptr,
+            num_args_val,
+            out_tag_ptr,
+            out_payload_ptr,
+        ],
+    );
+    let status = bcx.inst_results(call)[0];
+
+    // Check if we need to bail (status == 2)
+    let bail_cond = bcx.ins().icmp_imm(IntCC::Equal, status, 2);
+
+    let bail_block = bcx.create_block();
+    let continue_block = bcx.create_block();
+    bcx.ins()
+        .brif(bail_cond, bail_block, &[], continue_block, &[]);
+
+    // Bail block: return the bail sentinel (tag=0xFF, payload=0)
+    bcx.switch_to_block(bail_block);
+    bcx.seal_block(bail_block);
+    let bail_tag = bcx.ins().iconst(types::I8, 0xFF_i64);
+    let bail_payload = bcx.ins().iconst(ptr_type, 0);
+    bcx.ins().return_(&[bail_tag, bail_payload]);
+
+    // Continue block: load the result
+    bcx.switch_to_block(continue_block);
+    bcx.seal_block(continue_block);
+    let result_tag = bcx.ins().stack_load(types::I8, result_slot, 0);
+    let result_payload = bcx.ins().stack_load(ptr_type, result_slot, 8);
+    JitValue {
+        tag: result_tag,
+        payload: result_payload,
+    }
+}
+
 // =============================================================================
 // Runtime function references
 // =============================================================================
@@ -1375,4 +1527,5 @@ pub(crate) struct RuntimeFuncRefs {
     pub get_field: FuncRef,
     pub match_tag: FuncRef,
     pub create_closure: FuncRef,
+    pub perform: FuncRef,
 }

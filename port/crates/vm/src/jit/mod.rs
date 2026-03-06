@@ -14,7 +14,7 @@
 //! - Effects, mutable upvalues, and variadic functions bail out to the interpreter.
 
 mod engine;
-mod runtime;
+pub(crate) mod runtime;
 mod translate;
 
 pub use crate::jit::engine::{JitEngine, JitFn};

@@ -41,6 +41,7 @@ struct RuntimeFuncIds {
     get_field: FuncId,
     match_tag: FuncId,
     create_closure: FuncId,
+    perform: FuncId,
 }
 
 impl JitEngine {
@@ -160,6 +161,9 @@ impl JitEngine {
             create_closure: self
                 .module
                 .declare_func_in_func(self.runtime_func_ids.create_closure, func),
+            perform: self
+                .module
+                .declare_func_in_func(self.runtime_func_ids.perform, func),
         }
     }
 }
@@ -198,6 +202,10 @@ fn register_runtime_symbols(builder: &mut JITBuilder) {
     builder.symbol(
         "marlang_jit_create_closure",
         runtime::marlang_jit_create_closure as *const u8,
+    );
+    builder.symbol(
+        "marlang_jit_perform",
+        runtime::marlang_jit_perform as *const u8,
     );
 }
 
@@ -302,6 +310,20 @@ fn declare_runtime_functions(module: &mut JITModule) -> Result<RuntimeFuncIds, S
         .declare_function("marlang_jit_create_closure", Linkage::Import, &sig)
         .map_err(map_err)?;
 
+    // marlang_jit_perform(vm, op_name_ptr, op_name_len, args_ptr, num_args, out_tag, out_payload) -> u32
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(PTR_TY)); // vm
+    sig.params.push(AbiParam::new(PTR_TY)); // op_name_ptr
+    sig.params.push(AbiParam::new(types::I32)); // op_name_len
+    sig.params.push(AbiParam::new(PTR_TY)); // args_ptr
+    sig.params.push(AbiParam::new(types::I32)); // num_args
+    sig.params.push(AbiParam::new(PTR_TY)); // out_tag
+    sig.params.push(AbiParam::new(PTR_TY)); // out_payload
+    sig.returns.push(AbiParam::new(types::I32));
+    let perform = module
+        .declare_function("marlang_jit_perform", Linkage::Import, &sig)
+        .map_err(map_err)?;
+
     Ok(RuntimeFuncIds {
         values_equal,
         call,
@@ -312,5 +334,6 @@ fn declare_runtime_functions(module: &mut JITModule) -> Result<RuntimeFuncIds, S
         get_field,
         match_tag,
         create_closure,
+        perform,
     })
 }

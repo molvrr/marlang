@@ -256,6 +256,10 @@ fn call_closure_from_jit(
             let locals_ptr = locals.as_mut_ptr() as *mut u8;
             jit_fn(vm_ptr, closure_ptr, locals_ptr)
         };
+        if result.tag == JIT_BAIL_TAG {
+            // JIT bailed — fall back to interpreter with the same locals
+            return interpret_closure(vm, closure, locals);
+        }
         drop(locals);
         let val = unsafe { Value::from_raw(result.tag, result.payload) };
         return Ok(val);
@@ -285,6 +289,9 @@ fn call_closure_from_jit(
                 let locals_ptr = locals.as_mut_ptr() as *mut u8;
                 jit_fn(vm_ptr, closure_ptr, locals_ptr)
             };
+            if result.tag == JIT_BAIL_TAG {
+                return interpret_closure(vm, closure, locals);
+            }
             drop(locals);
             let val = unsafe { Value::from_raw(result.tag, result.payload) };
             return Ok(val);
@@ -292,8 +299,6 @@ fn call_closure_from_jit(
     }
 
     // Slow path: interpret via the VM
-    use crate::object::CallFrame;
-
     let local_count = closure.proto.chunk.local_count as usize;
     let mut locals = vec![Value::nil(); local_count];
 
@@ -309,6 +314,19 @@ fn call_closure_from_jit(
             locals[i] = arg.clone();
         }
     }
+
+    interpret_closure(vm, closure, locals)
+}
+
+/// Interpret a closure via the VM with pre-populated locals.
+/// Used both as the slow path for non-JIT closures and as the bail-out
+/// fallback when JIT code encounters a non-tail-resumptive Perform.
+fn interpret_closure(
+    vm: &mut VM,
+    closure: &Closure,
+    locals: Vec<Value>,
+) -> Result<Value, crate::errors::VMError> {
+    use crate::object::CallFrame;
 
     let frame = CallFrame {
         closure: closure.clone(),
@@ -575,4 +593,129 @@ pub extern "C" fn marlang_jit_create_closure(
 #[unsafe(no_mangle)]
 pub extern "C" fn marlang_jit_check_div_zero(divisor: i64) -> u32 {
     if divisor == 0 { 1 } else { 0 }
+}
+
+// =============================================================================
+// Effect perform from JIT code
+// =============================================================================
+
+/// Tag value returned by JIT functions to signal that the caller should bail
+/// out and re-execute the function in the interpreter. This happens when a
+/// `Perform` inside JIT code encounters a non-tail-resumptive handler that
+/// requires full continuation capture (which is incompatible with native frames).
+pub const JIT_BAIL_TAG: u8 = 0xFF;
+
+/// Perform an effect operation from JIT-compiled code.
+///
+/// Searches the handler stack for a matching handler and, if the handler is
+/// tail-resumptive, executes the fast path inline and returns the resume value.
+/// Also handles default IO effects (print, println, etc.) when no user handler
+/// is installed.
+///
+/// `op_name_ptr`/`op_name_len` describe the operation name string (e.g. "tick",
+/// "IO/println"). `args_ptr` points to an array of `Value`s.
+///
+/// Returns:
+///   0 = success, result written to out_tag/out_payload
+///   2 = bail, the JIT function must return JIT_BAIL_TAG to its caller
+#[unsafe(no_mangle)]
+pub extern "C" fn marlang_jit_perform(
+    vm: *mut VM,
+    op_name_ptr: *const u8,
+    op_name_len: u32,
+    args_ptr: *const Value,
+    num_args: u32,
+    out_tag: *mut u8,
+    out_payload: *mut u64,
+) -> u32 {
+    unsafe {
+        let vm = &mut *vm;
+        let op_name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+            op_name_ptr,
+            op_name_len as usize,
+        ));
+        let args = std::slice::from_raw_parts(args_ptr, num_args as usize);
+
+        match perform_from_jit(vm, op_name, args) {
+            Some(result) => {
+                let tag = result.tag();
+                let payload = result.payload();
+                std::mem::forget(result);
+                *out_tag = tag;
+                *out_payload = payload;
+                0 // success
+            }
+            None => 2, // bail — need full continuation capture
+        }
+    }
+}
+
+/// Internal: attempt to handle a perform from JIT code.
+/// Returns `Some(value)` if the effect was handled inline (tail-resumptive or default handler),
+/// or `None` if the caller must bail to the interpreter.
+fn perform_from_jit(vm: &mut VM, op_name: &str, args: &[Value]) -> Option<Value> {
+    // Parse effect/op name
+    let (performed_effect, performed_op) = if let Some((eff, op)) = op_name.rsplit_once('/') {
+        (eff, op)
+    } else {
+        ("", op_name)
+    };
+
+    // Walk handler stack backwards to find a matching handler
+    let mut found = None;
+    for i in (0..vm.handler_stack.len()).rev() {
+        if vm.handler_stack[i].handlers.iter().any(|e| {
+            if e.effect_name.is_empty() {
+                e.op_name == performed_op
+            } else {
+                e.effect_name == performed_effect && e.op_name == performed_op
+            }
+        }) {
+            found = Some(i);
+            break;
+        }
+    }
+
+    if let Some(handler_idx) = found {
+        let is_scheduler = vm.handler_stack[handler_idx].is_scheduler;
+
+        // Scheduler fast path (fiber-self only for now)
+        if is_scheduler {
+            if let Some(result) = crate::vm::try_fast_path_handler(vm, op_name, args) {
+                return Some(result);
+            }
+            // Scheduler handler but not fast-pathable — must bail
+            return None;
+        }
+
+        // Tail-resumptive fast path
+        if vm.handler_stack[handler_idx].is_tail_resumptive {
+            let tail_closure = vm.handler_stack[handler_idx]
+                .handlers
+                .iter()
+                .find(|e| {
+                    if e.effect_name.is_empty() {
+                        e.op_name == performed_op
+                    } else {
+                        e.effect_name == performed_effect && e.op_name == performed_op
+                    }
+                })
+                .and_then(|e| e.tail_resume_closure.clone());
+
+            if let Some(resume_closure) = tail_closure {
+                // Call the tail-resume closure via the interpreter to compute the resume value.
+                // This closure takes just the effect args (no k) and returns the value.
+                match call_closure_from_jit(vm, &resume_closure, args) {
+                    Ok(result) => return Some(result),
+                    Err(_) => return None,
+                }
+            }
+        }
+
+        // Non-tail-resumptive user handler — must bail for full continuation capture
+        None
+    } else {
+        // No handler found — try default handler (IO effects at top level)
+        crate::vm::try_default_handler(vm, op_name, args)
+    }
 }
