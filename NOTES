@@ -45,12 +45,3 @@
                 Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.13s
                  Running `target/debug/mar run /tmp/test_macro_adt.mar`
             Macro expansion error: Runtime error: Macro expansion error: Cannot convert VM value to AST: (quote 42)
-- [x] match on ADTs (Option, List, etc.) doesn't work inside defmacro bodies.
-      The expansion VM compiles each prelude expression independently via
-      compile_program, which starts with an empty known_constructors set.
-      So data definitions (e.g. (data (Option a) None (Some a))) don't carry
-      constructor knowledge forward to subsequent compilations. In match
-      patterns, None/Some are treated as variable patterns instead of
-      constructors, causing (Some 5) to match the None branch.
-      Workaround: avoid match on Option/List inside macros; use string-contains,
-      nil?, car/cdr, etc.

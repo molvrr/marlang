@@ -148,6 +148,13 @@ cargo run -p marlang-cli -- expand file.mar --clean
 ```
 Check that the expansion looks correct before running or type-checking. This catches macro bugs early — the expanded form is exactly what the compiler and type checker will see.
 
+### After any changes
+Run the benchmarks to make sure there is no performance regression:
+```bash
+./bench/run.sh
+```
+Compare the results against the baseline in `bench/README.md`. Investigate any significant regressions before considering the task done.
+
 ## Adding Features
 
 ### New Special Form
