@@ -64,6 +64,17 @@ pub struct VM {
     pub dirty_globals: Option<HashSet<String>>,
     /// Current fiber PID when running under the scheduler (for fast-path fiber-self).
     pub(crate) current_pid: Option<u64>,
+
+    // --- JIT ---
+    /// JIT compilation engine (lazily initialized on first hot function).
+    #[cfg(feature = "jit")]
+    pub(crate) jit_engine: Option<crate::jit::JitEngine>,
+    /// Map from FunctionPrototype Arc pointer address to compiled native function.
+    #[cfg(feature = "jit")]
+    pub(crate) jit_code: FxHashMap<usize, crate::jit::JitFn>,
+    /// Call counters for JIT profiling, keyed by prototype pointer address.
+    #[cfg(feature = "jit")]
+    pub(crate) jit_call_counts: FxHashMap<usize, u32>,
 }
 
 impl VM {
@@ -81,6 +92,12 @@ impl VM {
             captured_output: None,
             dirty_globals: None,
             current_pid: None,
+            #[cfg(feature = "jit")]
+            jit_engine: None,
+            #[cfg(feature = "jit")]
+            jit_code: FxHashMap::default(),
+            #[cfg(feature = "jit")]
+            jit_call_counts: FxHashMap::default(),
         }
     }
 
@@ -161,7 +178,7 @@ impl VM {
         &self.stack[self.stack_top - 1 - distance]
     }
 
-    fn push_frame(&mut self, frame: CallFrame) {
+    pub(crate) fn push_frame(&mut self, frame: CallFrame) {
         if self.frame_count >= self.frames.len() {
             self.frames.push(frame);
         } else {
@@ -1084,6 +1101,52 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 )));
                             }
 
+                            // --- JIT dispatch ---
+                            #[cfg(feature = "jit")]
+                            {
+                                let proto_key = Arc::as_ptr(&closure.proto) as usize;
+                                if let Some(&jit_fn) = vm.jit_code.get(&proto_key) {
+                                    // We have JIT code — set up locals and call native
+                                    let local_count = closure.proto.chunk.local_count as usize;
+                                    let mut jit_locals = vm.take_locals(local_count);
+                                    for i in (0..arity).rev() {
+                                        jit_locals[i] = vm.pop();
+                                    }
+                                    vm.pop(); // pop callee
+
+                                    vm.frames[frame_idx].ip = ip;
+                                    let result = unsafe {
+                                        let vm_ptr = vm as *mut VM as *mut u8;
+                                        let closure_ptr =
+                                            closure.as_ref() as *const Closure as *mut u8;
+                                        let locals_ptr = jit_locals.as_mut_ptr() as *mut u8;
+                                        jit_fn(vm_ptr, closure_ptr, locals_ptr)
+                                    };
+                                    // Drop the locals to free any Arc references
+                                    drop(jit_locals);
+                                    cache_frame!();
+                                    let val =
+                                        unsafe { Value::from_raw(result.tag, result.payload) };
+                                    vm.push(val);
+                                    continue;
+                                }
+
+                                // Profile and maybe compile
+                                let count = vm.jit_call_counts.entry(proto_key).or_insert(0);
+                                *count += 1;
+                                if *count == crate::jit::JIT_THRESHOLD {
+                                    let proto_clone = closure.proto.clone();
+                                    if vm.jit_engine.is_none() {
+                                        vm.jit_engine = crate::jit::JitEngine::new().ok();
+                                    }
+                                    if let Some(ref mut engine) = vm.jit_engine
+                                        && let Some(jit_fn) = engine.compile(&proto_clone)
+                                    {
+                                        vm.jit_code.insert(proto_key, jit_fn);
+                                    }
+                                }
+                            }
+
                             let cloned_closure = (**closure).clone();
                             let local_count = cloned_closure.proto.chunk.local_count as usize;
 
@@ -1273,6 +1336,47 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                     format!("Expected {} arguments, got {}", required_arity, arity),
                                     &vm.frames[frame_idx],
                                 )));
+                            }
+
+                            // --- JIT dispatch for tail calls ---
+                            #[cfg(feature = "jit")]
+                            {
+                                let proto_key = Arc::as_ptr(&closure.proto) as usize;
+                                if let Some(&jit_fn) = vm.jit_code.get(&proto_key) {
+                                    let local_count = closure.proto.chunk.local_count as usize;
+                                    let mut jit_locals =
+                                        std::mem::take(&mut vm.frames[frame_idx].locals);
+                                    jit_locals.clear();
+                                    jit_locals.resize(local_count, Value::nil());
+                                    for i in (0..arity).rev() {
+                                        jit_locals[i] = vm.pop();
+                                    }
+                                    vm.pop(); // pop callee
+
+                                    vm.frames[frame_idx].ip = ip;
+                                    let result = unsafe {
+                                        let vm_ptr = vm as *mut VM as *mut u8;
+                                        let closure_ptr =
+                                            closure.as_ref() as *const Closure as *mut u8;
+                                        let locals_ptr = jit_locals.as_mut_ptr() as *mut u8;
+                                        jit_fn(vm_ptr, closure_ptr, locals_ptr)
+                                    };
+                                    // Restore locals to frame for reuse
+                                    vm.frames[frame_idx].locals = jit_locals;
+
+                                    let val =
+                                        unsafe { Value::from_raw(result.tag, result.payload) };
+                                    // Tail call: return the result (pop current frame)
+                                    vm.frame_count -= 1;
+                                    if vm.frame_count <= base_frame_count {
+                                        return Ok(val);
+                                    }
+                                    frame_idx = vm.frame_count - 1;
+                                    ip = vm.frames[frame_idx].ip;
+                                    cache_frame!();
+                                    vm.push(val);
+                                    continue;
+                                }
                             }
 
                             // Reuse current frame's locals Vec (avoids allocation)

@@ -293,10 +293,53 @@ impl Value {
         }
     }
 
-    /// Raw tag (for testing/debugging).
+    /// Raw tag (for testing/debugging and JIT).
     #[inline]
     pub fn tag(&self) -> u8 {
         self.tag
+    }
+
+    /// Raw payload (for JIT).
+    #[inline]
+    pub fn payload(&self) -> u64 {
+        self.payload
+    }
+
+    /// Construct a Value from raw tag and payload, taking ownership.
+    /// The caller must ensure that if tag == TAG_OBJECT, the payload
+    /// is a valid Arc<VMObject> raw pointer with an owned reference
+    /// (i.e., the caller has transferred ownership and will not drop it).
+    ///
+    /// # Safety
+    /// For object values (tag == 6), the payload must be a valid pointer
+    /// obtained from `Arc::into_raw` with a live reference count.
+    #[inline]
+    pub unsafe fn from_raw(tag: u8, payload: u64) -> Self {
+        Value {
+            tag,
+            _pad: [0; 7],
+            payload,
+        }
+    }
+
+    /// Construct a Value from raw tag and payload, cloning (incrementing
+    /// refcount for objects). Use this when the caller retains ownership
+    /// of the original.
+    ///
+    /// # Safety
+    /// For object values (tag == 6), the payload must be a valid pointer
+    /// obtained from `Arc::into_raw` with a live reference count.
+    #[inline]
+    pub unsafe fn from_raw_clone(tag: u8, payload: u64) -> Self {
+        if tag == TAG_OBJECT {
+            let ptr = payload as *const VMObject;
+            unsafe { Arc::increment_strong_count(ptr) };
+        }
+        Value {
+            tag,
+            _pad: [0; 7],
+            payload,
+        }
     }
 }
 
