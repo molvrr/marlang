@@ -288,6 +288,9 @@ fn infer_body_with_defines(
     let define_exprs = &body_exprs[..num_defines];
     let rest_exprs = &body_exprs[num_defines..];
 
+    // Enter level for the local define group
+    enter_level();
+
     let mut placeholders: Vec<(String, Type)> = Vec::new();
     let mut define_env = env.clone();
 
@@ -298,7 +301,7 @@ fn infer_body_with_defines(
         let ann_type = get_define_annotation(def_expr, &define_env, session.interner);
         let placeholder = ann_type.unwrap_or_else(fresh_type_var);
         define_env
-            .bindings
+            .bindings_mut()
             .insert(name.clone(), monotype(placeholder.clone()));
         placeholders.push((name, placeholder));
     }
@@ -327,6 +330,9 @@ fn infer_body_with_defines(
         subst = compose_subst(&unify_result, &subst);
     }
 
+    // Exit level before generalizing
+    exit_level();
+
     // Phase 3: Generalize and update the environment with final types
     let mut final_env = apply_subst_env(&subst, env);
     for (name, _) in &placeholders {
@@ -338,7 +344,7 @@ fn infer_body_with_defines(
         } else {
             monotype(t_unit())
         };
-        final_env.bindings.insert(name.clone(), final_type);
+        final_env.bindings_mut().insert(name.clone(), final_type);
     }
 
     // Phase 4: Infer remaining (non-define) body expressions
@@ -903,7 +909,9 @@ fn infer_lambda(
                 )?;
                 let ty = parse_type_expr(param_elements[2], env, session.interner)?;
                 params.push((name.to_string(), ty.clone()));
-                param_env.bindings.insert(name.to_string(), monotype(ty));
+                param_env
+                    .bindings_mut()
+                    .insert(name.to_string(), monotype(ty));
                 session.record_definition(name, param_elements[0].span(), SymbolKind::Variable);
                 continue;
             }
@@ -918,7 +926,7 @@ fn infer_lambda(
         let param_type = fresh_type_var();
         params.push((name.to_string(), param_type.clone()));
         param_env
-            .bindings
+            .bindings_mut()
             .insert(name.to_string(), monotype(param_type));
         session.record_definition(name, param.span(), SymbolKind::Variable);
     }
@@ -956,7 +964,7 @@ fn infer_lambda(
         // The rest parameter has type (List elem_type) in the function body
         let list_type = t_list(elem_type.clone());
         param_env
-            .bindings
+            .bindings_mut()
             .insert(rest_name.to_string(), monotype(list_type));
         rest_param = Some((rest_name.to_string(), elem_type));
     }
@@ -1126,6 +1134,9 @@ fn infer_let(
             session.record_definition(&name, name_expr.span(), SymbolKind::Variable);
         }
 
+        // Enter level for this binding's inference
+        enter_level();
+
         let env_for_value = apply_subst_env(&subst, &let_env);
         let value_result = infer_expr(&env_for_value, value_expr, session)?;
 
@@ -1143,9 +1154,12 @@ fn infer_let(
             binding_type = apply_subst(&subst, &ann_type);
         }
 
+        // Exit level before generalizing
+        exit_level();
+
         let env_for_gen = apply_subst_env(&subst, &let_env);
         let scheme = generalize(&env_for_gen, &apply_subst(&subst, &binding_type));
-        let_env.bindings.insert(name.to_string(), scheme);
+        let_env.bindings_mut().insert(name.to_string(), scheme);
     }
 
     // Infer body
@@ -1360,7 +1374,7 @@ fn infer_match(
         let mut branch_env = apply_subst_env(&subst, env);
         for (name, ty) in &pattern_check.bindings {
             branch_env
-                .bindings
+                .bindings_mut()
                 .insert(name.to_string(), monotype(apply_subst(&subst, ty)));
         }
 
@@ -2154,7 +2168,7 @@ fn infer_handle(
                 && let Some(return_var_name) =
                     ast::get_symbol_name(pattern_elements[1], session.interner)
             {
-                handler_env.bindings.insert(
+                handler_env.bindings_mut().insert(
                     return_var_name.to_string(),
                     monotype(apply_subst(&subst, &body_result.ty)),
                 );
@@ -2202,7 +2216,7 @@ fn infer_handle(
                 && i < op_info.params.len()
             {
                 handler_env
-                    .bindings
+                    .bindings_mut()
                     .insert(arg_name.to_string(), monotype(op_info.params[i].clone()));
             }
         }
@@ -2214,7 +2228,7 @@ fn infer_handle(
                 apply_subst(&subst, &body_result.ty),
             );
             handler_env
-                .bindings
+                .bindings_mut()
                 .insert(k_name.to_string(), monotype(k_type));
         }
 
@@ -2398,7 +2412,7 @@ fn process_data_def(
             ty: ctor_type,
         };
 
-        new_env.bindings.insert(ctor.name.clone(), scheme);
+        new_env.bindings_mut().insert(ctor.name.clone(), scheme);
     }
 
     Ok(new_env)
@@ -2489,6 +2503,9 @@ fn process_define(
 
     session.record_definition(&name, name_span, SymbolKind::Variable);
 
+    // Enter a new binding level for generalization
+    enter_level();
+
     // Add placeholder for recursive functions
     let placeholder_type = annotated_type.clone().unwrap_or_else(fresh_type_var);
     let infer_env = extend_env(env, &name, monotype(placeholder_type));
@@ -2507,6 +2524,10 @@ fn process_define(
         subst = compose_subst(&unify_result, &subst);
         value_type = apply_subst(&subst, ann_type);
     }
+
+    // Exit level before generalizing — vars created at the inner level
+    // will have level > current_level and thus be quantified.
+    exit_level();
 
     let gen_env = apply_subst_env(&subst, env);
     let scheme = generalize(&gen_env, &apply_subst(&subst, &value_type));
@@ -2820,7 +2841,9 @@ fn process_ffi_lib_def(
         // Register qualified binding: lib_name/FnName
         let qualified_name = format!("{}/{}", lib_name, fn_name);
         let fn_type = type_arrow(params, result);
-        new_env.bindings.insert(qualified_name, monotype(fn_type));
+        new_env
+            .bindings_mut()
+            .insert(qualified_name, monotype(fn_type));
     }
 
     // Register foreign lib for ffi-call backward compatibility
@@ -2828,7 +2851,7 @@ fn process_ffi_lib_def(
 
     // Register lib_name with type FFILibrary
     new_env
-        .bindings
+        .bindings_mut()
         .insert(lib_name.to_string(), monotype(t_ffi_library()));
 
     Ok(new_env)
@@ -3088,7 +3111,7 @@ fn record_cross_file_definitions(
 
     // For each exported binding, find the last definition with that name in module_defs
     // (last = innermost/most recent in program order)
-    for export_name in module_exports.bindings.keys() {
+    for export_name in module_exports.bindings().keys() {
         let def = module_defs
             .iter()
             .rev()
@@ -3117,7 +3140,7 @@ fn record_cross_file_definitions(
     }
 
     // Also handle constructors (data type constructors like Some, None, Cons, etc.)
-    for export_name in module_exports.constructors.keys() {
+    for export_name in module_exports.constructors().keys() {
         let def = module_defs
             .iter()
             .rev()
@@ -3146,7 +3169,7 @@ fn record_cross_file_definitions(
     }
 
     // Also handle effect operations (e.g., print, println from IO effect)
-    for effect_decl in module_exports.effects.values() {
+    for effect_decl in module_exports.effects().values() {
         for op in &effect_decl.operations {
             let export_name = &op.name;
             let def = module_defs
@@ -3232,11 +3255,11 @@ fn process_import(
     // Use the current env (builtins + prelude + prior imports) as the baseline.
     // After type-checking the module, we extract everything it added on top
     // of this baseline as its exports.
-    let baseline_binding_keys: HashSet<String> = env.bindings.keys().cloned().collect();
-    let baseline_data_type_keys: HashSet<String> = env.data_types.keys().cloned().collect();
-    let baseline_constructor_keys: HashSet<String> = env.constructors.keys().cloned().collect();
-    let baseline_effect_keys: HashSet<String> = env.effects.keys().cloned().collect();
-    let baseline_alias_keys: HashSet<String> = env.aliases.keys().cloned().collect();
+    let baseline_binding_keys: HashSet<String> = env.bindings().keys().cloned().collect();
+    let baseline_data_type_keys: HashSet<String> = env.data_types().keys().cloned().collect();
+    let baseline_constructor_keys: HashSet<String> = env.constructors().keys().cloned().collect();
+    let baseline_effect_keys: HashSet<String> = env.effects().keys().cloned().collect();
+    let baseline_alias_keys: HashSet<String> = env.aliases().keys().cloned().collect();
 
     // Type-check the module using the current env as base (has builtins + prelude).
     // The prelude types (Option, Result, etc.) are available for the module code.
@@ -3301,33 +3324,35 @@ fn extract_module_exports(
 ) -> TypeEnv {
     let mut exports = empty_env();
 
-    for (name, scheme) in &full.bindings {
+    for (name, scheme) in full.bindings() {
         if !base_bindings.contains(name) {
-            exports.bindings.insert(name.clone(), scheme.clone());
+            exports.bindings_mut().insert(name.clone(), scheme.clone());
         }
     }
 
-    for (name, dt) in &full.data_types {
+    for (name, dt) in full.data_types() {
         if !base_data_types.contains(name) {
-            exports.data_types.insert(name.clone(), dt.clone());
+            exports.data_types_mut().insert(name.clone(), dt.clone());
         }
     }
 
-    for (name, entry) in &full.constructors {
+    for (name, entry) in full.constructors() {
         if !base_constructors.contains(name) {
-            exports.constructors.insert(name.clone(), entry.clone());
+            exports
+                .constructors_mut()
+                .insert(name.clone(), entry.clone());
         }
     }
 
-    for (name, effect) in &full.effects {
+    for (name, effect) in full.effects() {
         if !base_effects.contains(name) {
-            exports.effects.insert(name.clone(), effect.clone());
+            exports.effects_mut().insert(name.clone(), effect.clone());
         }
     }
 
-    for (name, alias) in &full.aliases {
+    for (name, alias) in full.aliases() {
         if !base_aliases.contains(name) {
-            exports.aliases.insert(name.clone(), alias.clone());
+            exports.aliases_mut().insert(name.clone(), alias.clone());
         }
     }
 

@@ -52,6 +52,10 @@ fn unify_internal(
             let mu = type_rec(name1, t2.clone());
             return Ok(single_subst(name1, mu));
         }
+        // Propagate level: if t2 is a Var, lower its level to min(level1, level2)
+        if let Type::Var(name2) = t2 {
+            lower_var_level(name2, get_var_level(name1));
+        }
         return Ok(single_subst(name1, t2.clone()));
     }
 
@@ -59,6 +63,10 @@ fn unify_internal(
         if occurs(name2, t1) {
             let mu = type_rec(name2, t1.clone());
             return Ok(single_subst(name2, mu));
+        }
+        // Propagate level: if t1 is a Var, lower its level to min(level1, level2)
+        if let Type::Var(name1) = t1 {
+            lower_var_level(name1, get_var_level(name2));
         }
         return Ok(single_subst(name2, t1.clone()));
     }
@@ -113,10 +121,18 @@ fn unify_internal(
         return unify_effect_rows_into_subst(r1, r2);
     }
     // EffectRowRef vs Var: bind the var to the effect row ref
-    if let (Type::EffectRowRef(_), Type::Var(name)) = (t1, t2) {
+    if let (Type::EffectRowRef(row), Type::Var(name)) = (t1, t2) {
+        // Propagate level to any row var in the effect row
+        if let EffectRow::Open { row_var, .. } = row {
+            lower_var_level(row_var, get_var_level(name));
+        }
         return Ok(single_subst(name, t1.clone()));
     }
-    if let (Type::Var(name), Type::EffectRowRef(_)) = (t1, t2) {
+    if let (Type::Var(name), Type::EffectRowRef(row)) = (t1, t2) {
+        // Propagate level to any row var in the effect row
+        if let EffectRow::Open { row_var, .. } = row {
+            lower_var_level(row_var, get_var_level(name));
+        }
         return Ok(single_subst(name, t2.clone()));
     }
 
@@ -517,6 +533,7 @@ pub fn unify_effect_rows_into_subst(
                 .filter(|e| !effects.contains(e))
                 .cloned()
                 .collect();
+            // row_var is eliminated (bound to a closed row), no level propagation needed
             Ok(single_subst(
                 row_var,
                 Type::EffectRowRef(effect_row_closed(remaining)),
@@ -538,6 +555,7 @@ pub fn unify_effect_rows_into_subst(
                 .filter(|e| !effects.contains(e))
                 .cloned()
                 .collect();
+            // row_var is eliminated (bound to a closed row), no level propagation needed
             Ok(single_subst(
                 row_var,
                 Type::EffectRowRef(effect_row_closed(remaining)),
@@ -583,6 +601,8 @@ pub fn unify_effect_rows_into_subst(
                 ));
             }
             // Different row vars: rv1 gets bound to {effects_only_in_2 | rv2}
+            // Propagate level from rv1 to rv2
+            lower_var_level(rv2, get_var_level(rv1));
             let only_in_2: Vec<String> = e2.iter().filter(|e| !e1.contains(e)).cloned().collect();
             Ok(single_subst(
                 rv1,

@@ -1,4 +1,4 @@
-use crate::ast::{Type, reset_effect_row_var_counter, reset_type_var_counter};
+use crate::ast::{Type, reset_effect_row_var_counter, reset_levels, reset_type_var_counter};
 use crate::env::{TypeEnv, empty_env};
 use crate::errors::TypeError;
 use crate::infer::{
@@ -93,6 +93,7 @@ pub struct TypeCheckOutput {
 pub fn type_check(exprs: &[Expr], interner: &Interner) -> Result<TypeCheckOutput, TypeError> {
     reset_type_var_counter();
     reset_effect_row_var_counter();
+    reset_levels();
 
     let env = empty_env();
     let (env, types) = infer_program(&env, exprs, interner)?;
@@ -112,6 +113,7 @@ pub fn type_check_with_modules(
 ) -> Result<TypeCheckOutput, TypeError> {
     reset_type_var_counter();
     reset_effect_row_var_counter();
+    reset_levels();
 
     let env = empty_env();
     let cache = TypeModuleCache::new();
@@ -139,6 +141,7 @@ pub fn type_check_with_context(
 ) -> Result<TypeCheckOutput, TypeError> {
     reset_type_var_counter();
     reset_effect_row_var_counter();
+    reset_levels();
 
     let env = empty_env();
     let cache = TypeModuleCache::new();

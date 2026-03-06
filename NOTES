@@ -1,3 +1,4 @@
+- [ ] add cli subcommand `profile`: Shows time spent on macro expansion, typechecking, function calls
 - [ ] parse error filename, line number and column
 - [ ] Inner define doesn't capture enclosing lambda parameters — closures created
       by `define` inside a lambda body fail to capture variables from the enclosing
@@ -7,7 +8,6 @@
       inner define'd function.
 - [ ] Cons and List internal implementations
 - [ ] Exhaustiveness check for strings
-- [ ] JIT
 - [ ] Remove NIL:   self.emit_constant(ConstantValue::Nil, line);
 - [ ] Cross process messaging
 - [ ] stdlib: json
@@ -45,3 +45,4 @@
                 Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.13s
                  Running `target/debug/mar run /tmp/test_macro_adt.mar`
             Macro expansion error: Runtime error: Macro expansion error: Cannot convert VM value to AST: (quote 42)
+- [x] JIT

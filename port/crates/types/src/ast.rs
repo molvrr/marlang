@@ -1,4 +1,6 @@
 use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 // ===== Effect System Types =====
@@ -280,6 +282,12 @@ pub fn polytype(vars: Vec<&str>, t: Type) -> TypeScheme {
 thread_local! {
     static TYPE_VAR_COUNTER: Cell<u32> = const { Cell::new(0) };
     static EFFECT_ROW_VAR_COUNTER: Cell<u32> = const { Cell::new(0) };
+    /// Current binding level for level-based generalization.
+    /// Incremented when entering a let/define scope, decremented on exit.
+    static CURRENT_LEVEL: Cell<u32> = const { Cell::new(0) };
+    /// Maps type variable names to the level at which they were created.
+    /// Used by `generalize` to determine which vars to quantify.
+    static VAR_LEVELS: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
 }
 
 pub fn fresh_type_var() -> Type {
@@ -290,7 +298,11 @@ pub fn fresh_type_var_with_prefix(prefix: &str) -> Type {
     TYPE_VAR_COUNTER.with(|c| {
         let n = c.get();
         c.set(n + 1);
-        Type::Var(format!("{prefix}{n}"))
+        let name = format!("{prefix}{n}");
+        // Stamp the variable with the current binding level
+        let level = current_level();
+        set_var_level(&name, level);
+        Type::Var(name)
     })
 }
 
@@ -302,12 +314,68 @@ pub fn fresh_effect_row_var() -> String {
     EFFECT_ROW_VAR_COUNTER.with(|c| {
         let n = c.get();
         c.set(n + 1);
-        format!("ε{n}")
+        let name = format!("ε{n}");
+        // Stamp effect row variables with the current level too
+        let level = current_level();
+        set_var_level(&name, level);
+        name
     })
 }
 
 pub fn reset_effect_row_var_counter() {
     EFFECT_ROW_VAR_COUNTER.with(|c| c.set(0));
+}
+
+// ===== Level-Based Generalization =====
+
+/// Get the current binding level.
+pub fn current_level() -> u32 {
+    CURRENT_LEVEL.with(|c| c.get())
+}
+
+/// Enter a new binding scope (increment level).
+pub fn enter_level() {
+    CURRENT_LEVEL.with(|c| c.set(c.get() + 1));
+}
+
+/// Exit a binding scope (decrement level).
+pub fn exit_level() {
+    CURRENT_LEVEL.with(|c| {
+        let cur = c.get();
+        debug_assert!(cur > 0, "exit_level called at level 0");
+        c.set(cur - 1);
+    });
+}
+
+/// Reset the level to 0 and clear the var_levels table.
+pub fn reset_levels() {
+    CURRENT_LEVEL.with(|c| c.set(0));
+    VAR_LEVELS.with(|m| m.borrow_mut().clear());
+}
+
+/// Get the level of a type variable. Returns 0 if not found (treat as global).
+pub fn get_var_level(name: &str) -> u32 {
+    VAR_LEVELS.with(|m| m.borrow().get(name).copied().unwrap_or(0))
+}
+
+/// Set the level of a type variable.
+pub fn set_var_level(name: &str, level: u32) {
+    VAR_LEVELS.with(|m| {
+        m.borrow_mut().insert(name.to_string(), level);
+    });
+}
+
+/// Update a variable's level to be the minimum of its current level and the given level.
+/// This is called during unification when `Var(a) -> Var(b)`: b's level should be
+/// min(level_a, level_b) to prevent premature generalization.
+pub fn lower_var_level(name: &str, level: u32) {
+    VAR_LEVELS.with(|m| {
+        let mut map = m.borrow_mut();
+        let current = map.get(name).copied().unwrap_or(0);
+        if level < current {
+            map.insert(name.to_string(), level);
+        }
+    });
 }
 
 // ===== Free Type Variables =====

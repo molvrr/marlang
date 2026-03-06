@@ -1,6 +1,7 @@
 use crate::ast::*;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 // ===== Substitution =====
 
@@ -132,23 +133,19 @@ pub fn apply_subst_scheme(subst: &Substitution, scheme: &TypeScheme) -> TypeSche
 }
 
 pub fn apply_subst_env(subst: &Substitution, env: &TypeEnv) -> TypeEnv {
-    let mut new_bindings = HashMap::new();
-    for (name, scheme) in &env.bindings {
-        new_bindings.insert(name.clone(), apply_subst_scheme(subst, scheme));
+    if subst.is_empty() {
+        return env.clone();
     }
-    let parent = env
-        .parent
-        .as_ref()
-        .map(|p| Box::new(apply_subst_env(subst, p)));
+    // O(|subst|): compose with any existing pending substitution.
+    // The actual application to bindings is deferred until lookup.
+    let composed = match &env.pending_subst {
+        None => Rc::new(subst.clone()),
+        Some(existing) => Rc::new(compose_subst(subst, existing)),
+    };
     TypeEnv {
-        bindings: new_bindings,
-        data_types: env.data_types.clone(),
-        constructors: env.constructors.clone(),
-        aliases: env.aliases.clone(),
-        effects: env.effects.clone(),
-        foreign_libs: env.foreign_libs.clone(),
-        ffi_struct_types: env.ffi_struct_types.clone(),
-        parent,
+        inner: Rc::clone(&env.inner),
+        parent: env.parent.clone(),
+        pending_subst: Some(composed),
     }
 }
 
@@ -199,54 +196,165 @@ pub fn compose_subst(s1: &Substitution, s2: &Substitution) -> Substitution {
 
 // ===== Type Environment =====
 
+/// The inner data of a type environment, shared via Rc for cheap cloning.
+#[derive(Debug, Clone)]
+struct TypeEnvInner {
+    bindings: HashMap<String, TypeScheme>,
+    data_types: HashMap<String, DataType>,
+    constructors: HashMap<String, (DataType, Constructor)>,
+    aliases: HashMap<String, TypeAlias>,
+    effects: HashMap<String, EffectDeclaration>,
+    foreign_libs: HashMap<String, Vec<ForeignFnDecl>>,
+    ffi_struct_types: HashMap<String, FfiStructInfo>,
+}
+
+/// A type environment that supports lazy substitution.
+///
+/// The environment stores bindings and type metadata. A pending substitution
+/// can be attached, which is applied lazily on lookup rather than eagerly
+/// to every binding. This turns `apply_subst_env` from O(n) to O(|subst|).
+///
+/// The parent chain uses Rc for structural sharing — cloning a TypeEnv is O(1)
+/// (just incrementing reference counts), and creating child environments does
+/// not require materializing pending substitutions.
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
-    pub bindings: HashMap<String, TypeScheme>,
-    pub data_types: HashMap<String, DataType>,
-    pub constructors: HashMap<String, (DataType, Constructor)>,
-    pub aliases: HashMap<String, TypeAlias>,
-    pub effects: HashMap<String, EffectDeclaration>,
-    pub foreign_libs: HashMap<String, Vec<ForeignFnDecl>>,
-    pub ffi_struct_types: HashMap<String, FfiStructInfo>,
-    pub parent: Option<Box<TypeEnv>>,
+    inner: Rc<TypeEnvInner>,
+    /// Parent environment, shared via Rc for cheap cloning.
+    parent: Option<Rc<TypeEnv>>,
+    /// Pending substitution to be applied lazily on lookup.
+    /// Applies to bindings in `inner` and the entire `parent` chain.
+    pending_subst: Option<Rc<Substitution>>,
+}
+
+impl TypeEnv {
+    /// Access data_types.
+    pub fn data_types(&self) -> &HashMap<String, DataType> {
+        &self.inner.data_types
+    }
+
+    /// Access constructors.
+    pub fn constructors(&self) -> &HashMap<String, (DataType, Constructor)> {
+        &self.inner.constructors
+    }
+
+    /// Access aliases.
+    pub fn aliases(&self) -> &HashMap<String, TypeAlias> {
+        &self.inner.aliases
+    }
+
+    /// Access effects.
+    pub fn effects(&self) -> &HashMap<String, EffectDeclaration> {
+        &self.inner.effects
+    }
+
+    /// Access foreign_libs.
+    pub fn foreign_libs(&self) -> &HashMap<String, Vec<ForeignFnDecl>> {
+        &self.inner.foreign_libs
+    }
+
+    /// Access ffi_struct_types.
+    pub fn ffi_struct_types(&self) -> &HashMap<String, FfiStructInfo> {
+        &self.inner.ffi_struct_types
+    }
+
+    /// Access bindings (raw, without applying pending substitution).
+    /// Use `lookup_var` for substitution-aware access.
+    pub fn bindings(&self) -> &HashMap<String, TypeScheme> {
+        &self.inner.bindings
+    }
+
+    /// Get mutable access to the bindings (copy-on-write).
+    /// New entries inserted here will NOT have the pending substitution applied
+    /// to them — they are assumed to already be in the "post-substitution" state.
+    pub fn bindings_mut(&mut self) -> &mut HashMap<String, TypeScheme> {
+        &mut Rc::make_mut(&mut self.inner).bindings
+    }
+
+    /// Get mutable access to data_types (copy-on-write).
+    pub fn data_types_mut(&mut self) -> &mut HashMap<String, DataType> {
+        &mut Rc::make_mut(&mut self.inner).data_types
+    }
+
+    /// Get mutable access to constructors (copy-on-write).
+    pub fn constructors_mut(&mut self) -> &mut HashMap<String, (DataType, Constructor)> {
+        &mut Rc::make_mut(&mut self.inner).constructors
+    }
+
+    /// Get mutable access to aliases (copy-on-write).
+    pub fn aliases_mut(&mut self) -> &mut HashMap<String, TypeAlias> {
+        &mut Rc::make_mut(&mut self.inner).aliases
+    }
+
+    /// Get mutable access to effects (copy-on-write).
+    pub fn effects_mut(&mut self) -> &mut HashMap<String, EffectDeclaration> {
+        &mut Rc::make_mut(&mut self.inner).effects
+    }
+
+    /// Get mutable access to foreign_libs (copy-on-write).
+    pub fn foreign_libs_mut(&mut self) -> &mut HashMap<String, Vec<ForeignFnDecl>> {
+        &mut Rc::make_mut(&mut self.inner).foreign_libs
+    }
+
+    /// Get mutable access to ffi_struct_types (copy-on-write).
+    pub fn ffi_struct_types_mut(&mut self) -> &mut HashMap<String, FfiStructInfo> {
+        &mut Rc::make_mut(&mut self.inner).ffi_struct_types
+    }
+
+    /// Get a mutable reference to the inner data, cloning if shared.
+    fn inner_mut(&mut self) -> &mut TypeEnvInner {
+        Rc::make_mut(&mut self.inner)
+    }
 }
 
 pub fn empty_env() -> TypeEnv {
     TypeEnv {
-        bindings: HashMap::new(),
-        data_types: HashMap::new(),
-        constructors: HashMap::new(),
-        aliases: HashMap::new(),
-        effects: HashMap::new(),
-        foreign_libs: HashMap::new(),
-        ffi_struct_types: HashMap::new(),
+        inner: Rc::new(TypeEnvInner {
+            bindings: HashMap::new(),
+            data_types: HashMap::new(),
+            constructors: HashMap::new(),
+            aliases: HashMap::new(),
+            effects: HashMap::new(),
+            foreign_libs: HashMap::new(),
+            ffi_struct_types: HashMap::new(),
+        }),
         parent: None,
+        pending_subst: None,
     }
 }
 
 pub fn child_env(parent: &TypeEnv) -> TypeEnv {
+    // O(1): just Rc-share the parent. No materialization needed.
     TypeEnv {
-        bindings: HashMap::new(),
-        data_types: HashMap::new(),
-        constructors: HashMap::new(),
-        aliases: HashMap::new(),
-        effects: HashMap::new(),
-        foreign_libs: HashMap::new(),
-        ffi_struct_types: HashMap::new(),
-        parent: Some(Box::new(parent.clone())),
+        inner: Rc::new(TypeEnvInner {
+            bindings: HashMap::new(),
+            data_types: HashMap::new(),
+            constructors: HashMap::new(),
+            aliases: HashMap::new(),
+            effects: HashMap::new(),
+            foreign_libs: HashMap::new(),
+            ffi_struct_types: HashMap::new(),
+        }),
+        parent: Some(Rc::new(parent.clone())),
+        pending_subst: None,
     }
 }
 
 pub fn extend_env(env: &TypeEnv, name: &str, scheme: TypeScheme) -> TypeEnv {
+    // Clone-on-write: get a mutable copy of the inner data and insert.
     let mut new_env = env.clone();
-    new_env.bindings.insert(name.to_string(), scheme);
+    new_env
+        .inner_mut()
+        .bindings
+        .insert(name.to_string(), scheme);
     new_env
 }
 
 pub fn extend_env_many(env: &TypeEnv, bindings: &[(&str, TypeScheme)]) -> TypeEnv {
     let mut new_env = env.clone();
+    let inner = new_env.inner_mut();
     for (name, scheme) in bindings {
-        new_env.bindings.insert(name.to_string(), scheme.clone());
+        inner.bindings.insert(name.to_string(), scheme.clone());
     }
     new_env
 }
@@ -254,60 +362,57 @@ pub fn extend_env_many(env: &TypeEnv, bindings: &[(&str, TypeScheme)]) -> TypeEn
 // ===== Lookups (recurse through parent) =====
 
 pub fn lookup_var(env: &TypeEnv, name: &str) -> Option<TypeScheme> {
-    if let Some(scheme) = env.bindings.get(name) {
-        return Some(scheme.clone());
+    // Search in current bindings
+    if let Some(scheme) = env.inner.bindings.get(name) {
+        return Some(match &env.pending_subst {
+            None => scheme.clone(),
+            Some(subst) => apply_subst_scheme(subst, scheme),
+        });
     }
-    if let Some(parent) = &env.parent {
-        return lookup_var(parent, name);
-    }
-    None
+    // Recurse into parent chain. The parent carries its own pending_subst.
+    // We also need to apply our pending_subst to the result.
+    let parent = env.parent.as_ref()?;
+    let result = lookup_var(parent, name)?;
+    Some(match &env.pending_subst {
+        None => result,
+        Some(subst) => apply_subst_scheme(subst, &result),
+    })
 }
 
 pub fn lookup_data_type(env: &TypeEnv, name: &str) -> Option<DataType> {
-    if let Some(dt) = env.data_types.get(name) {
+    if let Some(dt) = env.inner.data_types.get(name) {
         return Some(dt.clone());
     }
-    if let Some(parent) = &env.parent {
-        return lookup_data_type(parent, name);
-    }
-    None
+    env.parent.as_ref().and_then(|p| lookup_data_type(p, name))
 }
 
 pub fn lookup_constructor(env: &TypeEnv, name: &str) -> Option<(DataType, Constructor)> {
-    if let Some(entry) = env.constructors.get(name) {
+    if let Some(entry) = env.inner.constructors.get(name) {
         return Some(entry.clone());
     }
-    if let Some(parent) = &env.parent {
-        return lookup_constructor(parent, name);
-    }
-    None
+    env.parent
+        .as_ref()
+        .and_then(|p| lookup_constructor(p, name))
 }
 
 pub fn lookup_effect(env: &TypeEnv, name: &str) -> Option<EffectDeclaration> {
-    if let Some(eff) = env.effects.get(name) {
+    if let Some(eff) = env.inner.effects.get(name) {
         return Some(eff.clone());
     }
-    if let Some(parent) = &env.parent {
-        return lookup_effect(parent, name);
-    }
-    None
+    env.parent.as_ref().and_then(|p| lookup_effect(p, name))
 }
 
 pub fn lookup_effect_op(env: &TypeEnv, op_name: &str) -> Option<(EffectDeclaration, EffectOp)> {
-    let mut current: Option<&TypeEnv> = Some(env);
-    while let Some(e) = current {
-        // Search in reverse insertion order
-        let effects: Vec<_> = e.effects.values().collect();
-        for eff in effects.iter().rev() {
-            for op in eff.operations.iter().rev() {
-                if op.name == op_name {
-                    return Some(((*eff).clone(), op.clone()));
-                }
+    for eff in env.inner.effects.values() {
+        for op in eff.operations.iter().rev() {
+            if op.name == op_name {
+                return Some((eff.clone(), op.clone()));
             }
         }
-        current = e.parent.as_deref();
     }
-    None
+    env.parent
+        .as_ref()
+        .and_then(|p| lookup_effect_op(p, op_name))
 }
 
 pub fn lookup_effect_op_in_effect(
@@ -325,42 +430,51 @@ pub fn lookup_effect_op_in_effect(
 
 pub fn find_effects_with_op(env: &TypeEnv, op_name: &str) -> Vec<String> {
     let mut effect_names = Vec::new();
-    let mut current: Option<&TypeEnv> = Some(env);
-    while let Some(e) = current {
-        for (name, effect) in &e.effects {
-            if effect.operations.iter().any(|op| op.name == op_name) && !effect_names.contains(name)
-            {
-                effect_names.push(name.clone());
-            }
-        }
-        current = e.parent.as_deref();
-    }
+    find_effects_with_op_inner(env, op_name, &mut effect_names);
     effect_names.sort();
     effect_names
+}
+
+fn find_effects_with_op_inner(env: &TypeEnv, op_name: &str, result: &mut Vec<String>) {
+    for (name, effect) in &env.inner.effects {
+        if effect.operations.iter().any(|op| op.name == op_name) && !result.contains(name) {
+            result.push(name.clone());
+        }
+    }
+    if let Some(parent) = &env.parent {
+        find_effects_with_op_inner(parent, op_name, result);
+    }
 }
 
 // ===== Define operations =====
 
 pub fn define_data_type(env: &TypeEnv, dt: DataType) -> TypeEnv {
     let mut new_env = env.clone();
+    let inner = new_env.inner_mut();
     for ctor in &dt.constructors {
-        new_env
+        inner
             .constructors
             .insert(ctor.name.clone(), (dt.clone(), ctor.clone()));
     }
-    new_env.data_types.insert(dt.name.clone(), dt);
+    inner.data_types.insert(dt.name.clone(), dt);
     new_env
 }
 
 pub fn define_effect(env: &TypeEnv, effect: EffectDeclaration) -> TypeEnv {
     let mut new_env = env.clone();
-    new_env.effects.insert(effect.name.clone(), effect);
+    new_env
+        .inner_mut()
+        .effects
+        .insert(effect.name.clone(), effect);
     new_env
 }
 
 pub fn define_foreign(env: &TypeEnv, lib_name: &str, functions: Vec<ForeignFnDecl>) -> TypeEnv {
     let mut new_env = env.clone();
-    new_env.foreign_libs.insert(lib_name.to_string(), functions);
+    new_env
+        .inner_mut()
+        .foreign_libs
+        .insert(lib_name.to_string(), functions);
     new_env
 }
 
@@ -369,51 +483,49 @@ pub fn lookup_foreign_fn<'a>(
     lib_name: &str,
     fn_name: &str,
 ) -> Option<&'a ForeignFnDecl> {
-    if let Some(fns) = env.foreign_libs.get(lib_name) {
+    if let Some(fns) = env.inner.foreign_libs.get(lib_name) {
         for f in fns {
             if f.name == fn_name {
                 return Some(f);
             }
         }
     }
-    if let Some(parent) = &env.parent {
-        return lookup_foreign_fn(parent, lib_name, fn_name);
-    }
-    None
+    env.parent
+        .as_ref()
+        .and_then(|p| lookup_foreign_fn(p, lib_name, fn_name))
 }
 
 pub fn has_foreign_lib(env: &TypeEnv, lib_name: &str) -> bool {
-    if env.foreign_libs.contains_key(lib_name) {
+    if env.inner.foreign_libs.contains_key(lib_name) {
         return true;
     }
-    if let Some(parent) = &env.parent {
-        return has_foreign_lib(parent, lib_name);
-    }
-    false
+    env.parent
+        .as_ref()
+        .is_some_and(|p| has_foreign_lib(p, lib_name))
 }
 
 pub fn register_ffi_struct_type(env: &mut TypeEnv, name: &str, info: FfiStructInfo) {
-    env.ffi_struct_types.insert(name.to_string(), info);
+    env.inner_mut()
+        .ffi_struct_types
+        .insert(name.to_string(), info);
 }
 
 pub fn is_ffi_struct_type(env: &TypeEnv, name: &str) -> bool {
-    if env.ffi_struct_types.contains_key(name) {
+    if env.inner.ffi_struct_types.contains_key(name) {
         return true;
     }
-    if let Some(parent) = &env.parent {
-        return is_ffi_struct_type(parent, name);
-    }
-    false
+    env.parent
+        .as_ref()
+        .is_some_and(|p| is_ffi_struct_type(p, name))
 }
 
 pub fn lookup_ffi_struct_info<'a>(env: &'a TypeEnv, name: &str) -> Option<&'a FfiStructInfo> {
-    if let Some(info) = env.ffi_struct_types.get(name) {
+    if let Some(info) = env.inner.ffi_struct_types.get(name) {
         return Some(info);
     }
-    if let Some(parent) = &env.parent {
-        return lookup_ffi_struct_info(parent, name);
-    }
-    None
+    env.parent
+        .as_ref()
+        .and_then(|p| lookup_ffi_struct_info(p, name))
 }
 
 // ===== Import Form =====
@@ -565,37 +677,39 @@ pub fn merge_module_env(target: &TypeEnv, source: &TypeEnv, form: &ImportForm) -
     // Build type name map for qualified imports
     let mut type_name_map: HashMap<String, String> = HashMap::new();
     if is_qualified {
-        for name in source.data_types.keys() {
-            if !target.data_types.contains_key(name) {
+        for name in source.inner.data_types.keys() {
+            if !target.inner.data_types.contains_key(name) {
                 type_name_map.insert(name.clone(), transform_name(name));
             }
         }
-        for name in source.effects.keys() {
-            if !target.effects.contains_key(name) {
+        for name in source.inner.effects.keys() {
+            if !target.inner.effects.contains_key(name) {
                 type_name_map.insert(name.clone(), transform_name(name));
             }
         }
-        for name in source.aliases.keys() {
-            if !target.aliases.contains_key(name) {
+        for name in source.inner.aliases.keys() {
+            if !target.inner.aliases.contains_key(name) {
                 type_name_map.insert(name.clone(), transform_name(name));
             }
         }
     }
 
+    let inner = result.inner_mut();
+
     // Merge bindings
-    for (name, scheme) in &source.bindings {
+    for (name, scheme) in &source.inner.bindings {
         if should_import(name) {
             let new_scheme = if is_qualified {
                 rewrite_type_scheme(scheme, &type_name_map)
             } else {
                 scheme.clone()
             };
-            result.bindings.insert(transform_name(name), new_scheme);
+            inner.bindings.insert(transform_name(name), new_scheme);
         }
     }
 
     // Merge data types
-    for (name, dt) in &source.data_types {
+    for (name, dt) in &source.inner.data_types {
         if should_import(name) {
             let new_name = transform_name(name);
             let new_dt = if is_qualified {
@@ -603,23 +717,23 @@ pub fn merge_module_env(target: &TypeEnv, source: &TypeEnv, form: &ImportForm) -
             } else {
                 dt.clone()
             };
-            result.data_types.insert(new_name, new_dt);
+            inner.data_types.insert(new_name, new_dt);
         }
     }
 
     // Merge constructors
-    for (name, (dt, ctor)) in &source.constructors {
+    for (name, (dt, ctor)) in &source.inner.constructors {
         if should_import(name) {
             let new_name = transform_name(name);
             if is_qualified {
                 let rewritten_ctor = rewrite_constructor(ctor, &type_name_map);
                 let dt_new_name = transform_name(&dt.name);
                 let rewritten_dt = rewrite_data_type(dt, &type_name_map, &dt_new_name);
-                result
+                inner
                     .constructors
                     .insert(new_name, (rewritten_dt, rewritten_ctor));
             } else {
-                result
+                inner
                     .constructors
                     .insert(new_name, (dt.clone(), ctor.clone()));
             }
@@ -627,7 +741,7 @@ pub fn merge_module_env(target: &TypeEnv, source: &TypeEnv, form: &ImportForm) -
     }
 
     // Merge effects
-    for (name, effect) in &source.effects {
+    for (name, effect) in &source.inner.effects {
         if should_import(name) {
             let new_name = transform_name(name);
             let new_effect = if is_qualified {
@@ -635,12 +749,12 @@ pub fn merge_module_env(target: &TypeEnv, source: &TypeEnv, form: &ImportForm) -
             } else {
                 effect.clone()
             };
-            result.effects.insert(new_name, new_effect);
+            inner.effects.insert(new_name, new_effect);
         }
     }
 
     // Merge aliases
-    for (name, alias) in &source.aliases {
+    for (name, alias) in &source.inner.aliases {
         if should_import(name) {
             let new_name = transform_name(name);
             if is_qualified {
@@ -649,9 +763,9 @@ pub fn merge_module_env(target: &TypeEnv, source: &TypeEnv, form: &ImportForm) -
                     type_params: alias.type_params.clone(),
                     body: rewrite_type(&alias.body, &type_name_map),
                 };
-                result.aliases.insert(new_name, rewritten_alias);
+                inner.aliases.insert(new_name, rewritten_alias);
             } else {
-                result.aliases.insert(new_name, alias.clone());
+                inner.aliases.insert(new_name, alias.clone());
             }
         }
     }
@@ -663,22 +777,41 @@ pub fn merge_module_env(target: &TypeEnv, source: &TypeEnv, form: &ImportForm) -
 
 pub fn free_type_vars_env(env: &TypeEnv) -> HashSet<String> {
     let mut result = HashSet::new();
-    for scheme in env.bindings.values() {
-        result.extend(free_type_vars_scheme(scheme));
-    }
-    if let Some(parent) = &env.parent {
-        result.extend(free_type_vars_env(parent));
-    }
+    free_type_vars_env_inner(env, &mut result);
     result
 }
 
-pub fn generalize(env: &TypeEnv, t: &Type) -> TypeScheme {
-    let env_free = free_type_vars_env(env);
+fn free_type_vars_env_inner(env: &TypeEnv, result: &mut HashSet<String>) {
+    // Apply pending substitution to each scheme when computing free vars
+    match &env.pending_subst {
+        None => {
+            for scheme in env.inner.bindings.values() {
+                result.extend(free_type_vars_scheme(scheme));
+            }
+        }
+        Some(subst) => {
+            for scheme in env.inner.bindings.values() {
+                let applied = apply_subst_scheme(subst, scheme);
+                result.extend(free_type_vars_scheme(&applied));
+            }
+        }
+    }
+    // Recurse into parent (which carries its own pending_subst)
+    if let Some(parent) = &env.parent {
+        free_type_vars_env_inner(parent, result);
+    }
+}
+
+/// Level-based generalization: quantify all type variables in `t` whose level
+/// is strictly greater than the current binding level. This is O(|free_vars(t)|)
+/// instead of O(|env|), eliminating the need to walk the entire environment.
+pub fn generalize(_env: &TypeEnv, t: &Type) -> TypeScheme {
     let type_free = free_type_vars(t);
+    let cur_level = current_level();
 
     let mut quantified: Vec<String> = type_free
         .iter()
-        .filter(|v| !env_free.contains(*v))
+        .filter(|v| get_var_level(v) > cur_level)
         .cloned()
         .collect();
     quantified.sort(); // Deterministic ordering

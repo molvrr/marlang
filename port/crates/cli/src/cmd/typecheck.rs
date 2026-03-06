@@ -31,7 +31,7 @@ pub fn cmd_typecheck(file: &Path) -> ExitCode {
                     Some(n) => {
                         let ty = output
                             .env
-                            .bindings
+                            .bindings()
                             .get(n)
                             .map(|s| format_type(&s.ty))
                             .unwrap_or_else(|| "Unit".to_string());
