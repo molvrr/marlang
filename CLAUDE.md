@@ -32,7 +32,7 @@ cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI
 port/crates/
   core/       - marlang-core: lexer, parser, string interning, spans
   types/      - marlang-types: HM type inference, exhaustiveness
-  vm/         - marlang-vm: compiler, NaN-boxed VM, modules, FFI, schedulers, macros, TCP
+  vm/         - marlang-vm: compiler, VM, modules, FFI, schedulers, macros, TCP
   cli/        - marlang-cli: clap-based CLI (run, repl, typecheck, disasm, expand)
 stdlib/       - Standard library (.mar files, shared)
 examples/     - Example programs
@@ -61,7 +61,7 @@ Note: ADT constructors (None, Some, Nil, Cons, MkPair, Ok, Err) and utility func
 ## Language Conventions
 
 ### Primitive Types
-The language has these primitive types: `Int`, `Float`, `Bool`, `String`, `Char`, `Unit`. `Char` is a Unicode codepoint stored inline via NaN-boxing (no heap allocation). Character literals are displayed as `'A'` by `show`. Use `char-from-code` to create chars and `char-code` to extract the codepoint.
+The language has these primitive types: `Int`, `Float`, `Bool`, `String`, `Char`, `Unit`. `Char` is a Unicode codepoint stored inline (no heap allocation). Character literals are displayed as `'A'` by `show`. Use `char-from-code` to create chars and `char-code` to extract the codepoint.
 
 ### Function Type Convention
 Every function takes at least one argument. Zero-argument thunks (`(lambda () body)`) are typed as taking an implicit `Unit` parameter:

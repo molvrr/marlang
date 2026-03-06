@@ -43,7 +43,7 @@ impl Upvalue {
     }
 }
 
-/// Heap-allocated VM objects, stored behind `Arc` in NaN-boxed Values.
+/// Heap-allocated VM objects, stored behind `Arc` in tagged `Value`s.
 #[derive(Debug, Clone)]
 pub enum VMObject {
     String(Arc<str>),

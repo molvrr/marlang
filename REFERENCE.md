@@ -34,7 +34,7 @@
 (char->string (char-from-code 65))  ; => "A"
 ```
 
-Characters are NaN-boxed inline (no heap allocation). Type: `Char`.
+Characters are stored inline (no heap allocation). Type: `Char`.
 
 **Booleans** - `#t` for true, `#f` for false (returned by comparison operators)
 
