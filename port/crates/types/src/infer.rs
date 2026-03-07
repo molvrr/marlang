@@ -1257,63 +1257,19 @@ fn infer_cond(
 
 // ===== Match =====
 
-fn get_data_type_from_type(env: &TypeEnv, t: &Type) -> Option<DataType> {
-    match t {
-        Type::Const(name) => lookup_data_type(env, name),
-        Type::App { constructor, .. } => {
-            if let Type::Const(name) = constructor.as_ref() {
-                lookup_data_type(env, name)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
 fn check_exhaustiveness(
     env: &TypeEnv,
     scrutinee_type: &Type,
     patterns: &[Pattern],
     span: Span,
 ) -> Result<(), TypeError> {
-    let data_type = match get_data_type_from_type(env, scrutinee_type) {
-        Some(dt) => dt,
-        None => return Ok(()),
-    };
-
-    for p in patterns {
-        if matches!(p, Pattern::Wildcard | Pattern::Var(_)) {
-            return Ok(());
-        }
-    }
-
-    let covered: HashSet<String> = patterns
-        .iter()
-        .filter_map(|p| {
-            if let Pattern::Constructor { name, .. } = p {
-                Some(name.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let missing: Vec<String> = data_type
-        .constructors
-        .iter()
-        .filter(|c| !covered.contains(&c.name))
-        .map(|c| c.name.clone())
-        .collect();
-
-    if !missing.is_empty() {
-        return Err(TypeError::NonExhaustivePatterns {
-            missing,
+    match crate::exhaustiveness::check_exhaustiveness(env, scrutinee_type, patterns) {
+        Ok(()) => Ok(()),
+        Err(witnesses) => Err(TypeError::NonExhaustivePatterns {
+            missing: witnesses,
             span: Some(span),
-        });
+        }),
     }
-
-    Ok(())
 }
 
 fn infer_match(

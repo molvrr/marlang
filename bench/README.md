@@ -29,11 +29,11 @@ Measured on Apple Silicon, release build, 5 runs (median):
 
 | Benchmark  | Time      |
 |------------|-----------|
-| fib        | 62.89ms   |
-| fib-tail   | 17.72ms   |
-| sum-loop   | 19.66ms   |
-| pattern    | 25.88ms   |
-| effects    | 18.65ms   |
+| fib        | 58.14ms   |
+| fib-tail   | 17.36ms   |
+| sum-loop   | 19.07ms   |
+| pattern    | 24.98ms   |
+| effects    | 18.04ms   |
 
 Run with: `./bench/run.sh [RUNS]`
 

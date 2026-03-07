@@ -458,6 +458,152 @@ fn complete_enum_coverage_should_pass() {
     );
 }
 
+// ===== Nested Pattern Exhaustiveness =====
+
+#[test]
+fn nested_adt_missing_case_should_fail() {
+    // The original bug: (Node _ (Node _ _)) + Leaf covers {Node, Leaf} at the
+    // top level, but misses (Node _ Leaf).
+    let err = check_err(
+        "(data (Tree a) Leaf (Node a (Tree a)))
+         (match (Node 20 (Node 19 Leaf))
+           ((Node a (Node b c)) a)
+           (Leaf 40))",
+    );
+    assert!(
+        err.contains("Non-exhaustive") || err.contains("non-exhaustive"),
+        "error was: {}",
+        err
+    );
+    assert!(
+        err.contains("Node") && err.contains("Leaf"),
+        "expected witness like (Node _ Leaf), error was: {}",
+        err
+    );
+}
+
+#[test]
+fn nested_adt_fully_covered_should_pass() {
+    check_ok(
+        "(data (Tree a) Leaf (Node a (Tree a)))
+         (match (Node 20 (Node 19 Leaf))
+           ((Node a (Node b c)) a)
+           ((Node a Leaf) a)
+           (Leaf 40))",
+    );
+}
+
+#[test]
+fn nested_wildcard_covers_subtree_should_pass() {
+    check_ok(
+        "(data (Tree a) Leaf (Node a (Tree a)))
+         (match (Node 20 Leaf)
+           ((Node a _) a)
+           (Leaf 40))",
+    );
+}
+
+#[test]
+fn nested_variable_covers_subtree_should_pass() {
+    check_ok(
+        "(data (Tree a) Leaf (Node a (Tree a)))
+         (match (Node 20 Leaf)
+           ((Node a t) a)
+           (Leaf 40))",
+    );
+}
+
+#[test]
+fn deeply_nested_missing_case_should_fail() {
+    // Three levels: Node _ (Node _ (Node _ _)) + Node _ (Node _ Leaf) + Node _ Leaf + Leaf
+    // covers everything EXCEPT nothing — wait, let's construct a real gap.
+    // Missing: Node _ (Node _ Leaf) — the second-level Leaf case is absent.
+    let err = check_err(
+        "(data (Tree a) Leaf (Node a (Tree a)))
+         (match (Node 1 (Node 2 (Node 3 Leaf)))
+           ((Node a (Node b (Node c d))) a)
+           ((Node a Leaf) a)
+           (Leaf 0))",
+    );
+    assert!(
+        err.contains("Non-exhaustive") || err.contains("non-exhaustive"),
+        "error was: {}",
+        err
+    );
+}
+
+#[test]
+fn deeply_nested_fully_covered_should_pass() {
+    check_ok(
+        "(data (Tree a) Leaf (Node a (Tree a)))
+         (match (Node 1 (Node 2 (Node 3 Leaf)))
+           ((Node a (Node b (Node c d))) a)
+           ((Node a (Node b Leaf)) a)
+           ((Node a Leaf) a)
+           (Leaf 0))",
+    );
+}
+
+#[test]
+fn nested_option_in_list_missing_should_fail() {
+    // Matching on (List (Option Int)): Cons (Some x) rest is present,
+    // but Cons None rest is missing.
+    let err = check_err(
+        "(match (Cons (Some 1) Nil)
+           ((Cons (Some x) rest) x)
+           (Nil 0))",
+    );
+    assert!(
+        err.contains("Non-exhaustive") || err.contains("non-exhaustive"),
+        "error was: {}",
+        err
+    );
+    assert!(
+        err.contains("None"),
+        "expected witness mentioning None, error was: {}",
+        err
+    );
+}
+
+#[test]
+fn nested_option_in_list_fully_covered_should_pass() {
+    check_ok(
+        "(match (Cons (Some 1) Nil)
+           ((Cons (Some x) rest) x)
+           ((Cons None rest) 0)
+           (Nil 0))",
+    );
+}
+
+#[test]
+fn single_wildcard_still_exhaustive() {
+    check_ok(
+        "(data (Tree a) Leaf (Node a (Tree a)))
+         (match (Node 1 Leaf)
+           (_ 42))",
+    );
+}
+
+#[test]
+fn single_variable_still_exhaustive() {
+    check_ok(
+        "(data (Tree a) Leaf (Node a (Tree a)))
+         (match (Node 1 Leaf)
+           (x 42))",
+    );
+}
+
+#[test]
+fn overlapping_patterns_still_exhaustive() {
+    // Overlapping but exhaustive: first arm catches Node, second catches everything.
+    check_ok(
+        "(data (Tree a) Leaf (Node a (Tree a)))
+         (match Leaf
+           ((Node a b) a)
+           (_ 0))",
+    );
+}
+
 // ===== Show Typeclass =====
 
 #[test]

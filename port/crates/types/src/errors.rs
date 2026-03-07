@@ -48,7 +48,7 @@ pub enum TypeError {
         span: Option<Span>,
     },
     NonExhaustivePatterns {
-        missing: Vec<String>,
+        missing: Vec<Pattern>,
         span: Option<Span>,
     },
     NonExhaustiveHandlers {
@@ -176,7 +176,11 @@ pub fn format_error(err: &TypeError) -> String {
             )
         }
         TypeError::NonExhaustivePatterns { missing, .. } => {
-            format!("Non-exhaustive patterns. Missing: {}", missing.join(", "))
+            let missing_strs: Vec<String> = missing.iter().map(format_pattern).collect();
+            format!(
+                "Non-exhaustive patterns. Missing: {}",
+                missing_strs.join(", ")
+            )
         }
         TypeError::NonExhaustiveHandlers {
             effect_name,
