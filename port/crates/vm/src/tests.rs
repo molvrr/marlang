@@ -1420,7 +1420,7 @@ fn exec_string_to_int_invalid() {
     // With CPS dispatch, unhandled throw gives "Uncaught exception: ..." instead of "Unhandled effect: throw"
     assert_error(
         "(string->int \"abc\")",
-        "Uncaught exception: string->int: invalid integer: abc",
+        "Uncaught exception: \"string->int: invalid integer: abc\"",
     );
 }
 
@@ -1904,7 +1904,7 @@ fn cps_throw_unhandled_crashes_with_message() {
     // Unhandled throw gives "Uncaught exception: ..." not "Unhandled effect: throw"
     assert_error(
         r#"(perform throw "something went wrong")"#,
-        "Uncaught exception: something went wrong",
+        r#"Uncaught exception: "something went wrong""#,
     );
 }
 
@@ -4947,4 +4947,121 @@ fn variadic_lambda_too_few_args_errors() {
     assert!(result.is_err());
     let err_msg = format!("{:?}", result.unwrap_err());
     assert!(err_msg.contains("at least 2"), "error: {}", err_msg);
+}
+
+// ===== Polymorphic throw: custom ADT error values =====
+
+#[test]
+fn throw_custom_adt_pattern_match_in_handler() {
+    // Throw a custom ADT and pattern match on it in the handler
+    assert_int(
+        r#"
+(data AppError (NotFound String) (InvalidInput String Int))
+(handle
+  (begin
+    (perform throw (InvalidInput "age" -1))
+    0)
+  ((throw err k) ->
+    (match err
+      ((NotFound msg) 0)
+      ((InvalidInput field code) code))))
+"#,
+        -1,
+    );
+}
+
+#[test]
+fn throw_recursive_adt_pattern_match_in_handler() {
+    // Throw a recursive ADT and destructure it in the handler
+    assert_str(
+        r#"
+(data ErrorChain
+  (RootCause String)
+  (Wrapped String ErrorChain))
+(handle
+  (begin
+    (perform throw (Wrapped "outer" (Wrapped "middle" (RootCause "inner"))))
+    "unreachable")
+  ((throw err k) ->
+    (match err
+      ((RootCause msg) msg)
+      ((Wrapped msg cause)
+        (match cause
+          ((RootCause inner) (string-append msg ": " inner))
+          ((Wrapped inner-msg _) (string-append msg ": " inner-msg)))))))
+"#,
+        "outer: middle",
+    );
+}
+
+#[test]
+fn throw_custom_adt_exhaustive_match_not_found() {
+    // Throw NotFound, handler matches all three constructors exhaustively
+    assert_str(
+        r#"
+(data AppError (NotFound String) (InvalidInput String Int) Unauthorized)
+(handle
+  (begin
+    (perform throw (NotFound "user"))
+    "unreachable")
+  ((throw err k) ->
+    (match err
+      ((NotFound resource) (string-append "not found: " resource))
+      ((InvalidInput field code) (string-append "bad input: " field))
+      (Unauthorized "access denied"))))
+"#,
+        "not found: user",
+    );
+}
+
+#[test]
+fn throw_custom_adt_exhaustive_match_invalid_input() {
+    // Throw InvalidInput, handler matches all three constructors exhaustively
+    assert_str(
+        r#"
+(data AppError (NotFound String) (InvalidInput String Int) Unauthorized)
+(handle
+  (begin
+    (perform throw (InvalidInput "email" 400))
+    "unreachable")
+  ((throw err k) ->
+    (match err
+      ((NotFound resource) (string-append "not found: " resource))
+      ((InvalidInput field code) (string-append "bad input: " field))
+      (Unauthorized "access denied"))))
+"#,
+        "bad input: email",
+    );
+}
+
+#[test]
+fn throw_custom_adt_exhaustive_match_unauthorized() {
+    // Throw Unauthorized, handler matches all three constructors exhaustively
+    assert_str(
+        r#"
+(data AppError (NotFound String) (InvalidInput String Int) Unauthorized)
+(handle
+  (begin
+    (perform throw Unauthorized)
+    "unreachable")
+  ((throw err k) ->
+    (match err
+      ((NotFound resource) (string-append "not found: " resource))
+      ((InvalidInput field code) (string-append "bad input: " field))
+      (Unauthorized "access denied"))))
+"#,
+        "access denied",
+    );
+}
+
+#[test]
+fn throw_custom_adt_unhandled_shows_value() {
+    // Unhandled throw of a custom ADT shows the value via format_value
+    assert_error(
+        r#"
+(data AppError (NotFound String) (InvalidInput String Int) Unauthorized)
+(perform throw (NotFound "user"))
+"#,
+        r#"Uncaught exception: (NotFound "user")"#,
+    );
 }

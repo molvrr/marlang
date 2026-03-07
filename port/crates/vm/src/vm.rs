@@ -3,7 +3,7 @@ use crate::errors::{StackTraceEntry, VMError};
 use crate::object::{
     CallFrame, Closure, HandlerDispatch, HandlerEntry, VMContinuation, VMHandlerFrame, VMObject,
 };
-use crate::value::{Value, format_value_unquoted};
+use crate::value::{Value, format_value, format_value_unquoted};
 use rustc_hash::FxHashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -2370,7 +2370,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     // Better error message for unhandled throw
                     let msg = args
                         .first()
-                        .and_then(|v| v.as_string().map(|s| s.to_string()))
+                        .map(format_value)
                         .unwrap_or_else(|| "(no message)".to_string());
                     vm.frames[frame_idx].ip = ip;
                     return Err(VMSignal::Error(vm.vm_error(

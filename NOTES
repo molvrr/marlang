@@ -6,11 +6,8 @@
       scope (e.g. passed through run-safe/try which runs it in a fresh handle block).
       Workaround: pass captured variables explicitly as function arguments to the
       inner define'd function.
-- [ ] Cons and List internal implementations
-- [ ] Exhaustiveness check for strings
 - [ ] Remove NIL:   self.emit_constant(ConstantValue::Nil, line);
 - [ ] Cross process messaging
-- [ ] stdlib: json
 - [ ] stdlib: persistent data structures
 - [ ] stdlib: synchronization primitives
 - [ ] stdlib: add bytewise operators
@@ -46,3 +43,6 @@
                  Running `target/debug/mar run /tmp/test_macro_adt.mar`
             Macro expansion error: Runtime error: Macro expansion error: Cannot convert VM value to AST: (quote 42)
 - [x] JIT
+- [x] Exhaustiveness check for strings
+- [x] stdlib: json
+- [x] Cons and List internal implementations

@@ -7,7 +7,7 @@
 use crate::bytecode::{Chunk, FunctionPrototype};
 use crate::errors::VMError;
 use crate::object::{Closure, HandlerEntry, VMHandlerFrame, VMObject};
-use crate::value::{Value, format_value_unquoted};
+use crate::value::{Value, format_value, format_value_unquoted};
 use crate::vm::{
     EffectSignal, VM, VMSignal, call_closure, call_value, next_handler_id, resume_continuation,
 };
@@ -1480,9 +1480,8 @@ fn handle_effect(
         "throw" => {
             let msg = args
                 .first()
-                .and_then(|v| v.as_string())
-                .unwrap_or("unknown error")
-                .to_string();
+                .map(format_value)
+                .unwrap_or_else(|| "(no message)".to_string());
             return Err(VMError::runtime(format!("uncaught exception: {}", msg)));
         }
 

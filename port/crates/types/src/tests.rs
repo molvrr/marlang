@@ -131,7 +131,7 @@ const TEST_PRELUDE: &str = r#"
 (declare list? (-> a Bool))
 
 (effect Exception
-  (throw (-> String a)))
+  (throw (-> e a)))
 "#;
 
 fn check(source: &str) -> Result<Vec<crate::ast::Type>, String> {
@@ -1623,7 +1623,7 @@ fn handle_exception_single_op_exhaustive() {
     // Exception has only one op (throw), so handling it is automatically exhaustive
     check_ok(
         r#"(effect Exception
-               (throw (-> String a)))
+               (throw (-> e a)))
            (handle
              (perform throw "error")
              ((throw msg k) -> msg))"#,
@@ -1643,5 +1643,52 @@ fn handle_effect_removal_verified() {
                (handle
                  (perform my-op ())
                  ((my-op k) -> (resume k 42)))))"#,
+    );
+}
+
+// ===== Polymorphic throw: custom ADT error values =====
+
+#[test]
+fn throw_polymorphic_custom_adt() {
+    // Throw a custom ADT and pattern match on it in the handler
+    check_ok(
+        r#"(data AppError (NotFound String) (InvalidInput String Int))
+           (handle
+             (perform throw (InvalidInput "age" -1))
+             ((throw err k) ->
+               (match err
+                 ((NotFound msg) 0)
+                 ((InvalidInput field code) code))))"#,
+    );
+}
+
+#[test]
+fn throw_polymorphic_recursive_adt() {
+    // Throw a recursive ADT and destructure it in the handler
+    check_ok(
+        r#"(data ErrorChain
+             (RootCause String)
+             (Wrapped String ErrorChain))
+           (handle
+             (perform throw (Wrapped "outer" (RootCause "inner")))
+             ((throw err k) ->
+               (match err
+                 ((RootCause msg) msg)
+                 ((Wrapped msg _) msg))))"#,
+    );
+}
+
+#[test]
+fn throw_polymorphic_exhaustive_multi_constructor_match() {
+    // Throw a custom ADT with three constructors; handler matches all exhaustively
+    check_ok(
+        r#"(data AppError (NotFound String) (InvalidInput String Int) Unauthorized)
+           (handle
+             (perform throw (NotFound "user"))
+             ((throw err k) ->
+               (match err
+                 ((NotFound resource) (string-append "not found: " resource))
+                 ((InvalidInput field code) (string-append "bad input: " field))
+                 (Unauthorized "access denied"))))"#,
     );
 }

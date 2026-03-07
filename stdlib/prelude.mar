@@ -170,7 +170,7 @@
 
 ; --- Effects ---
 (effect Exception
-  (throw (-> String a)))
+  (throw (-> e a)))
 
 ; --- Macros ---
 (defmacro when (cond body)
@@ -178,8 +178,8 @@
 
 ; --- Core Functions ---
 
-; raise : (-> String {Exception} a)
-; Throw an exception with a message. Wrapper around (perform throw msg).
+; raise : (-> e {Exception} a)
+; Throw an exception with any value. Wrapper around (perform throw val).
 (define raise (lambda (msg) (perform throw msg)))
 
 ; string->int: parses a string to an Int, throws on failure

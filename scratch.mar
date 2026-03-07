@@ -128,7 +128,7 @@
 (define p (Point 1.0 2.0 3.0))
 (io/println (show (point-x p)))
 (io/println (show (point-y p)))
-(io/println (show (point-z p)))
+(io/println (point-z p))
 
 (io/println (show (equal? (char-from-code 65) (char-from-code 65))))
 
