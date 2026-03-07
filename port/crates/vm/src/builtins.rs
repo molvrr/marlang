@@ -118,14 +118,9 @@ macro_rules! bin_float_op {
     };
 }
 
-/// Collect any list representation (VMObject::List or Cons/Nil ADT) into a Vec<Value>.
-/// Returns Err if the value is not a list of either kind.
+/// Collect a Cons/Nil ADT chain into a Vec<Value>.
+/// Returns Err if the value is not a list.
 fn collect_list(val: &Value, context: &str) -> Result<Vec<Value>, VMError> {
-    // VMObject::List(Vec<Value>) — produced by (list ...) builtin
-    if let Some(VMObject::List(items)) = val.as_object() {
-        return Ok(items.clone());
-    }
-    // Cons/Nil ADT chain
     let mut result = Vec::new();
     let mut cur = val.clone();
     loop {
@@ -142,7 +137,7 @@ fn collect_list(val: &Value, context: &str) -> Result<Vec<Value>, VMError> {
             }
             _ => {
                 return Err(VMError::runtime(format!(
-                    "{}: expected a list (List or Cons/Nil)",
+                    "{}: expected a list (Cons/Nil)",
                     context
                 )));
             }
@@ -367,7 +362,7 @@ pub fn register_builtins(vm: &mut VM) {
 
     // List
     builtin(vm, "list", |_vm, args| {
-        Ok(Value::object(VMObject::List(args.to_vec())))
+        Ok(crate::object::vec_to_cons_list(args.to_vec()))
     });
 
     // Show
@@ -833,7 +828,6 @@ pub fn register_builtins(vm: &mut VM) {
             return Err(VMError::runtime("list? expects 1 argument"));
         }
         let is_list = args[0].is_nil()
-            || matches!(args[0].as_object(), Some(VMObject::List(_)))
             || matches!(args[0].as_object(), Some(VMObject::AdtValue { tag, .. }) if tag == "Nil" || tag == "Cons");
         Ok(Value::boolean(is_list))
     });

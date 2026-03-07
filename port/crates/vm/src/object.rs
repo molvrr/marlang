@@ -6,6 +6,24 @@ use std::sync::{Arc, Mutex};
 /// Uses `Arc<Mutex<Value>>` for thread-safety (required by multi-threaded scheduler).
 pub type UpvalueCell = Arc<Mutex<Value>>;
 
+/// Build a Cons/Nil chain from a `Vec<Value>`.
+///
+/// Converts `[a, b, c]` into `Cons(a, Cons(b, Cons(c, Nil)))` using `AdtValue`.
+/// This is the canonical way to construct list values at runtime.
+pub fn vec_to_cons_list(items: Vec<Value>) -> Value {
+    let mut result = Value::object(VMObject::AdtValue {
+        tag: "Nil".to_string(),
+        fields: vec![],
+    });
+    for item in items.into_iter().rev() {
+        result = Value::object(VMObject::AdtValue {
+            tag: "Cons".to_string(),
+            fields: vec![item, result],
+        });
+    }
+    result
+}
+
 /// A captured upvalue: either a plain value copy (cheap, common case) or a
 /// shared mutable cell (for letrec-style recursive local defines).
 #[derive(Debug, Clone)]
@@ -48,7 +66,6 @@ impl Upvalue {
 pub enum VMObject {
     String(Arc<str>),
     Symbol(String),
-    List(Vec<Value>),
     AdtValue {
         tag: String,
         fields: Vec<Value>,
@@ -88,7 +105,6 @@ impl VMObject {
         match self {
             VMObject::String(_) => "string",
             VMObject::Symbol(_) => "symbol",
-            VMObject::List(_) => "list",
             VMObject::AdtValue { .. } => "adt-value",
             VMObject::AdtConstructor { .. } => "adt-constructor",
             VMObject::Closure(_) => "closure",
@@ -115,7 +131,6 @@ impl PartialEq for VMObject {
         match (self, other) {
             (VMObject::String(a), VMObject::String(b)) => a == b,
             (VMObject::Symbol(a), VMObject::Symbol(b)) => a == b,
-            (VMObject::List(a), VMObject::List(b)) => a == b,
             (
                 VMObject::AdtValue {
                     tag: t1,

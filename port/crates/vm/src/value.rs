@@ -477,12 +477,37 @@ fn format_object(obj: &VMObject) -> String {
     match obj {
         VMObject::String(s) => format!("\"{}\"", s),
         VMObject::Symbol(s) => s.clone(),
-        VMObject::List(elements) => {
-            let parts: Vec<String> = elements.iter().map(format_value).collect();
-            format!("({})", parts.join(" "))
-        }
         VMObject::AdtValue { tag, fields } => {
-            if fields.is_empty() {
+            // Detect Cons/Nil chains and pretty-print as flat lists: (1 2 3)
+            if tag == "Cons" && fields.len() == 2 {
+                let mut parts = Vec::new();
+                parts.push(format_value(&fields[0]));
+                let mut cur = &fields[1];
+                loop {
+                    match cur.as_object() {
+                        Some(VMObject::AdtValue { tag, fields })
+                            if tag == "Nil" && fields.is_empty() =>
+                        {
+                            break;
+                        }
+                        Some(VMObject::AdtValue { tag, fields })
+                            if tag == "Cons" && fields.len() == 2 =>
+                        {
+                            parts.push(format_value(&fields[0]));
+                            cur = &fields[1];
+                        }
+                        _ => {
+                            // Improper list: (1 2 . tail)
+                            parts.push(".".to_string());
+                            parts.push(format_value(cur));
+                            break;
+                        }
+                    }
+                }
+                format!("({})", parts.join(" "))
+            } else if tag == "Nil" && fields.is_empty() {
+                "()".to_string()
+            } else if fields.is_empty() {
                 tag.clone()
             } else {
                 let parts: Vec<String> = fields.iter().map(format_value).collect();

@@ -1,0 +1,466 @@
+; JSON Library — RFC 8259 Compliant
+;
+; Bidirectional JSON codec built on std:codec.
+;
+; Usage:
+;   (import "std:json" as json)
+;   (json/decode "{\"name\":\"Alice\",\"age\":30}")
+;   (json/encode (JsonObject (list (MkPair "name" (JsonString "Alice")))))
+
+(import "std:codec" as c)
+
+; ============================================================
+; Data Type
+; ============================================================
+
+(data
+(Json)
+JsonNull
+(JsonBool Bool)
+(JsonInt Int)
+(JsonFloat Float)
+(JsonString String)
+(JsonArray (List Json))
+(JsonObject (List (Pair String Json))))
+
+; ============================================================
+; Isomorphisms
+; ============================================================
+
+(define iso-json-null
+    (c/MkIso
+(lambda (_) (Some JsonNull))
+(lambda (j) (match j (JsonNull (Some nil)) (_ None)))))
+(define iso-json-bool
+    (c/MkIso
+(lambda (x) (Some (JsonBool x)))
+(lambda (j) (match j ((JsonBool b) (Some b)) (_ None)))))
+(define iso-json-int
+    (c/MkIso
+(lambda (x) (Some (JsonInt x)))
+(lambda (j) (match j ((JsonInt n) (Some n)) (_ None)))))
+(define iso-json-float
+    (c/MkIso
+(lambda (x) (Some (JsonFloat x)))
+(lambda (j) (match j ((JsonFloat f) (Some f)) (_ None)))))
+(define iso-json-string
+    (c/MkIso
+(lambda (x) (Some (JsonString x)))
+(lambda (j) (match j ((JsonString s) (Some s)) (_ None)))))
+(define iso-json-array
+    (c/MkIso
+(lambda (items) (Some (JsonArray items)))
+(lambda (j) (match j ((JsonArray items) (Some items)) (_ None)))))
+(define iso-json-object
+    (c/MkIso
+(lambda (pairs) (Some (JsonObject pairs)))
+(lambda (j) (match j ((JsonObject pairs) (Some pairs)) (_ None)))))
+
+; ============================================================
+; Internal: parser/printer thunks from codec primitives
+; ============================================================
+
+(define do-consume (c/codec-parser c/any-char))
+(define do-peek (c/codec-parser c/peek-char))
+
+(define do-emit-str (lambda (s) ((c/codec-printer (c/lit-string s)) nil)))
+
+(define do-emit-ch (lambda (ch) ((c/codec-printer c/any-char) ch)))
+
+(define do-skip-ws (c/codec-parser c/spaces0))
+
+; ============================================================
+; JSON Strings (RFC 8259 §7)
+; ============================================================
+
+(define hex-val
+    (lambda (ch)
+        (let ((code (char-code ch)))
+            (if (if (>= code 48) (<= code 57) #f)
+(- code 48)
+                (if (if (>= code 65) (<= code 70) #f)
+(- code (- 65 10))
+(if (if (>= code 97) (<= code 102) #f) (- code (- 97 10)) 0))))))
+
+(define int->hex-char
+    (lambda (n)
+(if (< n 10) (char-from-code (+ 48 n)) (char-from-code (+ (- 97 10) n)))))
+
+; json-escaped-char : Codec Char
+(define json-escaped-char
+    (c/mk-codec
+        (lambda ()
+            (let ((bs (do-consume)))
+                (if (= (char-code bs) 92)
+                    (let ((ch (do-consume)))
+                        (let ((code (char-code ch)))
+                            (if (= code 34)
+(char-from-code 34)
+                                (if (= code 92)
+(char-from-code 92)
+                                    (if (= code 47)
+(char-from-code 47)
+                                        (if (= code 98)
+(char-from-code 8)
+                                            (if (= code 102)
+(char-from-code 12)
+                                                (if (= code 110)
+(char-from-code 10)
+                                                    (if (= code 114)
+(char-from-code 13)
+                                                        (if (= code 116)
+(char-from-code 9)
+                                                            (if (= code 117)
+                                                                (let ((h3 (hex-val (do-consume))))
+                                                                    (let ((h2 (hex-val (do-consume))))
+                                                                        (let ((h1 (hex-val (do-consume))))
+                                                                            (let ((h0 (hex-val (do-consume))))
+(char-from-code (+ (* h3 4096) (+ (* h2 256) (+ (* h1 16) h0))))))))
+(perform throw (string-append "invalid escape: \\\\" (char->string ch))))))))))))))
+(perform throw "expected backslash"))))
+        (lambda (ch)
+            (let ((code (char-code ch)))
+                (if (= code 34)
+(do-emit-str "\\\"")
+                    (if (= code 92)
+(do-emit-str "\\\\")
+                        (if (= code 8)
+(do-emit-str "\\b")
+                            (if (= code 12)
+(do-emit-str "\\f")
+                                (if (= code 10)
+(do-emit-str "\\n")
+                                    (if (= code 13)
+(do-emit-str "\\r")
+                                        (if (= code 9)
+(do-emit-str "\\t")
+                                            (if (< code 32)
+                                                (begin
+(do-emit-str "\\u")
+(do-emit-ch (int->hex-char (/ code 4096)))
+(do-emit-ch (int->hex-char (rem (/ code 256) 16)))
+(do-emit-ch (int->hex-char (rem (/ code 16) 16)))
+(do-emit-ch (int->hex-char (rem code 16))))
+(do-emit-ch ch)))))))))))))
+
+; json-string-char : Codec Char
+(define json-string-char
+    (c/mk-codec
+        (lambda ()
+            (match (c/try-parse (c/codec-parser json-escaped-char))
+((Some ch) ch)
+                (None
+                    (let ((ch (do-consume)))
+                        (let ((code (char-code ch)))
+                            (if (< code 32)
+(perform throw "unescaped control character in string")
+                                (if (= code 34)
+(perform throw "unexpected quote")
+(if (= code 92) (perform throw "unexpected backslash") ch))))))))
+        (lambda (ch)
+            (let ((code (char-code ch)))
+                (if (if (= code 34) #t (if (= code 92) #t (< code 32)))
+((c/codec-printer json-escaped-char) ch)
+(do-emit-ch ch))))))
+
+(define json-string-body (c/iso c/iso-chars (c/many json-string-char)))
+
+(define json-string-codec
+    (let ((dquote (c/lit-char (char-from-code 34))))
+(c/between dquote dquote json-string-body)))
+
+; ============================================================
+; JSON Numbers (RFC 8259 §6)
+; ============================================================
+
+(define json-number-codec
+    (c/mk-codec
+        (lambda ()
+            (begin
+                (define collect-digits
+                    (lambda ()
+                        (match (do-peek)
+(None Nil)
+                            ((Some ch)
+(if (c/is-digit ch) (begin (do-consume) (Cons ch (collect-digits))) Nil)))))
+                (let                       (                      (sign
+                          (match (do-peek)
+(None "")
+((Some ch) (if (= (char-code ch) 45) (begin (do-consume) "-") "")))))
+                    (let ((first-digit (do-consume)))
+                        (if (not (c/is-digit first-digit))
+                            (perform
+throw
+                                (string-append
+"expected digit, got '"
+(string-append (char->string first-digit) "'")))
+                            (let                                   (                                  (int-digits
+                                      (if (= (char-code first-digit) 48)
+(list first-digit)
+(Cons first-digit (collect-digits)))))
+                                (let ((has-frac (match (do-peek) (None #f) ((Some ch) (= (char-code ch) 46)))))
+                                    (let                                           (                                          (frac-str
+                                              (if has-frac
+                                                  (begin
+(do-consume)
+                                                      (let ((frac-digits (collect-digits)))
+                                                          (match frac-digits
+(Nil (perform throw "expected digit after decimal point"))
+(_ (string-append "." (chars->string frac-digits))))))
+"")))
+                                        (let                                               (                                              (has-exp
+                                                  (match (do-peek)
+(None #f)
+((Some ch) (let ((cc (char-code ch))) (if (= cc 101) #t (= cc 69)))))))
+                                            (let                                                   (                                                  (exp-str
+                                                      (if has-exp
+                                                          (begin
+(do-consume)
+                                                              (let                                                                     (                                                                    (exp-sign
+                                                                        (match (do-peek)
+(None "")
+                                                                            ((Some ch)
+                                                                                (let ((cc (char-code ch)))
+                                                                                    (if (= cc 43)
+(begin (do-consume) "+")
+(if (= cc 45) (begin (do-consume) "-") "")))))))
+                                                                  (let ((exp-digits (collect-digits)))
+                                                                      (match exp-digits
+(Nil (perform throw "expected digit in exponent"))
+(_ (string-append "e" (string-append exp-sign (chars->string exp-digits))))))))
+"")))
+                                                (let                                                       (                                                      (num-str
+                                                          (string-append
+sign
+(string-append (chars->string int-digits) (string-append frac-str exp-str)))))
+                                                    (if (if (string-is-empty frac-str) (string-is-empty exp-str) #f)
+                                                        (match (__try-string->int num-str)
+((Some n) (JsonInt n))
+(None (perform throw (string-append "invalid integer: " num-str))))
+                                                        (match (__try-string->float num-str)
+((Some f) (JsonFloat f))
+(None (perform throw (string-append "invalid number: " num-str))))))))))))))))
+        (lambda (j)
+            (match j
+((JsonInt n) (do-emit-str (show n)))
+                ((JsonFloat f)
+                    (if (is-nan f)
+(perform throw "NaN is not allowed in JSON")
+                        (if (is-infinite f)
+(perform throw "Infinity is not allowed in JSON")
+(do-emit-str (number->string f)))))
+(_ (perform throw "json-number-codec: expected JsonInt or JsonFloat"))))))
+
+; ============================================================
+; JSON Null & Booleans (RFC 8259 §3)
+; ============================================================
+
+(define json-null-codec
+    (c/iso
+iso-json-null
+        (c/mk-codec
+(lambda () ((c/codec-parser (c/lit-string "null"))))
+(lambda (_) (do-emit-str "null")))))
+
+(define json-bool-codec
+    (c/iso
+iso-json-bool
+        (c/mk-codec
+            (lambda ()
+                (match (c/try-parse (c/codec-parser (c/lit-string "true")))
+((Some _) #t)
+(None (begin ((c/codec-parser (c/lit-string "false"))) #f))))
+(lambda (b) (if b (do-emit-str "true") (do-emit-str "false"))))))
+
+; ============================================================
+; JSON Value — Recursive Top-Level Codec (RFC 8259 §3)
+; ============================================================
+
+(define json-value
+    (c/mk-codec
+        (lambda ()
+            (begin
+                (define parse-member
+                    (lambda ()
+                        (let ((key ((c/codec-parser json-string-codec))))
+                            (begin
+(do-skip-ws)
+                                (let ((_ (do-consume)))
+(begin (do-skip-ws) (let ((val (parse-value))) (MkPair key val))))))))
+                (define parse-arr-rest
+                    (lambda ()
+                        (begin
+(do-skip-ws)
+                            (match (do-peek)
+(None (perform throw "unexpected end of input in array"))
+                                ((Some ch3)
+                                    (if (= (char-code ch3) 93)
+(begin (do-consume) Nil)
+                                        (if (= (char-code ch3) 44)
+                                            (begin
+(do-consume)
+(do-skip-ws)
+(let ((item (parse-value))) (Cons item (parse-arr-rest))))
+(perform throw "expected ',' or ']' in array"))))))))
+                (define parse-obj-rest
+                    (lambda ()
+                        (begin
+(do-skip-ws)
+                            (match (do-peek)
+(None (perform throw "unexpected end of input in object"))
+                                ((Some ch3)
+                                    (if (= (char-code ch3) 125)
+(begin (do-consume) Nil)
+                                        (if (= (char-code ch3) 44)
+                                            (begin
+(do-consume)
+(do-skip-ws)
+(let ((item (parse-member))) (Cons item (parse-obj-rest))))
+(perform throw "expected ',' or '}' in object"))))))))
+                (define parse-value
+                    (lambda ()
+                        (match (do-peek)
+(None (perform throw "unexpected end of input"))
+                            ((Some ch)
+                                (let ((code (char-code ch)))
+                                    (if (= code 110)
+((c/codec-parser json-null-codec))
+                                        (if (= code 116)
+((c/codec-parser json-bool-codec))
+                                            (if (= code 102)
+((c/codec-parser json-bool-codec))
+                                                (if (= code 34)
+(JsonString ((c/codec-parser json-string-codec)))
+                                                    (if (= code 91)
+                                                        (begin
+(do-consume)
+(do-skip-ws)
+                                                            (match (do-peek)
+(None (perform throw "unexpected end of input in array"))
+                                                                ((Some ch2)
+                                                                    (if (= (char-code ch2) 93)
+(begin (do-consume) (JsonArray Nil))
+(let ((first (parse-value))) (JsonArray (Cons first (parse-arr-rest))))))))
+                                                        (if (= code 123)
+                                                            (begin
+(do-consume)
+(do-skip-ws)
+                                                                (match (do-peek)
+(None (perform throw "unexpected end of input in object"))
+                                                                    ((Some ch2)
+                                                                        (if (= (char-code ch2) 125)
+(begin (do-consume) (JsonObject Nil))
+(let ((first (parse-member))) (JsonObject (Cons first (parse-obj-rest))))))))
+                                                            (if (if (c/is-digit ch) #t (= code 45))
+((c/codec-parser json-number-codec))
+(perform throw (string-append "unexpected character: " (char->string ch)))))))))))))))
+(parse-value)))
+        (lambda (j)
+            (begin
+                (define print-member
+                    (lambda (pair)
+                        (match pair
+                            ((MkPair key val)
+                                (begin
+((c/codec-printer json-string-codec) key)
+(do-emit-ch (char-from-code 58))
+(print-value val))))))
+                (define print-items
+                    (lambda (xs is-first)
+                        (match xs
+(Nil nil)
+                            ((Cons x rest)
+                                (begin
+(if is-first nil (do-emit-ch (char-from-code 44)))
+(print-value x)
+(print-items rest #f))))))
+                (define print-pairs
+                    (lambda (ps is-first)
+                        (match ps
+(Nil nil)
+                            ((Cons p rest)
+                                (begin
+(if is-first nil (do-emit-ch (char-from-code 44)))
+(print-member p)
+(print-pairs rest #f))))))
+                (define print-value
+                    (lambda (v)
+                        (match v
+(JsonNull ((c/codec-printer json-null-codec) v))
+((JsonBool _) ((c/codec-printer json-bool-codec) v))
+((JsonInt _) ((c/codec-printer json-number-codec) v))
+((JsonFloat _) ((c/codec-printer json-number-codec) v))
+((JsonString s) ((c/codec-printer json-string-codec) s))
+                            ((JsonArray items)
+                                (begin
+(do-emit-ch (char-from-code 91))
+(print-items items #t)
+(do-emit-ch (char-from-code 93))))
+                            ((JsonObject pairs)
+                                (begin
+(do-emit-ch (char-from-code 123))
+(print-pairs pairs #t)
+(do-emit-ch (char-from-code 125)))))))
+(print-value j)))))
+
+(define json-text
+    (c/mk-codec
+        (lambda ()
+            (begin
+(do-skip-ws)
+(let ((val ((c/codec-parser json-value)))) (begin (do-skip-ws) val))))
+(c/codec-printer json-value)))
+
+; ============================================================
+; Public API
+; ============================================================
+
+(define decode (lambda (input) (c/parse json-text input)))
+
+(define encode-safe (lambda (value) (c/print json-value value)))
+
+(define encode
+    (lambda (value)
+        (match (encode-safe value)
+((Ok s) s)
+((Err msg) (error (string-append "json encode error: " msg))))))
+
+; ============================================================
+; Accessors
+; ============================================================
+
+(define json-get-helper
+    (lambda (key pairs)
+        (match pairs
+(Nil None)
+            ((Cons (MkPair k v) rest)
+(if (string= key k) (Some v) (json-get-helper key rest))))))
+
+(define json-get
+    (lambda (key j)
+(match j ((JsonObject pairs) (json-get-helper key pairs)) (_ None))))
+
+(define json-nth-helper
+    (lambda (n items)
+        (match items
+(Nil None)
+((Cons x rest) (if (= n 0) (Some x) (json-nth-helper (- n 1) rest))))))
+
+(define json-nth
+(lambda (n j) (match j ((JsonArray items) (json-nth-helper n items)) (_ None))))
+
+(define json-string (lambda (j) (match j ((JsonString s) (Some s)) (_ None))))
+
+(define json-int (lambda (j) (match j ((JsonInt n) (Some n)) (_ None))))
+
+(define json-float (lambda (j) (match j ((JsonFloat f) (Some f)) (_ None))))
+
+(define json-bool (lambda (j) (match j ((JsonBool b) (Some b)) (_ None))))
+
+(define json-array-items
+(lambda (j) (match j ((JsonArray items) (Some items)) (_ None))))
+
+(define json-object-items
+(lambda (j) (match j ((JsonObject pairs) (Some pairs)) (_ None))))
+
+(define json-null? (lambda (j) (match j (JsonNull #t) (_ #f))))

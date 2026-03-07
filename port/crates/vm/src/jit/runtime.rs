@@ -167,7 +167,7 @@ pub extern "C" fn marlang_jit_set_global(
 ///
 /// `args_ptr` points to an array of `Value`s (16 bytes each).
 /// Writes result to `out_tag`/`out_payload`.
-/// Returns 0 on success, 1 on error.
+/// Returns 0 on success, 1 on error, 2 on bail (cross-boundary effect).
 #[unsafe(no_mangle)]
 pub extern "C" fn marlang_jit_call(
     vm: *mut VM,
@@ -181,7 +181,11 @@ pub extern "C" fn marlang_jit_call(
     unsafe {
         let vm = &mut *vm;
         let callee = Value::from_raw_clone(callee_tag, callee_payload);
-        let args = std::slice::from_raw_parts(args_ptr, num_args as usize);
+        let args = if num_args == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(args_ptr, num_args as usize)
+        };
 
         match call_value(vm, &callee, args) {
             Ok(result) => {
@@ -192,7 +196,14 @@ pub extern "C" fn marlang_jit_call(
                 *out_payload = payload;
                 0
             }
-            Err(_) => 1,
+            Err(_) => {
+                // Check if this is a cross-boundary effect bail
+                if vm.pending_effect.is_some() {
+                    2 // bail — effect needs dispatch in outer run() loop
+                } else {
+                    1
+                }
+            }
         }
     }
 }
@@ -308,7 +319,7 @@ fn call_closure_from_jit(
             locals[i] = arg.clone();
         }
         let rest: Vec<Value> = args[required..].to_vec();
-        locals[required] = Value::object(VMObject::List(rest));
+        locals[required] = crate::object::vec_to_cons_list(rest);
     } else {
         for (i, arg) in args.iter().enumerate() {
             locals[i] = arg.clone();
@@ -341,10 +352,13 @@ fn interpret_closure(
     match crate::vm::run(vm, base) {
         Ok(val) => Ok(val),
         Err(crate::vm::VMSignal::Error(e)) => Err(e),
-        Err(crate::vm::VMSignal::Effect(sig)) => Err(crate::errors::VMError::runtime(format!(
-            "Unhandled effect in JIT call: {}",
-            sig.op_name,
-        ))),
+        Err(crate::vm::VMSignal::Effect(_)) => {
+            // Cross-boundary effect: the inner run() detected that the handler's
+            // unwind target is below its base frame count. The effect data is stored
+            // in vm.pending_effect. Propagate as an error; marlang_jit_call will
+            // detect pending_effect and return bail status.
+            Err(crate::errors::VMError::runtime("__effect_bail"))
+        }
     }
 }
 
@@ -366,8 +380,11 @@ pub extern "C" fn marlang_jit_construct_adt(
     unsafe {
         let tag_name =
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(tag_ptr, tag_len as usize));
-        let fields: Vec<Value> =
-            std::slice::from_raw_parts(fields_ptr, num_fields as usize).to_vec();
+        let fields: Vec<Value> = if num_fields == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(fields_ptr, num_fields as usize).to_vec()
+        };
         let result = Value::object(VMObject::AdtValue {
             tag: tag_name.to_string(),
             fields,
@@ -395,40 +412,16 @@ pub extern "C" fn marlang_jit_get_field(
 ) -> u32 {
     unsafe {
         let value = Value::from_raw_clone(value_tag, value_payload);
-        if let Some(obj) = value.as_object() {
-            match obj {
-                VMObject::AdtValue { fields, .. } => {
-                    if (field_idx as usize) < fields.len() {
-                        let field = fields[field_idx as usize].clone();
-                        let t = field.tag();
-                        let p = field.payload();
-                        std::mem::forget(field);
-                        *out_tag = t;
-                        *out_payload = p;
-                        return 0;
-                    }
-                }
-                VMObject::List(elements) => {
-                    if field_idx == 0 && !elements.is_empty() {
-                        let field = elements[0].clone();
-                        let t = field.tag();
-                        let p = field.payload();
-                        std::mem::forget(field);
-                        *out_tag = t;
-                        *out_payload = p;
-                        return 0;
-                    } else if field_idx == 1 {
-                        let rest = Value::object(VMObject::List(elements[1..].to_vec()));
-                        let t = rest.tag();
-                        let p = rest.payload();
-                        std::mem::forget(rest);
-                        *out_tag = t;
-                        *out_payload = p;
-                        return 0;
-                    }
-                }
-                _ => {}
-            }
+        if let Some(VMObject::AdtValue { fields, .. }) = value.as_object()
+            && (field_idx as usize) < fields.len()
+        {
+            let field = fields[field_idx as usize].clone();
+            let t = field.tag();
+            let p = field.payload();
+            std::mem::forget(field);
+            *out_tag = t;
+            *out_payload = p;
+            return 0;
         }
         1
     }
@@ -452,15 +445,8 @@ pub extern "C" fn marlang_jit_match_tag(
             tag_name == "Nil"
         } else if value.is_int() || value.is_float() {
             false
-        } else if let Some(obj) = value.as_object() {
-            match obj {
-                VMObject::AdtValue { tag, .. } => tag == tag_name,
-                VMObject::List(elements) => {
-                    (tag_name == "Cons" && !elements.is_empty())
-                        || (tag_name == "Nil" && elements.is_empty())
-                }
-                _ => false,
-            }
+        } else if let Some(VMObject::AdtValue { tag, .. }) = value.as_object() {
+            tag == tag_name
         } else {
             false
         };
@@ -634,7 +620,11 @@ pub extern "C" fn marlang_jit_perform(
             op_name_ptr,
             op_name_len as usize,
         ));
-        let args = std::slice::from_raw_parts(args_ptr, num_args as usize);
+        let args = if num_args == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(args_ptr, num_args as usize)
+        };
 
         match perform_from_jit(vm, op_name, args) {
             Some(result) => {

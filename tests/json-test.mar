@@ -1,0 +1,370 @@
+(import "std:json" as j)
+(import "std:test" as t)
+
+; ============================================================
+; Decode — Primitives
+; ============================================================
+
+(t/section "Decode Primitives")
+(t/assert-equal! (Ok j/JsonNull) (j/decode "null") "null")
+(t/assert-equal! (Ok (j/JsonBool #t)) (j/decode "true") "true")
+(t/assert-equal! (Ok (j/JsonBool #f)) (j/decode "false") "false")
+(t/assert-equal! (Ok (j/JsonInt 0)) (j/decode "0") "zero")
+(t/assert-equal! (Ok (j/JsonInt 42)) (j/decode "42") "positive int")
+(t/assert-equal! (Ok (j/JsonInt -7)) (j/decode "-7") "negative int")
+(t/assert-equal! (Ok (j/JsonFloat 3.14)) (j/decode "3.14") "float")
+(t/assert-equal! (Ok (j/JsonFloat 10000000000.0)) (j/decode "1e10") "exponent")
+
+; ============================================================
+; Decode — Strings
+; ============================================================
+
+(t/section "Decode Strings")
+(t/assert-equal! (Ok (j/JsonString "")) (j/decode "\"\"") "empty string")
+(t/assert-equal! (Ok (j/JsonString "hello")) (j/decode "\"hello\"") "simple string")
+(t/assert-equal! (Ok (j/JsonString "hello\nworld")) (j/decode "\"hello\\nworld\"") "string with newline escape")
+(t/assert-equal! (Ok (j/JsonString "a\tb")) (j/decode "\"a\\tb\"") "string with tab escape")
+(t/assert-equal! (Ok (j/JsonString "say \"hi\"")) (j/decode "\"say \\\"hi\\\"\"") "string with escaped quotes")
+(t/assert-equal! (Ok (j/JsonString "back\\slash")) (j/decode "\"back\\\\slash\"") "string with escaped backslash")
+(t/assert-equal! (Ok (j/JsonString "a/b")) (j/decode "\"a\\/b\"") "string with escaped slash")
+
+; ============================================================
+; Decode — Arrays
+; ============================================================
+
+(t/section "Decode Arrays")
+(t/assert-equal! (Ok (j/JsonArray Nil)) (j/decode "[]") "empty array")
+(t/assert-equal! (Ok (j/JsonArray (Cons (j/JsonInt 1) Nil))) (j/decode "[1]") "singleton array")
+(t/assert-equal!
+  (Ok (j/JsonArray (Cons (j/JsonInt 1) (Cons (j/JsonInt 2) (Cons (j/JsonInt 3) Nil)))))
+  (j/decode "[1,2,3]")
+  "int array")
+(t/assert-equal!
+  (Ok (j/JsonArray (Cons (j/JsonBool #t) (Cons j/JsonNull (Cons (j/JsonInt 42) Nil)))))
+  (j/decode "[true, null, 42]")
+  "mixed array with whitespace")
+(t/assert-equal!
+  (Ok (j/JsonArray (Cons (j/JsonArray (Cons (j/JsonInt 1) Nil)) (Cons (j/JsonArray (Cons (j/JsonInt 2) Nil)) Nil))))
+  (j/decode "[[1],[2]]")
+  "nested arrays")
+
+; ============================================================
+; Decode — Objects
+; ============================================================
+
+(t/section "Decode Objects")
+(t/assert-equal! (Ok (j/JsonObject Nil)) (j/decode "{}") "empty object")
+(t/assert-equal!
+  (Ok (j/JsonObject (Cons (MkPair "a" (j/JsonInt 1)) Nil)))
+  (j/decode "{\"a\":1}")
+  "single-field object")
+(t/assert-equal!
+  (Ok (j/JsonObject (Cons (MkPair "name" (j/JsonString "Alice")) (Cons (MkPair "age" (j/JsonInt 30)) Nil))))
+  (j/decode "{\"name\":\"Alice\",\"age\":30}")
+  "multi-field object")
+(t/assert-equal!
+  (Ok (j/JsonObject (Cons (MkPair "x" (j/JsonBool #t)) (Cons (MkPair "y" (j/JsonArray (Cons (j/JsonInt 1) (Cons (j/JsonInt 2) Nil)))) Nil))))
+  (j/decode "{\"x\":true,\"y\":[1,2]}")
+  "nested object")
+
+; ============================================================
+; Decode — Whitespace tolerance
+; ============================================================
+
+(t/section "Whitespace")
+(t/assert-equal! (Ok (j/JsonInt 42)) (j/decode "  42  ") "leading/trailing ws")
+(t/assert-equal!
+  (Ok (j/JsonArray (Cons (j/JsonInt 1) (Cons (j/JsonInt 2) Nil))))
+  (j/decode "[ 1 , 2 ]")
+  "array with spaces")
+(t/assert-equal!
+  (Ok (j/JsonObject (Cons (MkPair "a" (j/JsonInt 1)) Nil)))
+  (j/decode "{ \"a\" : 1 }")
+  "object with spaces")
+
+; ============================================================
+; Encode
+; ============================================================
+
+(t/section "Encode")
+(t/assert-equal! "null" (j/encode j/JsonNull) "encode null")
+(t/assert-equal! "true" (j/encode (j/JsonBool #t)) "encode true")
+(t/assert-equal! "false" (j/encode (j/JsonBool #f)) "encode false")
+(t/assert-equal! "42" (j/encode (j/JsonInt 42)) "encode int")
+(t/assert-equal! "-7" (j/encode (j/JsonInt -7)) "encode negative int")
+(t/assert-equal! "\"hello\"" (j/encode (j/JsonString "hello")) "encode string")
+(t/assert-equal! "[]" (j/encode (j/JsonArray Nil)) "encode empty array")
+(t/assert-equal! "[1,2,3]"
+  (j/encode (j/JsonArray (Cons (j/JsonInt 1) (Cons (j/JsonInt 2) (Cons (j/JsonInt 3) Nil)))))
+  "encode array")
+(t/assert-equal! "{}" (j/encode (j/JsonObject Nil)) "encode empty object")
+(t/assert-equal! "{\"a\":1}"
+  (j/encode (j/JsonObject (Cons (MkPair "a" (j/JsonInt 1)) Nil)))
+  "encode object")
+
+; ============================================================
+; Encode — string escaping
+; ============================================================
+
+(t/section "Encode String Escaping")
+(t/assert-equal! "\"hello\\nworld\""
+  (j/encode (j/JsonString "hello\nworld"))
+  "encode newline escape")
+(t/assert-equal! "\"say \\\"hi\\\"\""
+  (j/encode (j/JsonString "say \"hi\""))
+  "encode quote escape")
+(t/assert-equal! "\"back\\\\slash\""
+  (j/encode (j/JsonString "back\\slash"))
+  "encode backslash escape")
+
+; ============================================================
+; Round-trip: decode then encode
+; ============================================================
+
+(t/section "Round-trips")
+
+(define round-trip (lambda (input label)
+  (match (j/decode input)
+    ((Ok val) (t/assert-equal! input (j/encode val) label))
+    ((Err msg) (error (string-append "decode failed: " msg))))))
+
+(round-trip "null" "rt null")
+(round-trip "true" "rt true")
+(round-trip "42" "rt int")
+(round-trip "\"hello\"" "rt string")
+(round-trip "[]" "rt empty array")
+(round-trip "[1,2,3]" "rt array")
+(round-trip "{}" "rt empty object")
+(round-trip "{\"a\":1}" "rt object")
+
+; ============================================================
+; Accessors
+; ============================================================
+
+(t/section "Accessors")
+
+(define test-obj (j/JsonObject (Cons (MkPair "name" (j/JsonString "Alice")) (Cons (MkPair "age" (j/JsonInt 30)) Nil))))
+
+(t/assert-equal! (Some (j/JsonString "Alice")) (j/json-get "name" test-obj) "get name")
+(t/assert-equal! (Some (j/JsonInt 30)) (j/json-get "age" test-obj) "get age")
+(t/assert-equal! None (j/json-get "missing" test-obj) "get missing")
+
+(define test-arr (j/JsonArray (Cons (j/JsonInt 10) (Cons (j/JsonInt 20) (Cons (j/JsonInt 30) Nil)))))
+
+(t/assert-equal! (Some (j/JsonInt 10)) (j/json-nth 0 test-arr) "nth 0")
+(t/assert-equal! (Some (j/JsonInt 30)) (j/json-nth 2 test-arr) "nth 2")
+(t/assert-equal! None (j/json-nth 5 test-arr) "nth out of bounds")
+
+(t/assert-equal! (Some "hello") (j/json-string (j/JsonString "hello")) "json-string")
+(t/assert-equal! (Some 42) (j/json-int (j/JsonInt 42)) "json-int")
+(t/assert-equal! (Some 3.14) (j/json-float (j/JsonFloat 3.14)) "json-float")
+(t/assert-equal! (Some #t) (j/json-bool (j/JsonBool #t)) "json-bool")
+(t/assert-equal! #t (j/json-null? j/JsonNull) "json-null? true")
+(t/assert-equal! #f (j/json-null? (j/JsonInt 0)) "json-null? false")
+
+(t/assert-equal! None (j/json-string (j/JsonInt 42)) "json-string on int")
+(t/assert-equal! None (j/json-int (j/JsonString "x")) "json-int on string")
+
+; --- Utility ---
+(define is-err (lambda (result)
+  (match result ((Err _) #t) (_ #f))))
+
+; ============================================================
+; Error cases
+; ============================================================
+
+(t/section "Error Cases")
+
+(t/assert-true (is-err (j/decode "")) "empty input")
+(t/assert-true (is-err (j/decode "{")) "unclosed object")
+(t/assert-true (is-err (j/decode "[")) "unclosed array")
+(t/assert-true (is-err (j/decode "nul")) "truncated null")
+(t/assert-true (is-err (j/decode "tru")) "truncated true")
+
+; ============================================================
+; Custom decoders — decode JSON into domain types
+; ============================================================
+
+(t/section "Custom Decoders")
+
+; --- Throwing accessor helpers ---
+
+(define get! (lambda (key json)
+  (match (j/json-get key json)
+    (None (perform throw (string-append "missing field: " key)))
+    ((Some v) v))))
+
+(define int! (lambda (json)
+  (match (j/json-int json)
+    (None (perform throw "expected int"))
+    ((Some n) n))))
+
+(define string! (lambda (json)
+  (match (j/json-string json)
+    (None (perform throw "expected string"))
+    ((Some s) s))))
+
+(define bool! (lambda (json)
+  (match (j/json-bool json)
+    (None (perform throw "expected bool"))
+    ((Some b) b))))
+
+(define get-or (lambda (key default json)
+  (match (j/json-get key json)
+    (None default)
+    ((Some v) v))))
+
+; --- Simple domain type ---
+
+(data User (MkUser String Int))
+
+(define decode-user! (lambda (json)
+  (let ((name (string! (get! "name" json)))
+        (age  (int!    (get! "age" json))))
+    (MkUser name age))))
+
+(define decode-user (lambda (input)
+  (handle
+    (match (j/decode input)
+      ((Err msg) (Err msg))
+      ((Ok json) (Ok (decode-user! json))))
+    ((throw msg k) -> (Err msg)))))
+
+(t/assert-equal!
+  (Ok (MkUser "Alice" 30))
+  (decode-user "{\"name\":\"Alice\",\"age\":30}")
+  "decode user")
+
+(t/assert-equal!
+  (Ok (MkUser "Bob" 25))
+  (decode-user "{\"name\":\"Bob\",\"age\":25,\"extra\":true}")
+  "decode user ignores extra fields")
+
+; --- Nested domain types (tagged union) ---
+
+(data Point (MkPoint Int Int))
+(data Shape
+  (Circle Point Int)
+  (Rect Point Point))
+
+(define decode-point! (lambda (json)
+  (let ((x (int! (get! "x" json)))
+        (y (int! (get! "y" json))))
+    (MkPoint x y))))
+
+(define decode-shape! (lambda (json)
+  (let ((typ (string! (get! "type" json))))
+    (if (string= typ "circle")
+      (let ((center (decode-point! (get! "center" json)))
+            (radius (int! (get! "radius" json))))
+        (Circle center radius))
+      (if (string= typ "rect")
+        (let ((tl (decode-point! (get! "topLeft" json)))
+              (br (decode-point! (get! "bottomRight" json))))
+          (Rect tl br))
+        (perform throw (string-append "unknown shape type: " typ)))))))
+
+(define decode-shape (lambda (input)
+  (handle
+    (match (j/decode input)
+      ((Err msg) (Err msg))
+      ((Ok json) (Ok (decode-shape! json))))
+    ((throw msg k) -> (Err msg)))))
+
+(t/assert-equal!
+  (Ok (Circle (MkPoint 10 20) 5))
+  (decode-shape "{\"type\":\"circle\",\"center\":{\"x\":10,\"y\":20},\"radius\":5}")
+  "decode circle")
+
+(t/assert-equal!
+  (Ok (Rect (MkPoint 0 0) (MkPoint 100 50)))
+  (decode-shape "{\"type\":\"rect\",\"topLeft\":{\"x\":0,\"y\":0},\"bottomRight\":{\"x\":100,\"y\":50}}")
+  "decode rect")
+
+; --- Decoding arrays of domain objects ---
+
+(define map-list (lambda (f lst)
+  (match lst
+    (Nil Nil)
+    ((Cons x rest) (Cons (f x) (map-list f rest))))))
+
+(define decode-users (lambda (input)
+  (handle
+    (match (j/decode input)
+      ((Err msg) (Err msg))
+      ((Ok json)
+        (match (j/json-array-items json)
+          (None (Err "expected array"))
+          ((Some items) (Ok (map-list decode-user! items))))))
+    ((throw msg k) -> (Err msg)))))
+
+(t/assert-equal!
+  (Ok (Cons (MkUser "Alice" 30) (Cons (MkUser "Bob" 25) Nil)))
+  (decode-users "[{\"name\":\"Alice\",\"age\":30},{\"name\":\"Bob\",\"age\":25}]")
+  "decode array of users")
+
+(t/assert-equal!
+  (Ok Nil)
+  (decode-users "[]")
+  "decode empty array of users")
+
+; --- Optional fields with defaults ---
+
+(data Config (MkConfig String Int Bool))
+
+(define decode-config! (lambda (json)
+  (let ((host  (string! (get! "host" json)))
+        (port  (int!  (get-or "port"  (j/JsonInt 8080)  json)))
+        (debug (bool! (get-or "debug" (j/JsonBool #f)   json))))
+    (MkConfig host port debug))))
+
+(define decode-config (lambda (input)
+  (handle
+    (match (j/decode input)
+      ((Err msg) (Err msg))
+      ((Ok json) (Ok (decode-config! json))))
+    ((throw msg k) -> (Err msg)))))
+
+(t/assert-equal!
+  (Ok (MkConfig "localhost" 3000 #t))
+  (decode-config "{\"host\":\"localhost\",\"port\":3000,\"debug\":true}")
+  "decode config all fields")
+
+(t/assert-equal!
+  (Ok (MkConfig "prod.example.com" 8080 #f))
+  (decode-config "{\"host\":\"prod.example.com\"}")
+  "decode config with defaults")
+
+; --- Error propagation ---
+
+(t/section "Custom Decoder Errors")
+
+(t/assert-equal! (Err "missing field: age")
+  (decode-user "{\"name\":\"Alice\"}")
+  "missing required field")
+
+(t/assert-equal! (Err "expected string")
+  (decode-user "{\"name\":42,\"age\":30}")
+  "wrong field type")
+
+(t/assert-equal! (Err "unknown shape type: triangle")
+  (decode-shape "{\"type\":\"triangle\"}")
+  "unknown tagged union variant")
+
+(t/assert-equal! (Err "missing field: y")
+  (decode-shape "{\"type\":\"circle\",\"center\":{\"x\":10},\"radius\":5}")
+  "error in nested decode")
+
+(t/assert-equal! (Err "missing field: host")
+  (decode-config "{\"port\":9090}")
+  "missing required, optional present")
+
+(t/assert-true (is-err (decode-user "not json")) "invalid JSON input")
+(t/assert-true (is-err (decode-users "[{\"name\":\"ok\",\"age\":1},{\"name\":\"bad\"}]"))
+  "error in array element propagates")
+
+; ============================================================
+; Done
+; ============================================================
+
+(t/done)

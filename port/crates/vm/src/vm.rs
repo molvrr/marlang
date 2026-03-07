@@ -29,6 +29,30 @@ pub(crate) struct EffectSignal {
     pub target_handler_id: u64,
 }
 
+/// A fully captured effect that must be CPS-dispatched by an outer `run()` loop.
+///
+/// When a `Perform` inside a nested `run()` call (e.g. from `interpret_closure`)
+/// finds a handler whose unwind target is below that `run()`'s base frame, the
+/// effect cannot be dispatched CPS-inline in the inner `run()` — doing so would
+/// unwind `frame_count` below `base`, causing the inner `run()` to exit with
+/// `Ok(handler_result)` while leaving the VM's frame state corrupted for the
+/// outer interpreter.
+///
+/// Instead, the inner `run()` captures the continuation and unwinds VM state,
+/// then stores this struct in `vm.pending_effect` and returns via `VMSignal::Effect`.
+/// The signal propagates up through `interpret_closure` → `call_closure_from_jit`
+/// → `marlang_jit_call` → JIT bail → interpreter, where the outer `run()` loop
+/// picks it up and performs the CPS dispatch in the correct scope.
+#[cfg(feature = "jit")]
+pub(crate) struct PendingEffect {
+    pub handler_entries: Vec<HandlerEntry>,
+    pub return_handler: Option<Closure>,
+    pub args: Vec<Value>,
+    pub continuation: Value,
+    pub performed_effect: String,
+    pub performed_op: String,
+}
+
 // --- VM ---
 
 static HANDLER_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -75,6 +99,10 @@ pub struct VM {
     /// Call counters for JIT profiling, keyed by prototype pointer address.
     #[cfg(feature = "jit")]
     pub(crate) jit_call_counts: FxHashMap<usize, u32>,
+    /// Pending effect that crossed a `run()` boundary and needs CPS dispatch
+    /// in the outer interpreter loop. See `PendingEffect` for details.
+    #[cfg(feature = "jit")]
+    pub(crate) pending_effect: Option<PendingEffect>,
 }
 
 impl VM {
@@ -98,6 +126,8 @@ impl VM {
             jit_code: FxHashMap::default(),
             #[cfg(feature = "jit")]
             jit_call_counts: FxHashMap::default(),
+            #[cfg(feature = "jit")]
+            pending_effect: None,
         }
     }
 
@@ -1142,8 +1172,88 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                     // Check for bail sentinel — JIT function encountered
                                     // a non-tail-resumptive Perform and needs the interpreter
                                     if result.tag == crate::jit::runtime::JIT_BAIL_TAG {
-                                        // Fall back to interpreter: push a frame with the
-                                        // already-populated locals and run from the start
+                                        // Check for cross-boundary effect: the perform found
+                                        // a handler in this run() scope but the JIT couldn't
+                                        // dispatch it. The effect data is in vm.pending_effect.
+                                        if let Some(pending) = vm.pending_effect.take() {
+                                            drop(jit_locals);
+                                            // CPS dispatch of the deferred effect
+                                            let clause = pending
+                                                .handler_entries
+                                                .iter()
+                                                .find(|e| {
+                                                    if e.effect_name.is_empty() {
+                                                        e.op_name == pending.performed_op
+                                                    } else {
+                                                        e.effect_name == pending.performed_effect
+                                                            && e.op_name == pending.performed_op
+                                                    }
+                                                })
+                                                .cloned();
+                                            let clause = match clause {
+                                                Some(c) => c,
+                                                None => {
+                                                    return Err(VMSignal::Error(VMError::runtime(
+                                                        format!(
+                                                            "Handler clause not found for effect: {}/{}",
+                                                            pending.performed_effect,
+                                                            pending.performed_op
+                                                        ),
+                                                    )));
+                                                }
+                                            };
+
+                                            // Deep handler semantics: re-install handler
+                                            let new_handler_id = next_handler_id();
+                                            let new_handler_frame = VMHandlerFrame {
+                                                handlers: pending.handler_entries.clone(),
+                                                return_handler: pending.return_handler.clone(),
+                                                unwind_frame_start: vm.frame_count,
+                                                unwind_stack_start: vm.stack_top,
+                                                capture_frame_start: vm.frame_count,
+                                                capture_stack_start: vm.stack_top,
+                                                id: new_handler_id,
+                                                is_scheduler: false,
+                                                is_tail_resumptive: false,
+                                            };
+                                            vm.handler_stack.push(new_handler_frame);
+
+                                            vm.handler_dispatch_stack.push(HandlerDispatch {
+                                                dispatch_frame: vm.frame_count,
+                                                handler_entries: pending.handler_entries,
+                                                return_handler: pending.return_handler,
+                                                handler_id: new_handler_id,
+                                            });
+
+                                            // Build handler clause arguments
+                                            let expected_arg_count =
+                                                (clause.arity as usize).saturating_sub(1);
+                                            let local_count =
+                                                clause.closure.proto.chunk.local_count as usize;
+                                            let mut clause_locals = vm.take_locals(local_count);
+                                            let copy_count =
+                                                expected_arg_count.min(pending.args.len());
+                                            clause_locals[..copy_count]
+                                                .clone_from_slice(&pending.args[..copy_count]);
+                                            clause_locals[expected_arg_count] =
+                                                pending.continuation;
+
+                                            let new_frame = CallFrame {
+                                                closure: clause.closure,
+                                                ip: 0,
+                                                open_upvalues: Vec::new(),
+                                                locals: clause_locals,
+                                            };
+                                            vm.push_frame(new_frame);
+                                            frame_idx = vm.frame_count - 1;
+                                            ip = 0;
+                                            cache_frame!();
+                                            continue;
+                                        }
+
+                                        // Normal bail: fall back to interpreter —
+                                        // push a frame with the already-populated
+                                        // locals and run from the start
                                         let new_frame = CallFrame {
                                             closure: (**closure).clone(),
                                             ip: 0,
@@ -1199,9 +1309,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 // Required params go in locals[0..required_arity]
                                 locals[..required_arity]
                                     .clone_from_slice(&all_args[..required_arity]);
-                                // Excess args packed into a List in locals[required_arity]
+                                // Excess args packed into a Cons/Nil list in locals[required_arity]
                                 let rest_args: Vec<Value> = all_args[required_arity..].to_vec();
-                                locals[required_arity] = Value::object(VMObject::List(rest_args));
+                                locals[required_arity] = crate::object::vec_to_cons_list(rest_args);
                             } else {
                                 for i in (0..arity).rev() {
                                     locals[i] = vm.pop();
@@ -1415,8 +1525,83 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                                     // Check for bail sentinel
                                     if result.tag == crate::jit::runtime::JIT_BAIL_TAG {
-                                        // Fall back to interpreter: replace current frame
-                                        // with the callee (tail-call semantics)
+                                        // Check for cross-boundary effect
+                                        if let Some(pending) = vm.pending_effect.take() {
+                                            drop(jit_locals);
+                                            // CPS dispatch of the deferred effect
+                                            let clause = pending
+                                                .handler_entries
+                                                .iter()
+                                                .find(|e| {
+                                                    if e.effect_name.is_empty() {
+                                                        e.op_name == pending.performed_op
+                                                    } else {
+                                                        e.effect_name == pending.performed_effect
+                                                            && e.op_name == pending.performed_op
+                                                    }
+                                                })
+                                                .cloned();
+                                            let clause = match clause {
+                                                Some(c) => c,
+                                                None => {
+                                                    return Err(VMSignal::Error(VMError::runtime(
+                                                        format!(
+                                                            "Handler clause not found for effect: {}/{}",
+                                                            pending.performed_effect,
+                                                            pending.performed_op
+                                                        ),
+                                                    )));
+                                                }
+                                            };
+
+                                            let new_handler_id = next_handler_id();
+                                            let new_handler_frame = VMHandlerFrame {
+                                                handlers: pending.handler_entries.clone(),
+                                                return_handler: pending.return_handler.clone(),
+                                                unwind_frame_start: vm.frame_count,
+                                                unwind_stack_start: vm.stack_top,
+                                                capture_frame_start: vm.frame_count,
+                                                capture_stack_start: vm.stack_top,
+                                                id: new_handler_id,
+                                                is_scheduler: false,
+                                                is_tail_resumptive: false,
+                                            };
+                                            vm.handler_stack.push(new_handler_frame);
+
+                                            vm.handler_dispatch_stack.push(HandlerDispatch {
+                                                dispatch_frame: vm.frame_count,
+                                                handler_entries: pending.handler_entries,
+                                                return_handler: pending.return_handler,
+                                                handler_id: new_handler_id,
+                                            });
+
+                                            let expected_arg_count =
+                                                (clause.arity as usize).saturating_sub(1);
+                                            let local_count =
+                                                clause.closure.proto.chunk.local_count as usize;
+                                            let mut clause_locals = vm.take_locals(local_count);
+                                            let copy_count =
+                                                expected_arg_count.min(pending.args.len());
+                                            clause_locals[..copy_count]
+                                                .clone_from_slice(&pending.args[..copy_count]);
+                                            clause_locals[expected_arg_count] =
+                                                pending.continuation;
+
+                                            let new_frame = CallFrame {
+                                                closure: clause.closure,
+                                                ip: 0,
+                                                open_upvalues: Vec::new(),
+                                                locals: clause_locals,
+                                            };
+                                            vm.push_frame(new_frame);
+                                            frame_idx = vm.frame_count - 1;
+                                            ip = 0;
+                                            cache_frame!();
+                                            continue;
+                                        }
+
+                                        // Normal bail: fall back to interpreter —
+                                        // replace current frame with the callee
                                         vm.frames[frame_idx].closure = (**closure).clone();
                                         vm.frames[frame_idx].ip = 0;
                                         vm.frames[frame_idx].locals = jit_locals;
@@ -1459,7 +1644,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 locals[..required_arity]
                                     .clone_from_slice(&all_args[..required_arity]);
                                 let rest_args: Vec<Value> = all_args[required_arity..].to_vec();
-                                locals[required_arity] = Value::object(VMObject::List(rest_args));
+                                locals[required_arity] = crate::object::vec_to_cons_list(rest_args);
                             } else {
                                 for i in (0..arity).rev() {
                                     locals[i] = vm.pop();
@@ -1674,26 +1859,6 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             let field = fields[field_idx].clone();
                             vm.push(field);
                         }
-                        VMObject::List(elements) => {
-                            if field_idx == 0 {
-                                if elements.is_empty() {
-                                    vm.frames[frame_idx].ip = ip;
-                                    return Err(VMSignal::Error(vm.vm_error(
-                                        "Cannot get head of empty list",
-                                        &vm.frames[frame_idx],
-                                    )));
-                                }
-                                vm.push(elements[0].clone());
-                            } else if field_idx == 1 {
-                                vm.push(Value::object(VMObject::List(elements[1..].to_vec())));
-                            } else {
-                                vm.frames[frame_idx].ip = ip;
-                                return Err(VMSignal::Error(vm.vm_error(
-                                    format!("Invalid field index {} for list", field_idx),
-                                    &vm.frames[frame_idx],
-                                )));
-                            }
-                        }
                         _ => {
                             vm.frames[frame_idx].ip = ip;
                             return Err(VMSignal::Error(vm.vm_error(
@@ -1737,14 +1902,6 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     match obj {
                         VMObject::AdtValue { tag, .. } if tag == tag_name => {
                             matches = true;
-                        }
-                        VMObject::List(elements) => {
-                            if tag_name == "Cons" && !elements.is_empty() {
-                                matches = true;
-                            }
-                            if tag_name == "Nil" && elements.is_empty() {
-                                matches = true;
-                            }
                         }
                         _ => {}
                     }
@@ -2112,6 +2269,32 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         }));
                     }
 
+                    // ── Cross-boundary guard (JIT bail path) ──
+                    // When the handler's unwind target is below this `run()`'s base
+                    // frame count, the CPS dispatch cannot happen here — it would
+                    // set `frame_count` below `base`, causing this `run()` to exit
+                    // with the handler's result while the outer interpreter still
+                    // expects normal control flow. Instead, store the fully-captured
+                    // effect in `vm.pending_effect` and propagate via VMSignal::Effect
+                    // so the signal can reach the outer `run()` loop for dispatch.
+                    #[cfg(feature = "jit")]
+                    if unwind_fc < base_frame_count {
+                        vm.pending_effect = Some(PendingEffect {
+                            handler_entries,
+                            return_handler,
+                            args,
+                            continuation: cont_value,
+                            performed_effect: performed_effect.to_string(),
+                            performed_op: performed_op.to_string(),
+                        });
+                        return Err(VMSignal::Effect(EffectSignal {
+                            op_name: op_name_ref.to_string(),
+                            args: Vec::new(),           // args are in pending_effect
+                            continuation: Value::nil(), // continuation is in pending_effect
+                            target_handler_id: handler_id,
+                        }));
+                    }
+
                     // ── User handler: CPS inline dispatch ──
                     // Find the matching handler clause
                     let clause = handler_entries
@@ -2343,20 +2526,16 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         return objects_equal(oa, ob);
     }
 
-    // nil == empty list, nil == Nil ADT
+    // nil == Nil ADT
     if a.is_nil()
         && let Some(obj) = b.as_object()
     {
-        return matches!(obj,
-                VMObject::List(elements) if elements.is_empty())
-            || matches!(obj, VMObject::AdtValue { tag, fields } if tag == "Nil" && fields.is_empty());
+        return matches!(obj, VMObject::AdtValue { tag, fields } if tag == "Nil" && fields.is_empty());
     }
     if b.is_nil()
         && let Some(obj) = a.as_object()
     {
-        return matches!(obj,
-                VMObject::List(elements) if elements.is_empty())
-            || matches!(obj, VMObject::AdtValue { tag, fields } if tag == "Nil" && fields.is_empty());
+        return matches!(obj, VMObject::AdtValue { tag, fields } if tag == "Nil" && fields.is_empty());
     }
 
     if let (Some(ba), Some(bb)) = (a.as_char(), b.as_char()) {
@@ -2369,12 +2548,6 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 fn objects_equal(a: &VMObject, b: &VMObject) -> bool {
     match (a, b) {
         (VMObject::String(sa), VMObject::String(sb)) => sa == sb,
-        (VMObject::List(la), VMObject::List(lb)) => {
-            if la.len() != lb.len() {
-                return false;
-            }
-            la.iter().zip(lb.iter()).all(|(a, b)| values_equal(a, b))
-        }
         (
             VMObject::AdtValue {
                 tag: t1,
@@ -2389,11 +2562,6 @@ fn objects_equal(a: &VMObject, b: &VMObject) -> bool {
                 return false;
             }
             f1.iter().zip(f2.iter()).all(|(a, b)| values_equal(a, b))
-        }
-        // nil-equivalent comparisons
-        (VMObject::List(elements), VMObject::AdtValue { tag, fields })
-        | (VMObject::AdtValue { tag, fields }, VMObject::List(elements)) => {
-            elements.is_empty() && tag == "Nil" && fields.is_empty()
         }
         (VMObject::Pid(a), VMObject::Pid(b)) => a == b,
         (VMObject::Port(a), VMObject::Port(b)) => a == b,

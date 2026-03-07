@@ -1144,7 +1144,7 @@ fn emit_call(
     let out_payload_ptr = bcx.ins().stack_addr(ptr_type, result_slot, 8);
 
     let func_ref = runtime_funcs.call;
-    bcx.ins().call(
+    let call = bcx.ins().call(
         func_ref,
         &[
             vm_ptr,
@@ -1156,6 +1156,25 @@ fn emit_call(
             out_payload_ptr,
         ],
     );
+    let status = bcx.inst_results(call)[0];
+
+    // Check if we need to bail (status == 2: cross-boundary effect)
+    let bail_cond = bcx.ins().icmp_imm(IntCC::Equal, status, 2);
+    let bail_block = bcx.create_block();
+    let continue_block = bcx.create_block();
+    bcx.ins()
+        .brif(bail_cond, bail_block, &[], continue_block, &[]);
+
+    // Bail block: return the bail sentinel (tag=0xFF, payload=0)
+    bcx.switch_to_block(bail_block);
+    bcx.seal_block(bail_block);
+    let bail_tag = bcx.ins().iconst(types::I8, 0xFF_i64);
+    let bail_payload = bcx.ins().iconst(ptr_type, 0);
+    bcx.ins().return_(&[bail_tag, bail_payload]);
+
+    // Continue block: load the result
+    bcx.switch_to_block(continue_block);
+    bcx.seal_block(continue_block);
 
     let result_tag = bcx.ins().stack_load(types::I8, result_slot, 0);
     let result_payload = bcx.ins().stack_load(ptr_type, result_slot, 8);
@@ -1202,6 +1221,23 @@ fn emit_self_call(
     let results = bcx.inst_results(call);
     let result_tag = results[0];
     let result_payload = results[1];
+
+    // Check if the callee bailed (tag == 0xFF) — propagate bail up
+    let bail_cond = bcx.ins().icmp_imm(IntCC::Equal, result_tag, 0xFF_i64);
+    let bail_block = bcx.create_block();
+    let continue_block = bcx.create_block();
+    bcx.ins()
+        .brif(bail_cond, bail_block, &[], continue_block, &[]);
+
+    bcx.switch_to_block(bail_block);
+    bcx.seal_block(bail_block);
+    let bail_tag = bcx.ins().iconst(types::I8, 0xFF_i64);
+    let bail_payload = bcx.ins().iconst(ptr_type, 0);
+    bcx.ins().return_(&[bail_tag, bail_payload]);
+
+    bcx.switch_to_block(continue_block);
+    bcx.seal_block(continue_block);
+
     JitValue {
         tag: result_tag,
         payload: result_payload,

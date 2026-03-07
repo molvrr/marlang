@@ -228,14 +228,14 @@ impl ConstantValue {
                             .iter()
                             .map(|a| Value::string(a.as_str()))
                             .collect();
-                        Value::object(VMObject::List(vec![
+                        crate::object::vec_to_cons_list(vec![
                             Value::string(sig.name.as_str()),
-                            Value::object(VMObject::List(arg_values)),
+                            crate::object::vec_to_cons_list(arg_values),
                             Value::string(sig.ret_type.as_str()),
-                        ]))
+                        ])
                     })
                     .collect();
-                Value::object(VMObject::List(entries))
+                crate::object::vec_to_cons_list(entries)
             }
             ConstantValue::FfiBound { lib_name, fn_name } => Value::object(VMObject::FfiBound {
                 lib_global_name: Arc::from(lib_name.as_str()),

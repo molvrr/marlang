@@ -131,3 +131,11 @@
 (io/println (show (point-z p)))
 
 (io/println (show (equal? (char-from-code 65) (char-from-code 65))))
+
+(io/println (io/read-file "scratch.mar"))
+
+(data (Tree a) Leaf (Node a (Tree a)))
+
+(match (Node 20 (Node 19 Leaf))
+  ((Node a (Node b c)) a)
+  (Leaf 40))

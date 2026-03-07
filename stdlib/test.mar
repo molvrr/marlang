@@ -1,0 +1,60 @@
+; Test Library
+;
+; Simple assertion-based testing framework.
+;
+; Usage:
+;   (import "std:test" as t)
+;   (import "std:io" as io)
+;
+;   (t/assert-equal 42 42 "basic int")
+;   (t/assert-true #t "truth")
+;   (t/assert-equal "hello" "hello" "string eq")
+;
+; Assertions print "." on pass, "FAIL: ..." on failure.
+; Programs can use assert-equal! to throw on failure (halting tests).
+
+(import "std:io" as io)
+
+; ============================================================
+; Assertions
+; ============================================================
+
+(define assert-equal
+    (lambda (expected actual label)
+        (if (equal? expected actual)
+(begin (io/print ".") #t)
+            (begin
+                (io/println
+                    (string-append
+"FAIL: "
+                        (string-append
+label
+                            (string-append
+": expected "
+(string-append (show expected) (string-append " but got " (show actual)))))))
+#f))))
+
+(define assert-true (lambda (val label) (assert-equal #t val label)))
+
+(define assert-false (lambda (val label) (assert-equal #f val label)))
+
+(define assert-equal!
+    (lambda (expected actual label)
+        (if (equal? expected actual)
+(io/print ".")
+            (error
+                (string-append
+"FAIL: "
+                    (string-append
+label
+                        (string-append
+": expected "
+(string-append (show expected) (string-append " but got " (show actual))))))))))
+
+(define section
+    (lambda (name)
+        (begin
+(io/println "")
+(io/println (string-append "--- " (string-append name " ---"))))))
+
+(define done (lambda () (io/println (string-append "" ""))))

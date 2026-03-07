@@ -4,9 +4,9 @@ use crate::compiler::{compile, compile_program};
 use crate::debug::disassemble;
 use crate::errors::ProgramError;
 use crate::expand::MacroExpander;
-use crate::modules::{ModuleLoader, expand_macros, run_program, run_program_from_exprs};
+use crate::modules::{expand_macros, run_program, run_program_from_exprs, ModuleLoader};
 use crate::object::VMObject;
-use crate::value::{Value, format_value};
+use crate::value::{format_value, Value};
 use crate::vm::VM;
 use marlang_core::intern::Interner;
 use marlang_core::lexer::lex;
@@ -82,34 +82,28 @@ fn literal_string() {
 #[test]
 fn literal_boolean_true() {
     let (chunk, _) = compile_source("#t");
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Boolean(true)))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Boolean(true))));
 }
 
 #[test]
 fn literal_boolean_false() {
     let (chunk, _) = compile_source("#f");
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Boolean(false)))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Boolean(false))));
 }
 
 #[test]
 fn literal_nil() {
     let (chunk, _) = compile_source("nil");
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Nil))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Nil)));
 }
 
 #[test]
@@ -215,12 +209,10 @@ fn if_no_else() {
     let (chunk, _) = compile_source("(if #t 1)");
     assert!(find_op(&chunk, Op::JumpIfFalse));
     // Should have nil for the else branch
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Nil))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Nil)));
 }
 
 #[test]
@@ -297,12 +289,10 @@ fn lambda_basic() {
     let (chunk, _) = compile_source("(lambda (x) x)");
     assert!(find_op(&chunk, Op::Closure));
     // Should have a prototype in constants
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Prototype(_)))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Prototype(_))));
 }
 
 #[test]
@@ -387,12 +377,10 @@ fn data_nullary_constructor() {
 fn data_nary_constructor() {
     let (chunk, _) = compile_source("(data Option (Some a) None)");
     // Some is N-ary (arity 1), encoded as special string
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| { matches!(c, ConstantValue::String(s) if s == "\0ctor:Some:1") })
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| { matches!(c, ConstantValue::String(s) if s == "\0ctor:Some:1") }));
     // None is nullary
     assert!(find_op(&chunk, Op::Construct));
 }
@@ -452,12 +440,10 @@ fn match_no_match_halt() {
 fn effect_declaration_emits_nil() {
     let (chunk, _) = compile_source("(effect IO (print (-> String Unit)))");
     // effect declarations just produce nil
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Nil))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Nil)));
 }
 
 #[test]
@@ -479,12 +465,10 @@ fn handle_produces_push_handler() {
     let (chunk, _) = compile_source(source);
     assert!(find_op(&chunk, Op::PushHandler));
     // Should have handler descriptor
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| { matches!(c, ConstantValue::String(s) if s.starts_with("\0handler:")) })
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| { matches!(c, ConstantValue::String(s) if s.starts_with("\0handler:")) }));
 }
 
 #[test]
@@ -535,12 +519,10 @@ fn class_compile_error() {
 fn type_emits_nil() {
     let (chunk, _) = compile_source("(type Pair (a b) (MkPair a b))");
     // type declarations emit nil
-    assert!(
-        chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, ConstantValue::Nil))
-    );
+    assert!(chunk
+        .constants
+        .iter()
+        .any(|c| matches!(c, ConstantValue::Nil)));
 }
 
 // ===== Disassembler =====
@@ -1727,7 +1709,7 @@ fn exec_map_function() {
              (Nil Nil)
              ((Cons x rest) (Cons (f x) (map f rest))))))
          (map (lambda (x) (* x 2)) (Cons 1 (Cons 2 (Cons 3 Nil))))",
-        "(Cons 2 (Cons 4 (Cons 6 Nil)))",
+        "(2 4 6)",
     );
 }
 
@@ -2753,7 +2735,7 @@ fn stdlib_codec_roundtrip_integer() {
 fn stdlib_codec_parse_many() {
     assert_eq!(
         run_codec_test(r#"(show (c/parse (c/many c/digit) "123"))"#),
-        r#""(Ok (Cons '1' (Cons '2' (Cons '3' Nil))))""#
+        r#""(Ok ('1' '2' '3'))""#
     );
 }
 
@@ -2816,7 +2798,7 @@ fn stdlib_codec_parse_sep_by() {
         run_codec_test(
             r#"(show (c/parse (c/sep-by (c/lit-char (char-from-code 44)) c/digit) "1,2,3"))"#
         ),
-        r#""(Ok (Cons '1' (Cons '2' (Cons '3' Nil))))""#
+        r#""(Ok ('1' '2' '3'))""#
     );
 }
 
@@ -3951,14 +3933,14 @@ fn quote_symbol() {
 fn quote_list() {
     let val = eval("(quote (a b c))").expect("eval failed");
     let s = format_value(&val);
-    assert_eq!(s, "(Cons a (Cons b (Cons c Nil)))");
+    assert_eq!(s, "(a b c)");
 }
 
 #[test]
 fn quote_empty_list() {
     let val = eval("(quote ())").expect("eval failed");
     let s = format_value(&val);
-    assert_eq!(s, "Nil");
+    assert_eq!(s, "()");
 }
 
 #[test]
@@ -3986,7 +3968,7 @@ fn quote_sugar_symbol() {
 fn quote_sugar_list() {
     let val = eval("'(a b c)").expect("eval failed");
     let s = format_value(&val);
-    assert_eq!(s, "(Cons a (Cons b (Cons c Nil)))");
+    assert_eq!(s, "(a b c)");
 }
 
 // ===== Quasiquote Tests =====
@@ -3995,14 +3977,14 @@ fn quote_sugar_list() {
 fn quasiquote_no_unquote() {
     let val = eval("`(a b c)").expect("eval failed");
     let s = format_value(&val);
-    assert_eq!(s, "(Cons a (Cons b (Cons c Nil)))");
+    assert_eq!(s, "(a b c)");
 }
 
 #[test]
 fn quasiquote_unquote() {
     let val = eval("(define x 42) `(a ,x c)").expect("eval failed");
     let s = format_value(&val);
-    assert_eq!(s, "(Cons a (Cons 42 (Cons c Nil)))");
+    assert_eq!(s, "(a 42 c)");
 }
 
 #[test]
@@ -4015,14 +3997,14 @@ fn quasiquote_splicing() {
     )
     .expect("eval failed");
     let s = format_value(&val);
-    assert_eq!(s, "(Cons a (Cons 1 (Cons 2 (Cons c Nil))))");
+    assert_eq!(s, "(a 1 2 c)");
 }
 
 #[test]
 fn quasiquote_nested_unquote() {
     let val = eval("(define x 10) (define y 20) `(,x ,y)").expect("eval failed");
     let s = format_value(&val);
-    assert_eq!(s, "(Cons 10 (Cons 20 Nil))");
+    assert_eq!(s, "(10 20)");
 }
 
 // ===== Builtin Tests =====
@@ -4037,7 +4019,7 @@ fn cons_car_cdr() {
 fn append_lists() {
     let val = eval("(append (Cons 1 (Cons 2 Nil)) (Cons 3 Nil))").expect("eval failed");
     let s = format_value(&val);
-    assert_eq!(s, "(Cons 1 (Cons 2 (Cons 3 Nil)))");
+    assert_eq!(s, "(1 2 3)");
 }
 
 #[test]
