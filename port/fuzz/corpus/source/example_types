@@ -1,0 +1,117 @@
+(import "std:io" as io)
+
+; Type System Examples
+
+; === Basic Type Annotations ===
+(define (x : Int) 42)
+(define (y : Float) 3.14)
+(define (name : String) "Linguagem da boa")
+
+; === Function Types ===
+(define (add : (-> Int Int Int))
+  (lambda (a b) (+ a b)))
+
+(add 1 2)  ; => 3
+
+; === Polymorphic Functions ===
+(define id (lambda (x) x))
+(id 42)       ; Works with Int
+(id "hello")  ; Works with String
+
+; === Algebraic Data Types ===
+
+; Option type
+(data (Option a) None (Some a))
+
+(define maybe-x (Some 42))
+(define nothing None)
+
+; List type
+(data (List a) Nil (Cons a (List a)))
+
+(define my-list (Cons 1 (Cons 2 (Cons 3 Nil))))
+
+; === Pattern Matching ===
+
+; Extract value from Option
+(define unwrap-or
+  (lambda (opt default)
+    (match opt
+      (None default)
+      ((Some v) v))))
+
+(unwrap-or (Some 42) 0)  ; => 42
+(unwrap-or None 0)       ; => 0
+
+; List length
+(define length
+  (lambda (lst)
+    (match lst
+      (Nil 0)
+      ((Cons h t) (+ 1 (length t))))))
+
+(length my-list)  ; => 3
+
+; Map over list
+(define map
+  (lambda (f lst)
+    (match lst
+      (Nil Nil)
+      ((Cons h t) (Cons (f h) (map f t))))))
+
+(define double (lambda (x) (+ x x)))
+(map double my-list)  ; => (Cons 2 (Cons 4 (Cons 6 Nil)))
+
+; Fold left
+(define foldl
+  (lambda (f acc lst)
+    (match lst
+      (Nil acc)
+      ((Cons h t) (foldl f (f acc h) t)))))
+
+(foldl + 0 my-list)  ; => 6
+
+; === Nested Patterns ===
+(data (Pair a b) (MkPair a b))
+
+(define pair-of-options (MkPair (Some 1) (Some 2)))
+
+(match pair-of-options
+  ((MkPair (Some x) (Some y)) (+ x y))
+  (_ 0))  ; => 3
+
+; === OCaml-Style Operator Split ===
+;
+; Arithmetic and comparison operators are split by type:
+;   Int operators:   +  -  *  /  =  <  >  <=  >=  rem  abs  negate
+;   Float operators: +. -. *. /. =. <. >. <=. >=. rem. abs. negate.
+;   String comparison: string= string< string> string<= string>=
+;
+; Polymorphic: equal? (structural equality), show, print, println
+
+; Int arithmetic
+(define square-int (lambda (x) (* x x)))
+(square-int 5)  ; => 25
+
+; Float arithmetic (dot suffix)
+(define square-float (lambda (x) (*. x x)))
+(square-float 2.5)  ; => 6.25
+
+; Conversion between Int and Float
+(define (n : Int) 42)
+(+. (int->float n) 0.5)  ; => 42.5
+
+; Polymorphic equality
+(equal? (Some 1) (Some 1))  ; => #t
+(equal? (Some 1) (Some 2))  ; => #f
+
+; Polymorphic show
+(show 42)         ; => "42"
+(show (Some 1))   ; => "(Some 1)"
+
+; String comparison
+(string= "hello" "hello")  ; => #t
+(string< "abc" "def")      ; => #t
+
+; Final result
+(io/println "Type system demo complete!")

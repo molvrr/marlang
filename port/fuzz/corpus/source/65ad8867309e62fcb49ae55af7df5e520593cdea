@@ -1,0 +1,3 @@
+(effect IO
+               (println h-> String Unit)))
+           (define (f : (-> String Unit)) (lambda (s) (perform println s)))

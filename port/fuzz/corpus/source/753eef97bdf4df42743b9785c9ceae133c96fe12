@@ -1,0 +1,4 @@
+(effect IO
+               (println (-> String Unit)))
+           (define (f : (-> String {IO | e} Unit)) (lambda (s) (perform println s)))
+           (f  (-> o")

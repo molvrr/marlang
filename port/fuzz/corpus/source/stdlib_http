@@ -1,0 +1,92 @@
+; HTTP module - HTTP client and server using the effect system
+;
+; STATUS: UNIMPLEMENTED — The effect types and wrapper functions below define
+; the planned API, but no runtime handlers exist in the scheduler. Attempting
+; to use these effects at runtime will result in "Unhandled effect" errors.
+; This module serves as a design sketch for future HTTP support.
+;
+; All HTTP operations are effects handled by the scheduler (run-fibers).
+;
+; Example client:
+;   (import "std:http" as http)
+;   (run-fibers (lambda ()
+;     (let ((resp (http/get "http://example.com")))
+;       (match resp
+;         ((HttpResponse status headers body)
+;           (io/println body))))))
+;
+; Example server:
+;   (import "std:http" as http)
+;   (run-fibers (lambda ()
+;     (let ((server (http/serve 8080)))
+;       (define handle-requests (lambda ()
+;         (let ((req (http/accept-request server)))
+;           (match req
+;             ((HttpReq handle method url headers body)
+;               (http/respond-text handle 200 "Hello!"))
+;             (_ nil)))
+;         (handle-requests)))
+;       (handle-requests))))
+
+; === Data Types ===
+
+(data HttpResponse (HttpResponse Int (List (List String)) String))
+(data HttpReq (HttpReq HttpRequest String String (List (List String)) String))
+(data HttpOption (Method String) (Header String String) (Body String))
+
+; === HTTP Client Effect ===
+
+(effect HttpClient
+  (http-fetch (-> String (List HttpOption) HttpResponse)))
+
+; === HTTP Server Effect ===
+
+(effect HttpServ
+  (http-serve        (-> Int HttpServer))
+  (http-accept       (-> HttpServer HttpReq))
+  (http-respond      (-> HttpRequest Int (List (List String)) String Unit))
+  (http-close-server (-> HttpServer Unit)))
+
+; === HTTP Client Operations ===
+
+; fetch : (-> String (List HttpOption) {HttpClient} HttpResponse)
+; Make an HTTP request with options
+(define fetch (lambda (url options) (perform http-fetch url options)))
+
+; get : (-> String {HttpClient} HttpResponse)
+; Make a GET request
+(define get (lambda (url) (fetch url (list))))
+
+; post : (-> String String {HttpClient} HttpResponse)
+; Make a POST request with body
+(define post (lambda (url body)
+  (fetch url (list (Method "POST") (Body body)))))
+
+; === HTTP Server Operations ===
+
+; serve : (-> Int {HttpServ} HttpServer)
+; Start an HTTP server on the given port
+(define serve (lambda (port) (perform http-serve port)))
+
+; accept-request : (-> HttpServer {HttpServ} HttpReq)
+; Accept the next HTTP request (blocks until one arrives, nil when server closed)
+(define accept-request (lambda (server) (perform http-accept server)))
+
+; respond : (-> HttpRequest Int (List (List String)) String {HttpServ} Unit)
+; Send an HTTP response
+(define respond (lambda (handle status headers body)
+  (perform http-respond handle status headers body)))
+
+; respond-text : (-> HttpRequest Int String {HttpServ} Unit)
+; Send a plain text response
+(define respond-text (lambda (handle status body)
+  (respond handle status (list (list "content-type" "text/plain")) body)))
+
+; respond-json : (-> HttpRequest Int String {HttpServ} Unit)
+; Send a JSON response
+(define respond-json (lambda (handle status body)
+  (respond handle status (list (list "content-type" "application/json")) body)))
+
+; close-server : (-> HttpServer {HttpServ} Unit)
+; Stop the HTTP server
+(define close-server (lambda (server) (perform http-close-server server)))

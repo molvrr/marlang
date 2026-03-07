@@ -1,0 +1,2 @@
+(foreign-lib rl "libtest.dylib"
+    M      (ClearBackground (-> Color Void)))

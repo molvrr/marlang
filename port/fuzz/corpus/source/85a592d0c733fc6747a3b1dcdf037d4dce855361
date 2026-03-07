@@ -1,0 +1,148 @@
+; Math utilities module
+;
+; Provides mathematical functions, constants, and clean wrappers
+; around built-in math operations.
+;
+; Usage:
+;   (import "std:math" as math)
+;   (math/sqrt 2.0)
+;   (math/sin math/pi)
+
+; ============================================================
+; Constants
+; ============================================================
+
+; pi : Float
+; The mathematical constant pi (3.14159...)
+(define (pi : Float) 3.141592653589793)
+
+; e : Float
+; Euler's number (2.71828...)
+(define (e : Float) 2.718281828459045)
+
+; tau : Float
+; Tau (2 * pi)
+(define (tau : Float) 6.283185307179586)
+
+; ============================================================
+; Basic Operations — Int versions
+; ============================================================
+
+; min-of : (-> Int Int Int)
+; Minimum of two integers
+(define (min-of : (-> Int Int Int))
+  (lambda (x y)
+    (if (< x y) x y)))
+
+; max-of : (-> Int Int Int)
+; Maximum of two integers
+(define (max-of : (-> Int Int Int))
+  (lambda (x y)
+    (if (> x y) x y)))
+
+; clamp : (-> Int Int Int Int)
+; Clamp an integer between min and max bounds
+(define (clamp : (-> Int Int Int Int))
+  (lambda (lo hi x)
+    (if (< x lo) lo
+      (if (> x hi) hi x))))
+
+; ============================================================
+; Basic Operations — Float versions
+; ============================================================
+
+; min-of. : (-> Float Float Float)
+; Minimum of two floats
+(define (min-of. : (-> Float Float Float))
+  (lambda (x y)
+    (if (<. x y) x y)))
+
+; max-of. : (-> Float Float Float)
+; Maximum of two floats
+(define (max-of. : (-> Float Float Float))
+  (lambda (x y)
+    (if (>. x y) x y)))
+
+; clamp. : (-> Float Float Float Float)
+; Clamp a float between min and max bounds
+(define (clamp. : (-> Float Float Float Float))
+  (lambda (lo hi x)
+    (if (<. x lo) lo
+      (if (>. x hi) hi x))))
+
+; ============================================================
+; Powers and Roots (wrappers around builtins)
+; ============================================================
+
+; square : (-> Float Float)
+; Square a number (Float only)
+(define (square : (-> Float Float))
+  (lambda (x) (*. x x)))
+
+; cube : (-> Float Float)
+; Cube a number (Float only)
+(define (cube : (-> Float Float))
+  (lambda (x) (*. x (*. x x))))
+
+; ============================================================
+; Integer Division and Modulo
+; ============================================================
+
+; div : (-> Int Int Int)
+; Integer division (truncated toward zero)
+(define (div : (-> Int Int Int))
+  (lambda (a b)
+    (let ((r (rem a b)))
+      (/ (- a r) b))))
+
+; div. : (-> Float Float Float)
+; Float division (same as /. but named for consistency)
+(define (div. : (-> Float Float Float))
+  (lambda (a b)
+    (/. a b)))
+
+; even : (-> Int Bool)
+; Check if an integer is even
+(define (even : (-> Int Bool))
+  (lambda (n)
+    (= (rem n 2) 0)))
+
+; odd : (-> Int Bool)
+; Check if an integer is odd
+(define (odt))
+  (lambda (radians)
+    (*. radians (/. 180.0 pi))))
+
+; radians : (-> Float Float)
+; Convert degrees to radians
+(define (radians : (-> Float Float))
+  (lambda (deg)
+    (*. deg (/. pi 180.0))))
+
+; ============================================================
+; Number Theory Functions (Int only)
+; ============================================================
+
+; gcd : (-> Int Int Int)
+; Greatest common divisor (Euclidean algorithm)
+(define (gcd : (-> Int Int Int))
+  (lambda (a b)
+    (if (= b 0)
+      (abs a)
+      (gcd b (rem a b)))))
+
+; lcm : (-> Int Int Int)
+; Least common multiple
+(define (lcm : (-> Int Int Int))
+  (lambda (a b)
+    (if (= a 0)
+      0
+      (abs (* (div a (gcd a b)) b)))))
+
+; factorial : (-> Int Int)
+; Factorial (n!)
+(define (factorial : (-> Int Int))
+  (lambda (n)
+    (if (<= n 1)
+      1
+      (* n (factorial (- n 1))))))

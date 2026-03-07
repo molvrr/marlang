@@ -20,16 +20,41 @@ pub fn single_subst(name: &str, t: Type) -> Substitution {
 
 // ===== Apply Substitution =====
 
+/// Maximum number of type nodes apply_subst will produce before bailing out.
+/// This prevents exponential blowup from cyclic or deeply-branching substitutions
+/// (e.g. a → μa. App(a, a)) while allowing arbitrarily deep but narrow types.
+const APPLY_SUBST_MAX_NODES: usize = 2_000;
+
 pub fn apply_subst(subst: &Substitution, t: &Type) -> Type {
+    let mut budget = APPLY_SUBST_MAX_NODES;
+    apply_subst_counted(subst, t, &mut budget)
+}
+
+fn apply_subst_counted(subst: &Substitution, t: &Type, budget: &mut usize) -> Type {
+    if *budget == 0 {
+        return t.clone();
+    }
+    *budget -= 1;
     match t {
-        Type::Var(name) => match subst.get(name) {
-            Some(replacement) => apply_subst(subst, replacement),
-            None => t.clone(),
-        },
+        Type::Var(_) => {
+            // Chase Var → Var chains to find the terminal binding, then
+            // structurally walk the resolved type.
+            let resolved = chase_subst(subst, t);
+            if std::ptr::eq(resolved, t) {
+                t.clone()
+            } else if let Type::Var(_) = resolved {
+                resolved.clone()
+            } else {
+                apply_subst_counted(subst, resolved, budget)
+            }
+        }
         Type::Const(_) => t.clone(),
         Type::App { constructor, args } => Type::App {
-            constructor: Box::new(apply_subst(subst, constructor)),
-            args: args.iter().map(|a| apply_subst(subst, a)).collect(),
+            constructor: Box::new(apply_subst_counted(subst, constructor, budget)),
+            args: args
+                .iter()
+                .map(|a| apply_subst_counted(subst, a, budget))
+                .collect(),
         },
         Type::Arrow {
             params,
@@ -37,19 +62,24 @@ pub fn apply_subst(subst: &Substitution, t: &Type) -> Type {
             effects,
             result,
         } => Type::Arrow {
-            params: params.iter().map(|p| apply_subst(subst, p)).collect(),
-            rest: rest.as_ref().map(|r| Box::new(apply_subst(subst, r))),
+            params: params
+                .iter()
+                .map(|p| apply_subst_counted(subst, p, budget))
+                .collect(),
+            rest: rest
+                .as_ref()
+                .map(|r| Box::new(apply_subst_counted(subst, r, budget))),
             effects: effects
                 .as_ref()
                 .map(|row| apply_effect_row_subst_via_type_subst(subst, row)),
-            result: Box::new(apply_subst(subst, result)),
+            result: Box::new(apply_subst_counted(subst, result, budget)),
         },
         Type::Rec { var, body } => {
             let mut filtered = subst.clone();
             filtered.remove(var);
             Type::Rec {
                 var: var.clone(),
-                body: Box::new(apply_subst(&filtered, body)),
+                body: Box::new(apply_subst_counted(&filtered, body, budget)),
             }
         }
         Type::EffectRowRef(row) => {
@@ -112,11 +142,20 @@ pub fn apply_effect_row_subst_via_type_subst(subst: &Substitution, row: &EffectR
 }
 
 /// Chase a substitution chain: if subst[x] = Var(y) and subst[y] = ..., follow.
+/// Uses a step limit to prevent infinite loops on cyclic substitutions
+/// (e.g. a → Var(b), b → Var(a)).
 fn chase_subst<'a>(subst: &'a Substitution, t: &'a Type) -> &'a Type {
+    chase_subst_step(subst, t, 64)
+}
+
+fn chase_subst_step<'a>(subst: &'a Substitution, t: &'a Type, remaining: usize) -> &'a Type {
+    if remaining == 0 {
+        return t;
+    }
     if let Type::Var(name) = t
         && let Some(next) = subst.get(name)
     {
-        return chase_subst(subst, next);
+        return chase_subst_step(subst, next, remaining - 1);
     }
     t
 }

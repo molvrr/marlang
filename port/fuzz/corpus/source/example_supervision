@@ -1,0 +1,98 @@
+; Supervision Example
+;
+; Monitors and links provide fault-tolerance patterns
+; inspired by Erlang's "let it crash" philosophy.
+;
+; Run with: cargo run -p marlang-cli -- run examples/supervision.mar
+
+(import "std:concurrent" as conc)
+(import "std:actor" as actor)
+(import "std:io" as io)
+
+(data Signal (Down Pid String) (Exit Pid String))
+
+; === Example 1: Monitor ===
+;
+; A monitor watches another fiber. When the watched fiber exits
+; (normally or by crashing), a Down message is delivered.
+
+(run-fibers (lambda ()
+  (let ((worker (conc/spawn (lambda ()
+                  (io/println "worker: doing work...")
+                  (conc/yield)
+                  (error "something went wrong!")))))
+    (actor/monitor worker)
+    (conc/yield)
+    (conc/yield)
+    (conc/yield)
+    (let ((msg (actor/receive)))
+      (match msg
+        ((Down pid reason) (begin (io/print "supervisor: worker crashed with: ") (io/println reason)))
+        (_ nil))))))
+
+; Output:
+;   worker: doing work...
+;   supervisor: worker crashed with: something went wrong!
+
+
+; === Example 2: Link with Trap-Exit ===
+;
+; Links are bidirectional. When a linked fiber crashes, the linked
+; partner also crashes — unless it has trap-exit enabled, in which
+; case the crash is converted to an Exit message.
+
+(run-fibers (lambda ()
+  (actor/trap-exit #t)
+  (let ((worker (conc/spawn (lambda ()
+                  (conc/yield)
+                  (error "crash!")))))
+    (actor/link worker)
+    (conc/yield)
+    (conc/yield)
+    (conc/yield)
+    (let ((msg (actor/receive)))
+      (match msg
+        ((Exit pid reason) (begin (io/print "trapped exit: ") (io/println reason)))
+        (_ nil))))))
+
+; Output:
+;   trapped exit: crash!
+
+
+; === Example 3: Restart on Crash ===
+;
+; A simple supervisor that restarts a worker when it crashes
+
+(define run-worker (lambda ()
+  (io/println "worker started")
+  (conc/yield)
+  (error "oops")))
+
+(define supervisor (lambda (restarts-left)
+  (if (<= restarts-left 0)
+    (io/println "supervisor: giving up")
+    (let ((w (conc/spawn run-worker)))
+      (actor/monitor w)
+      (conc/yield)
+      (conc/yield)
+      (conc/yield)
+      (let ((msg (actor/receive)))
+        (match msg
+          ((Down pid reason)
+            (begin
+              (io/print "supervisor: restarting after: ")
+              (io/println reason)
+              (supervisor (- restarts-left 1))))
+          (_ nil)))))))
+
+(run-fibers (lambda ()
+  (supervisor 3)))
+
+; Output:
+;   worker started
+;   supervisor: restarting after: oops
+;   worker started
+;   supervisor: restarting after: oops
+;   worker started
+;   supervisor: restarting after: oops
+;   supervisor: giving up

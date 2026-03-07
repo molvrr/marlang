@@ -1,0 +1,4 @@
+(data (Option a) None (Some a))
+         (match (Some 42)
+           (None 0)
+           ((Some x) x))

@@ -1,0 +1,5 @@
+(let ((id (lambda (x) x)))
+  (begin
+    (id 42)
+    (id "hello")
+    (id #t)))

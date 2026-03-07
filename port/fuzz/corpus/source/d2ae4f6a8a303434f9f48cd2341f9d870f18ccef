@@ -1,0 +1,2 @@
+(handle 42
+        (handle expr ((op k) -> (resume k val)))       ((unknown-op k) -> 0))

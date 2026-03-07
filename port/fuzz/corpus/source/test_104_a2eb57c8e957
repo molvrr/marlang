@@ -1,0 +1,3 @@
+(define Color (ffi-struct "Color" (list (list "r" "u8") (list "g" "u8"))))
+         (define c (struct-new Color 255 0))
+         (struct-set c "r" "not-a-number")

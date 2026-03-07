@@ -1,0 +1,3 @@
+(data (Option a) None (Some a))
+        ne (Some a))
+         (define id (match (Some 20) ((Some x) (define id (match (Some 20) ((Some x) x)))

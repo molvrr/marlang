@@ -1,0 +1,4 @@
+(define Color (ffi-struct "Color" (list (list "r" "u8") (list "g" "u8") (list "b" "u8") (list "a" "u8"))))
+         (foreign-lib rl "libtest.dylib"
+           (ClearBackground (-> Color Void))
+            (GetColor (-> Unit Color)))

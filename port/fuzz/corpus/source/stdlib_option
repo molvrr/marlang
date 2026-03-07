@@ -1,0 +1,74 @@
+; Option utilities
+(data (Option a) None (Some a))
+
+; map : (-> (-> a b) (Option a) (Option b))
+; Apply a function to the value inside Some, or return None
+(define (map : (-> (-> a b) (Option a) (Option b)))
+  (lambda (f opt)
+    (match opt
+      (None None)
+      ((Some x) (Some (f x))))))
+
+; flat-map : (-> (-> a (Option b)) (Option a) (Option b))
+; Apply a function that returns an Option, flattening the result
+(define (flat-map : (-> (-> a (Option b)) (Option a) (Option b)))
+  (lambda (f opt)
+    (match opt
+      (None None)
+      ((Some x) (f x)))))
+
+; unwrap-or : (-> a (Option a) a)
+; Get the value inside Some, or return a default
+(define (unwrap-or : (-> a (Option a) a))
+  (lambda (default opt)
+    (match opt
+      (None default)
+      ((Some x) x))))
+
+; unwrap-or-else : (-> (-> Unit a) (Option a) a)
+; Get the value inside Some, or compute a default lazily
+(define (unwrap-or-else : (-> (-> Unit a) (Option a) a))
+  (lambda (f opt)
+    (match opt
+      (None (f nil))
+      ((Some x) x))))
+
+; is-some : (-> (Option a) Bool)
+; Check if the Option contains a value
+(define (is-some : (-> (Option a) Bool))
+  (lambda (opt)
+    (match opt
+      (None #f)
+      ((Some _) #t))))
+
+; is-none : (-> (Option a) Bool)
+; Check if the Option is empty
+(define (is-none : (-> (Option a) Bool))
+  (lambda (opt)
+    (match opt
+      (None #t)
+      ((Some _) #f))))
+
+; filter : (-> (-> a Bool) (Option a) (Option a))
+; Keep the value only if it satisfies the predicate
+(define (filter : (-> (-> a Bool) (Option a) (Option a)))
+  (lambda (pred opt)
+    (match opt
+      (None None)
+      ((Some x) (if (pred x) (Some x) None)))))
+
+; and-then : (-> (Option b) (Option a) (Option b))
+; Return the second option if the first is Some, otherwise None
+(define (and-then : (-> (Option b) (Option a) (Option b)))
+  (lambda (other opt)
+    (match opt
+      (None None)
+      ((Some _) other))))
+
+; or-else : (-> (Option a) (Option a) (Option a))
+; Return the first option if it's Some, otherwise the second
+(define (or-else : (-> (Option a) (Option a) (Option a)))
+  (lambda (other opt)
+    (match opt
+      (None other)
+      ((Some x) (Some x)))))

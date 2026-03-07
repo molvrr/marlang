@@ -1,0 +1,3 @@
+(foreign-lib rl "libtest.dylib"
+           (InitWindow (-> I32 I32 CString Void)))
+         (ffi-call rl "InitWindow" 800 600 "hello")

@@ -1,0 +1,7 @@
+(data (List a) Nil (Cons a (List a)))
+         (define foldl
+           (lambda (f acc lst)
+             (match lst
+               (Nil acc)
+               ((Cons h t) (foldl f (f acc h) t)))))
+         (foldl + 0 (Cons 1 (Cons 2 (Cons 3 Nil))))

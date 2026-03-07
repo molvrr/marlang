@@ -1,0 +1,4 @@
+(foreign-lib rl "libtest.dylib"
+           (InitWindow - >(I32 I32 CString (handle 42
+           Void)))
+         (rl/Init:indo    (w 800)(unnknown-op k) -> 0))

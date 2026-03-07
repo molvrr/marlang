@@ -1,0 +1,87 @@
+; Calculator Example — using std:codec
+;
+; Parses and evaluates simple integer arithmetic expressions:
+;   1 + 2 * 3       => 7
+;   (1 + 2) * 3     => 9
+;   10 - 3 - 2      => 5  (left-associative)
+;   100 / 5 / 4     => 5  (integer division, truncates toward zero)
+;
+; Grammar:
+;   expr   = term (('+' | '-') term)*
+;   term   = factor (('*' | '/') factor)*
+;   factor = '(' expr ')' | integer
+;
+; This example uses codec's parse-only compat functions (chainl1, or-else)
+; since expression evaluation is inherently one-directional.
+;
+; Run with: cargo run -p marlang-cli -- run examples/parse-calc.mar
+
+(import "std:codec" as c)
+(import "std:io" as io)
+
+; Approach: single function with a level parameter
+; level 0 = expr, level 1 = term, level 2 = factor
+
+(define parse-expr (lambda (level)
+  (if (= level 0)
+    ; expr: term chained with + and -
+    (c/chainl1
+      (lambda ()
+        (begin
+          ((c/codec-parser c/spaces0))
+          (c/or-else
+            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 43)))) ((c/codec-parser c/spaces0)) +))
+            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 45)))) ((c/codec-parser c/spaces0)) -)))))
+      (lambda () (parse-expr 1)))
+  (if (= level 1)
+    ; term: factor chained with * and /
+    (c/chainl1
+      (lambda ()
+        (begin
+          ((c/codec-parser c/spaces0))
+          (c/or-else
+            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 42)))) ((c/codec-parser c/spaces0)) *))
+            (lambda () (begin ((c/codec-parser (c/lit-char (char-from-code 47)))) ((c/codec-parser c/spaces0)) /)))))
+      (lambda () (parse-expr 2)))
+    ; factor: parens or integer
+    (begin
+      ((c/codec-parser c/spaces0))
+      (c/or-else
+        (lambda () ((c/codec-parser (c/parens
+          (c/mk-codec (lambda () (parse-expr 0)) (lambda (_) nil))))))
+        (lambda () ((c/codec-parser c/integer)))))))))
+
+; Top-level parser: wrap in a codec and use c/parse
+(define calc (lambda (input)
+  (c/parse
+    (c/mk-codec
+      (lambda ()
+        (let ((result (parse-expr 0)))
+          (begin ((c/codec-parser c/spaces0)) ((c/codec-parser c/eof)) result)))
+      (lambda (_) nil))
+    input)))
+
+; === Tests ===
+
+(define test (lambda (input expected)
+  (let ((result (calc input)))
+    (match result
+      ((Ok val) (io/println (string-append input
+        (string-append " = " (string-append (show val)
+          (if (= val expected) " OK" " FAIL"))))))
+      ((Err msg) (io/println (string-append input
+        (string-append " => ERROR: " msg))))))))
+
+(test "42" 42)
+(test "1 + 2" 3)
+(test "1 + 2 * 3" 7)
+(test "10 - 3 - 2" 5)
+(test "(1 + 2) * 3" 9)
+(test "100 / 5 / 4" 5)
+(test " 3 + 4 * 2 / (1 - 5)" 1)
+(test "0" 0)
+(test "-7" -7)
+
+; Error case
+(let ((result (calc "1 +")))
+  (io/println (string-append "1 + => " (show result))))

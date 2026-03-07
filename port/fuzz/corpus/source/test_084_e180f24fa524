@@ -1,0 +1,4 @@
+(define lib 42)
+         (foreign lib
+           (InitWindow (-> Int Int String Unit)))
+         (ffi-call lib "InitWindow" 800 600 42)

@@ -1,0 +1,2 @@
+(data (Option a) None (Some a))
+         (Some 42)

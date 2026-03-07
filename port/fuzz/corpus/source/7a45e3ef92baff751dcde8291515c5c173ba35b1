@@ -1,0 +1,2 @@
+(define double (lambd0 (x) (+ x x)))
+         (double`2.5)

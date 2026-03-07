@@ -1,0 +1,4 @@
+(effect IO
+               (println (-> String Unit)))
+           (handle (perform println "hello")
+               ((println msg k) -> (resume k (begin))))

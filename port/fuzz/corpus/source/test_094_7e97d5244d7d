@@ -1,0 +1,7 @@
+(foreign-lib rl "libtest.dylib"
+           (GetWidth (-> Unit I32))
+            (GetTime (-> Unit F64))
+            (GetFrameTime (-> Unit F32)))
+         (+ (rl/GetWidth) 1)
+         (+ (rl/GetTime) 1.0)
+         (+ (rl/GetFrameTime) 1.0)

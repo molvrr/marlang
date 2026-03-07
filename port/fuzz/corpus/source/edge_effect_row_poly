@@ -1,0 +1,8 @@
+(define (with-logging : (-> (-> Unit {IO | e} a) {IO | e} a))
+  (lambda (thunk)
+    (begin
+      (perform println "start")
+      (let ((result (thunk)))
+        (begin
+          (perform println "end")
+          result)))))

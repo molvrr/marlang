@@ -1,0 +1,3 @@
+(define (f : (-> (... String) String))
+             (lambda (. args) (string-append "hello")))
+           (f "a" "b" "c")

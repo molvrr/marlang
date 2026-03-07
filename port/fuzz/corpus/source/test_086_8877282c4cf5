@@ -1,0 +1,2 @@
+(define lib 42)
+         (ffi-call lib "anything" 1 "hello" #t)

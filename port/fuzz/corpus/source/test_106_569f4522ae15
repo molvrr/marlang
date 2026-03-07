@@ -1,0 +1,2 @@
+(define unknown-def 42)
+         (struct-new unknown-def 1 2 3)

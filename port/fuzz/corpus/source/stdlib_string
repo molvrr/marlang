@@ -1,0 +1,299 @@
+; String utilities module
+;
+; Provides clean wrappers around built-in string operations.
+;
+; Usage:
+;   (import "std:string" as str)
+;   (str/append "hello" " " "world")
+;   (str/split "," "a,b,c")
+
+; ============================================================
+; Basic Operations
+; ============================================================
+
+; length : (-> String Int)
+; Get the length of a string
+(define (length : (-> String Int))
+  (lambda (s)
+    (string-length s)))
+
+; concat : (-> String String String)
+; Concatenate two strings
+(define (concat : (-> String String String))
+  (lambda (a b)
+    (string-append a b)))
+
+; is-empty : (-> String Bool)
+; Check if a string is empty
+(define (is-empty : (-> String Bool))
+  (lambda (s)
+    (string-is-empty s)))
+
+; reverse : (-> String String)
+; Reverse a string
+(define (reverse : (-> String String))
+  (lambda (s)
+    (string-reverse s)))
+
+; repeat : (-> Int String String)
+; Repeat a string n times
+(define (repeat : (-> Int String String))
+  (lambda (n s)
+    (string-repeat s n)))
+
+; ============================================================
+; Case Conversion
+; ============================================================
+
+; to-upper : (-> String String)
+; Convert string to uppercase
+(define (to-upper : (-> String String))
+  (lambda (s)
+    (string-to-upper s)))
+
+; to-lower : (-> String String)
+; Convert string to lowercase
+(define (to-lower : (-> String String))
+  (lambda (s)
+    (string-to-lower s)))
+
+; ============================================================
+; Trimming
+; ============================================================
+
+; trim : (-> String String)
+; Remove whitespace from both ends
+(define (trim : (-> String String))
+  (lambda (s)
+    (string-trim s)))
+
+; trim-start : (-> String String)
+; Remove whitespace from the start
+(define (trim-start : (-> String String))
+  (lambda (s)
+    (string-trim-start s)))
+
+; trim-end : (-> String String)
+; Remove whitespace from the end
+(define (trim-end : (-> String String))
+  (lambda (s)
+    (string-trim-end s)))
+
+; ============================================================
+; Searching and Testing
+; ============================================================
+
+; starts-with : (-> String String Bool)
+; Check if string starts with prefix
+(define (starts-with : (-> String String Bool))
+  (lambda (prefix s)
+    (string-starts-with s prefix)))
+
+; ends-with : (-> String String Bool)
+; Check if string ends with suffix
+(define (ends-with : (-> String String Bool))
+  (lambda (suffix s)
+    (string-ends-with s suffix)))
+
+; contains : (-> String String Bool)
+; Check if string contains substring
+(define (contains : (-> String String Bool))
+  (lambda (sub s)
+    (string-contains s sub)))
+
+; index-of : (-> String String (Option Int))
+; Find first index of substring, or None if not found
+(define (index-of : (-> String String (Option Int)))
+  (lambda (sub s)
+    (string-index-of s sub)))
+
+; ============================================================
+; Substrings and Characters
+; ============================================================
+
+; substring : (-> Int Int String String)
+; Extract substring from start to end index
+(define (substring : (-> Int Int String String))
+  (lambda (start end s)
+    (string-substring s start end)))
+
+; char-at : (-> Int String (Option Char))
+; Get character at index, or None if out of bounds
+(define (char-at : (-> Int String (Option Char)))
+  (lambda (idx s)
+    (string-char-at s idx)))
+
+; take : (-> Int String String)
+; Take first n characters
+(define (take : (-> Int String String))
+  (lambda (n s)
+    (string-substring s 0 n)))
+
+; drop : (-> Int String String)
+; Drop first n characters
+(define (drop : (-> Int String String))
+  (lambda (n s)
+    (string-substring s n (string-length s))))
+
+; ============================================================
+; Splitting and Joining
+; ============================================================
+
+; split : (-> String String (List String))
+; Split string by separator
+(define (split : (-> String String (List String)))
+  (lambda (sep s)
+    (string-split s sep)))
+
+; join : (-> String (List String) String)
+; Join list of strings with separator
+(define (join : (-> String (List String) String))
+  (lambda (sep parts)
+    (string-join sep parts)))
+
+; lines : (-> String (List String))
+; Split string into lines
+(define (lines : (-> String (List String)))
+  (lambda (s)
+    (string-split s "\n")))
+
+; unlines : (-> (List String) String)
+; Join lines with newlines
+(define (unlines : (-> (List String) String))
+  (lambda (parts)
+    (string-join "\n" parts)))
+
+; words : (-> String (List String))
+; Split string into words (by spaces)
+(define (words : (-> String (List String)))
+  (lambda (s)
+    (string-split s " ")))
+
+; unwords : (-> (List String) String)
+; Join words with spaces
+(define (unwords : (-> (List String) String))
+  (lambda (parts)
+    (string-join " " parts)))
+
+; ============================================================
+; Replacement
+; ============================================================
+
+; replace : (-> String String String String)
+; Replace first occurrence of a pattern
+(define (replace : (-> String String String String))
+  (lambda (from to s)
+    (string-replace s from to)))
+
+; replace-all : (-> String String String String)
+; Replace all occurrences of a pattern
+(define (replace-all : (-> String String String String))
+  (lambda (from to s)
+    (string-replace-all s from to)))
+
+; ============================================================
+; Padding
+; ============================================================
+
+; pad-start : (-> Int String String String)
+; Pad string to length from the start
+(define (pad-start : (-> Int String String String))
+  (lambda (len pad s)
+    (string-pad-start s len pad)))
+
+; pad-end : (-> Int String String String)
+; Pad string to length from the end
+(define (pad-end : (-> Int String String String))
+  (lambda (len pad s)
+    (string-pad-end s len pad)))
+
+; center : (-> Int String String)
+; Center string in given width, padding with spaces
+(define (center : (-> Int String String))
+  (lambda (width s)
+    (let ((len (string-length s)))
+      (if (>= len width)
+        s
+        (let ((padding (- width len))
+              (left (/ padding 2))
+              (right (- padding (/ padding 2))))
+          (string-append (string-repeat " " left)
+                        s (string-repeat " " right)))))))
+
+; ============================================================
+; Comparison
+; ============================================================
+
+; eq : (-> String String Bool)
+; Check if two strings are equal
+(define (eq : (-> String String Bool))
+  (lambda (a b)
+    (string= a b)))
+
+; lt : (-> String String Bool)
+; Check if first string is less than second
+(define (lt : (-> String String Bool))
+  (lambda (a b)
+    (string< a b)))
+
+; gt : (-> String String Bool)
+; Check if first string is greater than second
+(define (gt : (-> String String Bool))
+  (lambda (a b)
+    (string> a b)))
+
+; le : (-> String String Bool)
+; Check if first string is less than or equal to second
+(define (le : (-> String String Bool))
+  (lambda (a b)
+    (string<= a b)))
+
+; ge : (-> String String Bool)
+; Check if first string is greater than or equal to second
+(define (ge : (-> String String Bool))
+  (lambda (a b)
+    (string>= a b)))
+
+; ============================================================
+; Conversion
+; ============================================================
+
+; from-number : (-> Float String)
+; Convert a number to its string representation
+(define (from-number : (-> Float String))
+  (lambda (n)
+    (number->string n)))
+
+; ============================================================
+; Character Operations
+; ============================================================
+
+; to-char-code : (-> Char Int)
+; Get the Unicode codepoint of a character
+(define (to-char-code : (-> Char Int))
+  (lambda (c)
+    (char-code c)))
+
+; from-char-code : (-> Int Char)
+; Create a character from a Unicode codepoint
+(define (from-char-code : (-> Int Char))
+  (lambda (n)
+    (char-from-code n)))
+
+; to-chars : (-> String (List Char))
+; Convert a string to a list of characters
+(define (to-chars : (-> String (List Char)))
+  (lambda (s)
+    (string->chars s)))
+
+; from-chars : (-> (List Char) String)
+; Convert a list of characters to a string
+(define (from-chars : (-> (List Char) String))
+  (lambda (cs)
+    (chars->string cs)))
+
+; char-to-string : (-> Char String)
+; Convert a single character to a string
+(define (char-to-string : (-> Char String))
+  (lambda (c)
+    (char->string c)))

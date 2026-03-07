@@ -1,0 +1,5 @@
+(define (f : (-> (-> Int Int) (List Int) (List Int)))
+  (lambda (g xs)
+    (match xs
+      (Nil Nil)
+      ((Cons h t) (Cons (g h) (f g t))))))

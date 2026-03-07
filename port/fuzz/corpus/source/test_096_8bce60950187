@@ -1,0 +1,4 @@
+(define Color (ffi-struct "Color" (list (list "r" "u8"))))
+         (foreign-lib rl "libtest.dylib"
+           (ClearBackground (-> Color Void)))
+         (rl/ClearBackground (struct-new Color 255))

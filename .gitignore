@@ -8,6 +8,8 @@ dist
 
 # Rust
 port/target/
+port/fuzz/artifacts/
+port/fuzz/corpus/
 
 # code coverage
 coverage

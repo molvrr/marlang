@@ -1,0 +1,33 @@
+[package]
+name = "marlang-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+marlang-core = { path = "../crates/core" }
+marlang-types = { path = "../crates/types" }
+
+# Prevent this from interfering with workspace
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_source"
+path = "fuzz_targets/fuzz_source.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ast"
+path = "fuzz_targets/fuzz_ast.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_unify"
+path = "fuzz_targets/fuzz_unify.rs"
+doc = false

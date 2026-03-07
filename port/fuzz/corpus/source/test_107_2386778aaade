@@ -1,0 +1,3 @@
+(define unknown-def 42)
+         (define s (struct-new unknown-def 1 2))
+         (struct-get s "field")

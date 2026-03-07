@@ -1,0 +1,3 @@
+(effect IO
+               (println (-> String Unit)))
+           (lambda (x) (perform println x))

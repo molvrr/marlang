@@ -1,0 +1,1 @@
+(string-append "a" "b" "c")

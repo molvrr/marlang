@@ -1,0 +1,2 @@
+(define f (lambda (a b . rest) rest))
+           (f 1 2 3 4)

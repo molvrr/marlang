@@ -1,0 +1,3 @@
+(define (f : (-> String {} String)) (lambda (s) s))
+           } String)) (lambda (s) s))
+           (f "hel(f "hello")

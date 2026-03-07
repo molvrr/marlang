@@ -1,0 +1,3 @@
+(data (Option a) None (Some a))
+         (match (Some 42)
+           (x 99))

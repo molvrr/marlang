@@ -1,0 +1,1 @@
+(define omega (lambda (x) (x x)))

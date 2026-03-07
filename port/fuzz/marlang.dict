@@ -1,0 +1,143 @@
+# Marlang fuzzing dictionary — tokens and keywords for source-level fuzzing
+
+# Delimiters
+"("
+")"
+"{"
+"}"
+
+# Special forms
+"define"
+"lambda"
+"if"
+"let"
+"begin"
+"cond"
+"match"
+"data"
+"effect"
+"perform"
+"handle"
+"resume"
+"declare"
+"quote"
+"quasiquote"
+"import"
+"foreign"
+"foreign-lib"
+"ffi-struct"
+"ffi-call"
+"when"
+"unless"
+
+# Type annotation
+":"
+"->"
+"..."
+"|"
+"__effect_row"
+"__row_var"
+
+# Type names
+"Int"
+"Float"
+"Bool"
+"String"
+"Char"
+"Unit"
+"Option"
+"List"
+"Pair"
+"Result"
+"FFILibrary"
+"FFIStruct"
+"FFIStructDef"
+"FFIPointer"
+"Symbol"
+"Pid"
+"Channel"
+
+# Constructors
+"None"
+"Some"
+"Nil"
+"Cons"
+"MkPair"
+"Ok"
+"Err"
+
+# Boolean literals
+"#t"
+"#f"
+
+# Arithmetic builtins
+"+"
+"-"
+"*"
+"/"
+"rem"
+"abs"
+"negate"
+"+."
+"-."
+"*."
+"/."
+
+# Comparison
+"="
+"<"
+">"
+"<="
+">="
+"=."
+"<."
+">."
+"equal?"
+
+# Common functions
+"show"
+"list"
+"error"
+"string-append"
+"string-length"
+"int->float"
+
+# Effect names
+"IO"
+"Exception"
+"throw"
+"print"
+"println"
+"read-line"
+
+# Characters
+"'A'"
+"'\\n'"
+
+# Variable names
+"x"
+"y"
+"z"
+"f"
+"g"
+"n"
+"a"
+"b"
+"k"
+"_"
+
+# Common patterns
+"(lambda (x) x)"
+"(define (f : Int) 42)"
+"(if #t 1 2)"
+"(let ((x 1)) x)"
+"(match x (None 0) ((Some v) v))"
+"(data (MyType a) (MyCon a))"
+"(effect MyEff (my-op (-> Int Unit)))"
+"(perform throw \"err\")"
+"(handle expr ((op k) -> (resume k val)))"
+"(begin)"
+"(-> Int Int)"
+"(-> String {} String)"
+"(-> String {IO} Unit)"
+"(-> String {IO | e} Unit)"

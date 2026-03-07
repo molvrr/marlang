@@ -1,0 +1,72 @@
+; IO module - Basic IO operations using the effect system
+;
+; This module provides effectful IO operations. To use them, you must
+; wrap your effectful code in a handler that provides the actual IO.
+;
+; Example usage:
+;   (import "std:io" as io)
+;
+;   (handle
+;     (begin
+;       (io/println "Hello, world!")
+;       (io/print "Enter your name: ")
+;       (let ((name (io/read-line)))
+;         (io/println (string-append "Hello, " name "!"))))
+;     ((print msg k) -> (begin (display msg) (resume k nil)))
+;     ((println msg k) -> (begin (displayln msg) (resume k nil)))
+;     ((read-line k) -> (resume k (read-string))))
+;
+; For file operations, the handler must implement read-file and write-file.
+
+; === IO Effect ===
+;
+; The IO effect provides operations for console and file IO.
+; print and println are polymorphic (work on any type via show).
+
+(effect IO
+  (print (-> a Unit))
+  (println (-> a Unit))
+  (read-line (-> Unit String))
+  (read-file (-> String (Result String String)))
+  (write-file (-> String String (Result String Unit))))
+
+; === Console IO Operations ===
+
+; print : forall a. (-> a {IO} Unit)
+; Output a value without a newline
+(define print (lambda (msg) (perform print msg)))
+
+; println : forall a. (-> a {IO} Unit)
+; Output a value with a newline
+(define println (lambda (msg) (perform println msg)))
+
+; read-line : (-> Unit {IO} String)
+; Read a line of input from stdin
+(define read-line (lambda () (perform read-line)))
+
+; === File IO Operations ===
+;
+; Raw operations return (Result String a). Throwing variants (read-file!, write-file!)
+; unwrap the Result and throw on error via the Exception effect.
+
+; read-file : (-> String {IO} (Result String String))
+; Read the entire contents of a file. Returns (Ok content) or (Err msg).
+(define read-file (lambda (path) (perform read-file path)))
+
+; read-file! : (-> String {IO, Exception} String)
+; Read the entire contents of a file. Throws on error.
+(define read-file! (lambda (path)
+  (match (read-file path)
+    ((Ok content) content)
+    ((Err msg) (raise msg)))))
+
+; write-file : (-> String String {IO} (Result String Unit))
+; Write a string to a file (overwrites existing content). Returns (Ok nil) or (Err msg).
+(define write-file (lambda (path content) (perform write-file path content)))
+
+; write-file! : (-> String String {IO, Exception} Unit)
+; Write a string to a file. Throws on error.
+(define write-file! (lambda (path content)
+  (match (write-file path content)
+    ((Ok _) nil)
+    ((Err msg) (raise msg)))))

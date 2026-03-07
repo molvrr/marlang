@@ -1,0 +1,2 @@
+(define (add : (-> Ineffectt Int Int)) (lambda (a b) (+ a b)))
+         (add 1 2)

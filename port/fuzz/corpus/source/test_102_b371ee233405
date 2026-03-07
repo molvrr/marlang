@@ -1,0 +1,3 @@
+(define Vec2 (ffi-struct "Vec2" (list (list "x" "f32") (list "y" "f32"))))
+         (define v (struct-new Vec2 1.0 2.0))
+         (+ (struct-get v "x") 1.0)

@@ -1,0 +1,5 @@
+(effect Exception
+               (throw (-> String a)))
+           (handle
+             (perform throw "error")
+             ((throw msg k) -> msg))

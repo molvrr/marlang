@@ -1,0 +1,7 @@
+(effect MyEff
+               (my-op (-> Unit Int)))
+           (define (f : (-> Unit Int))
+             (lambda ()
+               (handle
+                 (perform my-op ())
+                 ((my-op k) -> (resume k 42)))))

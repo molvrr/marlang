@@ -3,9 +3,63 @@ use crate::env::*;
 use crate::errors::TypeError;
 use std::collections::HashSet;
 
+/// Maximum recursion depth for unify/match to prevent runaway expansion
+/// from adversarial type inputs (e.g. deeply nested mu-types).
+const UNIFY_MAX_DEPTH: usize = 64;
+
 // Occurs check: does variable v occur in type t?
 fn occurs(v: &str, t: &Type) -> bool {
     free_type_vars(t).contains(v)
+}
+
+/// Count the number of nodes in a type tree. Returns early once count exceeds
+/// the threshold to avoid walking enormous types.
+fn type_node_count(t: &Type) -> usize {
+    type_node_count_bounded(t, 65)
+}
+
+fn type_node_count_bounded(t: &Type, limit: usize) -> usize {
+    if limit == 0 {
+        return 1;
+    }
+    match t {
+        Type::Var(_) | Type::Const(_) => 1,
+        Type::App { constructor, args } => {
+            let mut count = 1 + type_node_count_bounded(constructor, limit - 1);
+            for a in args {
+                if count >= limit {
+                    return count;
+                }
+                count += type_node_count_bounded(a, limit - count);
+            }
+            count
+        }
+        Type::Arrow {
+            params,
+            rest,
+            result,
+            ..
+        } => {
+            let mut count = 1;
+            for p in params {
+                if count >= limit {
+                    return count;
+                }
+                count += type_node_count_bounded(p, limit - count);
+            }
+            if let Some(r) = rest
+                && count < limit
+            {
+                count += type_node_count_bounded(r, limit - count);
+            }
+            if count < limit {
+                count += type_node_count_bounded(result, limit - count);
+            }
+            count
+        }
+        Type::Rec { body, .. } => 1 + type_node_count_bounded(body, limit - 1),
+        Type::EffectRowRef(_) => 1,
+    }
 }
 
 // Unroll a mu-type: (μ a. T) => T[μ a. T / a]
@@ -23,21 +77,35 @@ fn unify_internal(
     t1: &Type,
     t2: &Type,
     seen: &mut HashSet<String>,
+    depth: usize,
 ) -> Result<Substitution, TypeError> {
-    // Check for cycles
-    let key = format!("{}~{}", format_type(t1), format_type(t2));
-    let key_reverse = format!("{}~{}", format_type(t2), format_type(t1));
-    if seen.contains(&key) || seen.contains(&key_reverse) {
-        return Ok(empty_subst());
+    // Depth limit to prevent exponential blowup on adversarial types
+    if depth >= UNIFY_MAX_DEPTH {
+        return Err(TypeError::UnificationError {
+            t1: t1.clone(),
+            t2: t2.clone(),
+            context: Some("recursion limit exceeded during unification".to_string()),
+            span: None,
+        });
     }
-    seen.insert(key);
+
+    // Check for cycles — only use format_type when types are small enough
+    // to avoid O(n) formatting on exponentially-grown types.
+    if type_node_count(t1) + type_node_count(t2) <= 64 {
+        let key = format!("{}~{}", format_type(t1), format_type(t2));
+        let key_reverse = format!("{}~{}", format_type(t2), format_type(t1));
+        if seen.contains(&key) || seen.contains(&key_reverse) {
+            return Ok(empty_subst());
+        }
+        seen.insert(key);
+    }
 
     // Handle mu-types by unrolling
     if let Type::Rec { .. } = t1 {
-        return unify_internal(&unroll_mu(t1), t2, seen);
+        return unify_internal(&unroll_mu(t1), t2, seen, depth + 1);
     }
     if let Type::Rec { .. } = t2 {
-        return unify_internal(t1, &unroll_mu(t2), seen);
+        return unify_internal(t1, &unroll_mu(t2), seen, depth + 1);
     }
 
     // Type variable cases
@@ -105,12 +173,12 @@ fn unify_internal(
             });
         }
 
-        let s1 = unify_internal(c1, c2, seen)?;
+        let s1 = unify_internal(c1, c2, seen, depth + 1)?;
         let mut subst = s1;
         for i in 0..a1.len() {
             let arg1 = apply_subst(&subst, &a1[i]);
             let arg2 = apply_subst(&subst, &a2[i]);
-            let s = unify_internal(&arg1, &arg2, seen)?;
+            let s = unify_internal(&arg1, &arg2, seen, depth + 1)?;
             subst = compose_subst(&s, &subst);
         }
         return Ok(subst);
@@ -168,7 +236,7 @@ fn unify_internal(
                 for i in 0..p1.len() {
                     let pa = apply_subst(&subst, &p1[i]);
                     let pb = apply_subst(&subst, &p2[i]);
-                    let s = unify_internal(&pa, &pb, seen)?;
+                    let s = unify_internal(&pa, &pb, seen, depth + 1)?;
                     subst = compose_subst(&s, &subst);
                 }
             }
@@ -185,12 +253,12 @@ fn unify_internal(
                 for i in 0..p1.len() {
                     let pa = apply_subst(&subst, &p1[i]);
                     let pb = apply_subst(&subst, &p2[i]);
-                    let s = unify_internal(&pa, &pb, seen)?;
+                    let s = unify_internal(&pa, &pb, seen, depth + 1)?;
                     subst = compose_subst(&s, &subst);
                 }
                 let ra = apply_subst(&subst, rt1);
                 let rb = apply_subst(&subst, rt2);
-                let s = unify_internal(&ra, &rb, seen)?;
+                let s = unify_internal(&ra, &rb, seen, depth + 1)?;
                 subst = compose_subst(&s, &subst);
             }
             // t1 is variadic, t2 is not: t2 must have at least p1.len() params,
@@ -208,14 +276,14 @@ fn unify_internal(
                 for i in 0..p1.len() {
                     let pa = apply_subst(&subst, &p1[i]);
                     let pb = apply_subst(&subst, &p2[i]);
-                    let s = unify_internal(&pa, &pb, seen)?;
+                    let s = unify_internal(&pa, &pb, seen, depth + 1)?;
                     subst = compose_subst(&s, &subst);
                 }
                 // Extra params in t2 unify with rest type
                 for extra_param in &p2[p1.len()..] {
                     let rest_ty = apply_subst(&subst, rt1);
                     let pb = apply_subst(&subst, extra_param);
-                    let s = unify_internal(&rest_ty, &pb, seen)?;
+                    let s = unify_internal(&rest_ty, &pb, seen, depth + 1)?;
                     subst = compose_subst(&s, &subst);
                 }
             }
@@ -234,14 +302,14 @@ fn unify_internal(
                 for i in 0..p2.len() {
                     let pa = apply_subst(&subst, &p1[i]);
                     let pb = apply_subst(&subst, &p2[i]);
-                    let s = unify_internal(&pa, &pb, seen)?;
+                    let s = unify_internal(&pa, &pb, seen, depth + 1)?;
                     subst = compose_subst(&s, &subst);
                 }
                 // Extra params in t1 unify with rest type
                 for extra_param in &p1[p2.len()..] {
                     let pa = apply_subst(&subst, extra_param);
                     let rest_ty = apply_subst(&subst, rt2);
-                    let s = unify_internal(&pa, &rest_ty, seen)?;
+                    let s = unify_internal(&pa, &rest_ty, seen, depth + 1)?;
                     subst = compose_subst(&s, &subst);
                 }
             }
@@ -250,7 +318,7 @@ fn unify_internal(
         // Unify result types
         let ra = apply_subst(&subst, r1);
         let rb = apply_subst(&subst, r2);
-        let s = unify_internal(&ra, &rb, seen)?;
+        let s = unify_internal(&ra, &rb, seen, depth + 1)?;
         subst = compose_subst(&s, &subst);
 
         // Unify effect rows — None is treated as pure (Closed([]))
@@ -278,7 +346,7 @@ fn unify_internal(
 
 // Unify two types
 pub fn unify(t1: &Type, t2: &Type) -> Result<Substitution, TypeError> {
-    unify_internal(t1, t2, &mut HashSet::new())
+    unify_internal(t1, t2, &mut HashSet::new(), 0)
 }
 
 // Unify with context for better error messages
@@ -313,12 +381,41 @@ pub fn unify_many(pairs: &[(Type, Type)]) -> Result<Substitution, TypeError> {
 
 // Match: like unify but only substitutes variables in the first type
 pub fn match_types(pattern: &Type, target: &Type) -> Result<Substitution, TypeError> {
+    match_types_internal(pattern, target, &mut HashSet::new(), 0)
+}
+
+// Internal match with cycle detection and depth limit
+fn match_types_internal(
+    pattern: &Type,
+    target: &Type,
+    seen: &mut HashSet<String>,
+    depth: usize,
+) -> Result<Substitution, TypeError> {
+    // Depth limit to prevent exponential blowup
+    if depth >= UNIFY_MAX_DEPTH {
+        return Err(TypeError::UnificationError {
+            t1: pattern.clone(),
+            t2: target.clone(),
+            context: Some("recursion limit exceeded during type matching".to_string()),
+            span: None,
+        });
+    }
+
+    // Check for cycles — only when types are small enough to format cheaply
+    if type_node_count(pattern) + type_node_count(target) <= 64 {
+        let key = format!("{}~{}", format_type(pattern), format_type(target));
+        if seen.contains(&key) {
+            return Ok(empty_subst());
+        }
+        seen.insert(key);
+    }
+
     // Handle mu-types by unrolling
     if let Type::Rec { .. } = pattern {
-        return match_types(&unroll_mu(pattern), target);
+        return match_types_internal(&unroll_mu(pattern), target, seen, depth + 1);
     }
     if let Type::Rec { .. } = target {
-        return match_types(pattern, &unroll_mu(target));
+        return match_types_internal(pattern, &unroll_mu(target), seen, depth + 1);
     }
 
     if let Type::Var(name) = pattern {
@@ -366,11 +463,11 @@ pub fn match_types(pattern: &Type, target: &Type) -> Result<Substitution, TypeEr
             });
         }
 
-        let mut subst = match_types(c1, c2)?;
+        let mut subst = match_types_internal(c1, c2, seen, depth + 1)?;
         for i in 0..a1.len() {
             let p = apply_subst(&subst, &a1[i]);
             let t = &a2[i];
-            let s = match_types(&p, t)?;
+            let s = match_types_internal(&p, t, seen, depth + 1)?;
             // Check consistency
             for (v, ty) in &s {
                 if let Some(existing) = subst.get(v) {
@@ -414,7 +511,7 @@ pub fn match_types(pattern: &Type, target: &Type) -> Result<Substitution, TypeEr
                 for i in 0..p1.len() {
                     let p = apply_subst(&subst, &p1[i]);
                     let t = &p2[i];
-                    let s = match_types(&p, t)?;
+                    let s = match_types_internal(&p, t, seen, depth + 1)?;
                     subst = compose_subst(&s, &subst);
                 }
             }
@@ -430,12 +527,12 @@ pub fn match_types(pattern: &Type, target: &Type) -> Result<Substitution, TypeEr
                 for i in 0..p1.len() {
                     let p = apply_subst(&subst, &p1[i]);
                     let t = &p2[i];
-                    let s = match_types(&p, t)?;
+                    let s = match_types_internal(&p, t, seen, depth + 1)?;
                     subst = compose_subst(&s, &subst);
                 }
                 for extra_param in &p2[p1.len()..] {
                     let rest_ty = apply_subst(&subst, rt1);
-                    let s = match_types(&rest_ty, extra_param)?;
+                    let s = match_types_internal(&rest_ty, extra_param, seen, depth + 1)?;
                     subst = compose_subst(&s, &subst);
                 }
             }
@@ -451,12 +548,12 @@ pub fn match_types(pattern: &Type, target: &Type) -> Result<Substitution, TypeEr
                 for i in 0..p2.len() {
                     let p = apply_subst(&subst, &p1[i]);
                     let t = &p2[i];
-                    let s = match_types(&p, t)?;
+                    let s = match_types_internal(&p, t, seen, depth + 1)?;
                     subst = compose_subst(&s, &subst);
                 }
                 for extra_param in &p1[p2.len()..] {
                     let p = apply_subst(&subst, extra_param);
-                    let s = match_types(&p, rt2)?;
+                    let s = match_types_internal(&p, rt2, seen, depth + 1)?;
                     subst = compose_subst(&s, &subst);
                 }
             }
@@ -472,17 +569,17 @@ pub fn match_types(pattern: &Type, target: &Type) -> Result<Substitution, TypeEr
                 for i in 0..p1.len() {
                     let p = apply_subst(&subst, &p1[i]);
                     let t = &p2[i];
-                    let s = match_types(&p, t)?;
+                    let s = match_types_internal(&p, t, seen, depth + 1)?;
                     subst = compose_subst(&s, &subst);
                 }
                 let rp = apply_subst(&subst, rt1);
-                let s = match_types(&rp, rt2)?;
+                let s = match_types_internal(&rp, rt2, seen, depth + 1)?;
                 subst = compose_subst(&s, &subst);
             }
         }
 
         let pr = apply_subst(&subst, r1);
-        let s = match_types(&pr, r2)?;
+        let s = match_types_internal(&pr, r2, seen, depth + 1)?;
         return Ok(compose_subst(&s, &subst));
     }
 

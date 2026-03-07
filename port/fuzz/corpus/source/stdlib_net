@@ -1,0 +1,127 @@
+; Net module - TCP networking using the effect system
+;
+; All TCP operations are effects handled by the scheduler (run-fibers-parallel).
+; TCP effects are NOT available in the single-threaded scheduler (run-fibers).
+;
+; Failable operations (connect, listen, send) return (Result String a) at the
+; effect level. This module provides two sets of wrappers:
+;
+;   - Throwing variants (connect, listen, send): unwrap the Result and
+;     raise on error. The default throw handler crashes the fiber.
+;
+;   - Try variants (try-connect, try-listen, try-send): return the Result
+;     directly for the caller to match on.
+;
+; Nullable operations (accept, recv) return (Option a):
+;   accept returns (Some socket) or None when the listener is closed.
+;   recv returns (Some data) or None on EOF / remote close.
+;
+; Example usage (throwing):
+;   (import "std:net" as net)
+;   (import "std:io" as io)
+;
+;   (run-fibers-parallel (lambda ()
+;     (let ((sock (net/connect "127.0.0.1" 8080)))
+;       (net/send sock "hello\n")
+;       (match (net/recv sock)
+;         ((Some resp) (io/println resp))
+;         (None (io/println "connection closed")))
+;       (net/close sock)))
+;     2)
+;
+; Example usage (try):
+;   (import "std:net" as net)
+;   (import "std:io" as io)
+;
+;   (run-fibers-parallel (lambda ()
+;     (match (net/try-connect "127.0.0.1" 8080)
+;       ((Ok sock)
+;         (net/send sock "hello\n")
+;         (net/close sock))
+;       ((Err msg)
+;         (io/println (string-append "connect failed: " msg)))))
+;     2)
+
+; === TCP Effect ===
+;
+; Raw effect signatures — failable operations return (Result String a).
+; accept returns (Option TcpSocket) — None when listener is closed.
+; recv returns (Option String) — None on EOF / remote close.
+; close always succeeds.
+
+(effect Tcp
+  (tcp-connect (-> String Int (Result String TcpSocket)))
+  (tcp-listen  (-> Int (Result String TcpListener)))
+  (tcp-accept  (-> TcpListener (Option TcpSocket)))
+  (tcp-send    (-> TcpSocket String (Result String Unit)))
+  (tcp-recv    (-> TcpSocket (Option String)))
+  (tcp-close   (-> TcpSocket Unit))
+  (tcp-close-listener (-> TcpListener Unit)))
+
+; === Try TCP Operations ===
+;
+; These return (Result String a) directly for the caller to match on.
+
+; try-connect : (-> String Int {Tcp} (Result String TcpSocket))
+; Connect to a TCP server at host:port. Returns (Ok socket) or (Err msg).
+(define try-connect (lambda (host port)
+  (perform tcp-connect host port)))
+
+; try-listen : (-> Int {Tcp} (Result String TcpListener))
+; Start listening on port. Returns (Ok listener) or (Err msg).
+(define try-listen (lambda (port)
+  (perform tcp-listen port)))
+
+; try-send : (-> TcpSocket String {Tcp} (Result String Unit))
+; Send data over a TCP socket. Returns (Ok nil) or (Err msg).
+(define try-send (lambda (sock data)
+  (perform tcp-send sock data)))
+
+; === Internal helper ===
+
+(define unwrap-or-throw (lambda (result label)
+  (match result
+    ((Ok v) v)
+    ((Err msg) (raise (string-append label ": " msg))))))
+
+; === Throwing TCP Operations ===
+;
+; These unwrap the Result and throw on error.
+; The default throw handler crashes the fiber.
+
+; connect : (-> String Int {Tcp, Exception} TcpSocket)
+; Connect to a TCP server at host:port. Throws on failure.
+(define connect (lambda (host port)
+  (unwrap-or-throw (try-connect host port) "tcp-connect")))
+
+; listen : (-> Int {Tcp, Exception} TcpListener)
+; Start listening for TCP connections on port. Throws on failure.
+(define listen (lambda (port)
+  (unwrap-or-throw (try-listen port) "tcp-listen")))
+
+; send : (-> TcpSocket String {Tcp, Exception} Unit)
+; Send data over a TCP socket. Throws on failure.
+(define send (lambda (sock data)
+  (unwrap-or-throw (try-send sock data) "tcp-send")))
+
+; === Non-failable TCP Operations ===
+;
+; These are the same for both throwing and try variants.
+
+; accept : (-> TcpListener {Tcp} (Option TcpSocket))
+; Accept the next incoming connection (blocks until one arrives).
+; Returns None if the listener has been closed.
+(define accept (lambda (listener) (perform tcp-accept listener)))
+
+; recv : (-> TcpSocket {Tcp} (Option String))
+; Receive data from a TCP socket (blocks until data arrives).
+; Returns None on EOF or remote close.
+(define recv (lambda (sock) (perform tcp-recv sock)))
+
+; close : (-> TcpSocket {Tcp} Unit)
+; Close a TCP socket.
+(define close (lambda (sock) (perform tcp-close sock)))
+
+; close-listener : (-> TcpListener {Tcp} Unit)
+; Close a TCP listener.
+(define close-listener (lambda (listener) (perform tcp-close-listener listener)))

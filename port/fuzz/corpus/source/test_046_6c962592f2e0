@@ -1,0 +1,2 @@
+(let ((id (lambda (x) x)))
+           (begin (id 1) (id "hello")))

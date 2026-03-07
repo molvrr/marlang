@@ -1,0 +1,83 @@
+; Channels (CSP) Example
+;
+; Channels provide synchronous communication between fibers,
+; inspired by Go channels and Communicating Sequential Processes.
+;
+; Run with: cargo run -p marlang-cli -- run examples/channels.mar
+
+(import "std:concurrent" as conc)
+(import "std:io" as io)
+
+; === Example 1: Unbuffered Channel ===
+;
+; Sender blocks until a receiver is ready (and vice versa)
+
+(define consume (lambda (ch)
+  (match (conc/chan-recv ch)
+    ((None) (io/println "done"))
+    ((Some v)
+      (begin
+        (io/println v)
+        (consume ch))))))
+
+(run-fibers (lambda ()
+  (let ((ch (conc/chan-new 0)))
+
+    ; Producer: sends three values then closes
+    (conc/spawn (lambda ()
+      (conc/chan-send ch 10)
+      (conc/chan-send ch 20)
+      (conc/chan-send ch 30)
+      (conc/chan-close ch)))
+
+    ; Consumer: receives until channel is closed (returns None)
+    (consume ch))))
+
+; Output:
+;   10
+;   20
+;   30
+;   done
+
+
+; === Example 2: Fan-Out / Fan-In ===
+;
+; Multiple workers read from one channel, results collected in another
+
+(define recv! (lambda (ch)
+  (match (conc/chan-recv ch)
+    ((Some v) v)
+    ((None) (raise "channel closed unexpectedly")))))
+
+(run-fibers (lambda ()
+  (let ((jobs (conc/chan-new 10))
+        (results (conc/chan-new 10)))
+
+    ; Spawn 3 workers
+    (conc/spawn (lambda ()
+      (let ((j (recv! jobs)))
+        (conc/chan-send results (* j j))
+        nil)))
+    (conc/spawn (lambda ()
+      (let ((j (recv! jobs)))
+        (conc/chan-send results (* j j))
+        nil)))
+    (conc/spawn (lambda ()
+      (let ((j (recv! jobs)))
+        (conc/chan-send results (* j j))
+        nil)))
+
+    ; Send 3 jobs
+    (conc/chan-send jobs 2)
+    (conc/chan-send jobs 3)
+    (conc/chan-send jobs 4)
+
+    ; Collect results
+    (let ((a (recv! results))
+          (b (recv! results))
+          (c (recv! results)))
+      (io/print "sum of squares: ")
+      (io/println (+ a (+ b c)))))))
+
+; Output:
+;   sum of squares: 29

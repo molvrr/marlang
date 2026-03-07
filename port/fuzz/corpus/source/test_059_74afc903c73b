@@ -1,0 +1,4 @@
+(data (List a) Nil (Cons a (List a)))
+         (define head (lambda (xs)
+           (match xs
+             ((Cons h t) h))))

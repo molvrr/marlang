@@ -1,0 +1,7 @@
+(define unknown-def 42)
+         (struct-new unknown-def 1 )
+    (begin
+      (perform println "start")
+      (let ((result (thunk)))
+        (begin
+          (perform print2 3)

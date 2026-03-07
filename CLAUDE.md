@@ -148,6 +148,16 @@ cargo run -p marlang-cli -- expand file.mar --clean
 ```
 Check that the expansion looks correct before running or type-checking. This catches macro bugs early — the expanded form is exactly what the compiler and type checker will see.
 
+### After changes to the type checker or parser
+Run the fuzz targets briefly to check for crashes:
+```bash
+cd port/fuzz
+cargo fuzz run fuzz_source corpus/source/ -- -max_total_time=30 -dict=marlang.dict
+cargo fuzz run fuzz_ast -- -max_total_time=30
+cargo fuzz run fuzz_unify -- -max_total_time=30
+```
+Any crash is a bug — the type checker and unifier should never panic, only return `Ok` or `Err`. Investigate and fix crashes before considering the task done.
+
 ### After any changes
 Run the benchmarks to make sure there is no performance regression:
 ```bash

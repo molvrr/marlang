@@ -1,0 +1,90 @@
+; Result type and utilities
+(data (Result e a) (Err e) (Ok a))
+
+; map : (-> (-> a b) (Result e a) (Result e b))
+; Apply a function to the success value, leaving errors unchanged
+(define (map : (-> (-> a b) (Result e a) (Result e b)))
+  (lambda (f res)
+    (match res
+      ((Err e) (Err e))
+      ((Ok x) (Ok (f x))))))
+
+; map-err : (-> (-> e f) (Result e a) (Result f a))
+; Apply a function to the error value, leaving success unchanged
+(define (map-err : (-> (-> e f) (Result e a) (Result f a)))
+  (lambda (f res)
+    (match res
+      ((Err e) (Err (f e)))
+      ((Ok x) (Ok x)))))
+
+; flat-map : (-> (-> a (Result e b)) (Result e a) (Result e b))
+; Apply a function that returns a Result, flattening the result
+(define (flat-map : (-> (-> a (Result e b)) (Result e a) (Result e b)))
+  (lambda (f res)
+    (match res
+      ((Err e) (Err e))
+      ((Ok x) (f x)))))
+
+; unwrap-or : (-> a (Result e a) a)
+; Get the success value, or return a default
+(define (unwrap-or : (-> a (Result e a) a))
+  (lambda (default res)
+    (match res
+      ((Err _) default)
+      ((Ok x) x))))
+
+; unwrap-or-else : (-> (-> e a) (Result e a) a)
+; Get the success value, or compute from the error
+(define (unwrap-or-else : (-> (-> e a) (Result e a) a))
+  (lambda (f res)
+    (match res
+      ((Err e) (f e))
+      ((Ok x) x))))
+
+; is-ok : (-> (Result e a) Bool)
+; Check if the Result is a success
+(define (is-ok : (-> (Result e a) Bool))
+  (lambda (res)
+    (match res
+      ((Err _) #f)
+      ((Ok _) #t))))
+
+; is-err : (-> (Result e a) Bool)
+; Check if the Result is an error
+(define (is-err : (-> (Result e a) Bool))
+  (lambda (res)
+    (match res
+      ((Err _) #t)
+      ((Ok _) #f))))
+
+; ok : (-> (Result e a) (Option a))
+; Convert to Option, discarding the error
+(define (ok : (-> (Result e a) (Option a)))
+  (lambda (res)
+    (match res
+      ((Err _) None)
+      ((Ok x) (Some x)))))
+
+; err : (-> (Result e a) (Option e))
+; Convert to Option of the error, discarding success
+(define (err : (-> (Result e a) (Option e)))
+  (lambda (res)
+    (match res
+      ((Err e) (Some e))
+      ((Ok _) None))))
+
+; and-then : (-> (Result e b) (Result e a) (Result e b))
+; Return the second result if the first is Ok, otherwise propagate error
+(define (and-then : (-> (Result e b) (Result e a) (Result e b)))
+  (lambda (other res)
+    (match res
+      ((Err e) (Err e))
+      ((Ok _) other))))
+
+; or-else : (-> (Result e a) (Result e a) (Result e a))
+; Return the first result if it's Ok, otherwise the second
+(define (or-else : (-> (Result e a) (Result e a) (Result e a)))
+  (lambda (other res)
+    (match res
+      ((Err _) other)
+      ((Ok x) (Ok x)))))

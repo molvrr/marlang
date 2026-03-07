@@ -1,0 +1,145 @@
+; TCP Networking Examples
+;
+; TCP operations are effects handled by the multi-threaded scheduler.
+; They require run-fibers-parallel (not run-fibers).
+;
+; Run with: cargo run -p marlang-cli -- run examples/tcp.mar
+
+(import "std:concurrent" as conc)
+(import "std:io" as io)
+(import "std:net" as net)
+
+; === Example 1: Echo Server ===
+;
+; Server accepts one connection, echoes data back, then shuts down.
+
+(run-fibers-parallel (lambda ()
+  (let ((listener (net/listen 9001)))
+
+    ; Server fiber: accept one connection, echo, close
+    (conc/spawn (lambda ()
+      (match (net/accept listener)
+        (None nil)
+        ((Some client)
+          (begin
+            (match (net/recv client)
+              (None nil)
+              ((Some data)
+                (net/send client (string-append "echo: " data))))
+            (net/close client))))))
+
+    ; Give server time to start accepting
+    (conc/yield)
+    (conc/yield)
+
+    ; Client: connect, send, receive, print
+    (let ((sock (net/connect "127.0.0.1" 9001)))
+      (net/send sock "hello from marlang!")
+      (match (net/recv sock)
+        (None nil)
+        ((Some resp) (io/println resp)))
+      (net/close sock))
+
+    (net/close-listener listener)))
+  2)
+
+; Output:
+;   echo: hello from marlang!
+
+
+; === Example 2: Error Handling with try-connect ===
+;
+; try-connect returns a Result instead of crashing on failure.
+
+(run-fibers-parallel (lambda ()
+  (match (net/try-connect "127.0.0.1" 19999)
+    ((Ok sock)
+      (begin
+        (io/println "connected (unexpected)")
+        (net/close sock)))
+    ((Err msg)
+      (io/println (string-append "expected error: " msg)))))
+  2)
+
+; Output:
+;   expected error: tcp-connect: Connection refused (os error 61)
+
+
+; === Example 3: Multi-Client Server ===
+;
+; Server handles 3 connections sequentially.
+
+(run-fibers-parallel (lambda ()
+  (let ((listener (net/listen 9002)))
+
+    ; Server fiber: handle 3 connections
+    (conc/spawn (lambda ()
+      (match (net/accept listener)
+        (None nil)
+        ((Some c1)
+          (begin
+            (match (net/recv c1)
+              (None nil)
+              ((Some d1)
+                (net/send c1 (string-append "reply-1: " d1))))
+            (net/close c1))))
+      (match (net/accept listener)
+        (None nil)
+        ((Some c2)
+          (begin
+            (match (net/recv c2)
+              (None nil)
+              ((Some d2)
+                (net/send c2 (string-append "reply-2: " d2))))
+            (net/close c2))))
+      (match (net/accept listener)
+        (None nil)
+        ((Some c3)
+          (begin
+            (match (net/recv c3)
+              (None nil)
+              ((Some d3)
+                (net/send c3 (string-append "reply-3: " d3))))
+            (net/close c3))))))
+
+    (conc/yield)
+    (conc/yield)
+
+    ; Three clients connect sequentially
+    (let ((do-request (lambda (msg)
+            (let ((sock (net/connect "127.0.0.1" 9002)))
+              (net/send sock msg)
+              (match (net/recv sock)
+                (None nil)
+                ((Some resp) (io/println resp)))
+              (net/close sock)))))
+      (do-request "alice")
+      (do-request "bob")
+      (do-request "carol"))
+
+    (net/close-listener listener)))
+  2)
+
+; Output:
+;   reply-1: alice
+;   reply-2: bob
+;   reply-3: carol
+
+
+; === Example 4: Duplicate Listen Error ===
+;
+; Demonstrates try-listen for handling bind errors gracefully.
+
+(run-fibers-parallel (lambda ()
+  (let ((listener (net/listen 9003)))
+    ; Try to bind the same port again
+    (match (net/try-listen 9003)
+      ((Ok _)
+        (io/println "bound twice (unexpected)"))
+      ((Err msg)
+        (io/println (string-append "bind error: " msg))))
+    (net/close-listener listener)))
+  2)
+
+; Output:
+;   bind error: tcp-listen: Address already in use (os error 48)

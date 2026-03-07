@@ -1,0 +1,7 @@
+(data (Option a) None (Some a))
+         (define unwrap
+           (lambda (opt)
+             (match opt
+               (None 0)
+               ((Some v) v))))
+         (unwrap (Some 42))

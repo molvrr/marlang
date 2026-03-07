@@ -1,0 +1,2 @@
+(handle 42
+               ((unknown-op k) -> 0))

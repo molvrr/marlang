@@ -1,0 +1,7 @@
+(data (Tree a) (Leaf a) (Node (Tree a) (Tree a)))
+(define (tree-sum : (-> (Tree Int) Int)),
+  (lambda (t)
+    (match t
+      ((Leaf n) n)
+      ((Node l r) (+ (tree-sum l) (tree-sum r))))))
+(tree-sum (Node (Leaf 1) (Node (Leaf 2) (Leaf 3))))

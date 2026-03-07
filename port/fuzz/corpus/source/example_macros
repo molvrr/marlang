@@ -1,0 +1,125 @@
+; Hygienic Macros Example
+;
+; Marlang supports Lisp-style macros with defmacro, quasiquote,
+; and automatic mark-based hygiene. Macros run at expansion time,
+; transforming code before compilation.
+
+; === Example 1: Built-in Control Flow Macros ===
+;
+; `when` and `unless` are built-in macros — no import needed.
+; They execute the body for side effects and always return unit.
+
+(when #t (begin (+ 1 1) nil))
+; => nil (body runs, result discarded)
+
+(when #f (error "never reached"))
+; => nil (body skipped)
+
+
+; === Example 2: Short-Circuit Logic ===
+;
+; `and2` short-circuits: if the first is false, return 0; otherwise
+; evaluate the second. Both branches must agree on type.
+
+(defmacro and2 (a b)
+  `(if ,a ,b 0))
+
+(and2 #t 42)
+; => 42
+
+(and2 #f 99)
+; => 0 (short-circuited)
+
+
+; === Example 3: Let Shorthand ===
+;
+; `let1` binds a single variable — less nesting than `let`
+
+(defmacro let1 (name value body)
+  `(let ((,name ,value)) ,body))
+
+(let1 x 10
+  (+ x 5))
+; => 15
+
+
+; === Example 4: Automatic Hygiene ===
+;
+; The key feature: macro-introduced bindings never capture
+; variables from the call site, even if they share names.
+
+(defmacro my-add (a b)
+  `(let ((tmp ,a))
+     (+ tmp ,b)))
+
+; The macro introduces `tmp` internally.
+; Even though we also have a `tmp` at the call site,
+; they don't interfere — hygiene keeps them distinct.
+
+(let ((tmp 100))
+  (my-add 1 tmp))
+; => 101 (uses caller's tmp=100, not the macro's tmp=1)
+
+; Without hygiene, the macro's (let ((tmp 1)) ... (+ tmp tmp))
+; would shadow the caller's tmp, giving 1+1=2 instead.
+
+
+; === Example 5: Macros with Pattern Matching ===
+;
+; Macros can generate match expressions over ADTs
+
+(data (Maybe a) Nothing (Just a))
+
+(defmacro with-default (default opt)
+  `(match ,opt
+     ((Just v) v)
+     (Nothing ,default)))
+
+(with-default 0 (Just 42))
+; => 42
+
+(with-default 0 Nothing)
+; => 0
+
+
+; === Example 6: Composing Macros ===
+;
+; Macros can invoke other macros in their expansion.
+; Here `when-positive` uses the built-in `when`.
+
+(defmacro when-positive (n body)
+  `(when (> ,n 0) ,body))
+
+(define result 0)
+(when-positive 5 (define result (+ 10 20)))
+result
+; => 30
+
+
+; === Example 7: Quoting ===
+;
+; Quote builds data structures from code.
+; Symbols become runtime Symbol values, lists become Cons/Nil.
+
+(define my-list '(a b c))
+(car my-list)
+; => a (a Symbol value)
+
+(symbol? (car my-list))
+; => #t
+
+(cdr my-list)
+; => (Cons b (Cons c Nil))
+
+
+; === Example 8: Quasiquote for Templates ===
+;
+; Quasiquote (`) creates templates where `,` unquotes.
+
+(define name 'world)
+`(hello ,name)
+; => (Cons hello (Cons world Nil))
+
+; Without the comma, symbols are quoted literally:
+`(hello name)
+; => (Cons hello (Cons name Nil))

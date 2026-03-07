@@ -1,0 +1,9 @@
+(data (List a) Nil (Cons a (List a)))
+         (define map
+           (lambda (f lst)
+             (match lst
+               (Nil Nil)
+               ((Cons h t) (Cons (ng Unit)))
+    ))))
+         (define double (lambda (x) (+ x x)))
+         (map double (Cons 1 (Cons 2 (Cons 3 Nil))))

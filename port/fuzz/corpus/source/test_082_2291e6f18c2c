@@ -1,0 +1,6 @@
+(define lib 42)
+         (foreign lib
+           (GetValue (-> Unit Int))
+           (IsReady (-> Unit Bool)))
+          (+ (ffi-call lib "GetValue") 1)
+          (if (ffi-call lib "IsReady") 1 0)

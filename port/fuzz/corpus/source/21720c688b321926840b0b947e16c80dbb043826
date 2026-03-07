@@ -1,0 +1,5 @@
+(data (Tree a) (Leaf a) (Node (Tre  (lambda (t)
+    (match t
+      ((Leaf n) n)
+      ((Node l r) (+ (tree-sum l) (tree-sum r))))))
+(tree-sum (Node (Leaf 1) (Node (Leaf 2) (Leaf 3))))

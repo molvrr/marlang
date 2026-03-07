@@ -1,0 +1,7 @@
+(effect Multi
+               (op-a (-> Unit Int))
+               (op-b (-> Int Unit))
+               (op-c (-> Unit String)))
+           (handle
+             (perform op-a ())
+             ((op-a k) -> (resume k 0)))

@@ -1,0 +1,2 @@
+(define loop (lambda (f) (if #t nil (f f))))
+         (loop loop)

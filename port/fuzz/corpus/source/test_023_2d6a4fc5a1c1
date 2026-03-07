@@ -1,0 +1,8 @@
+(effect Eff1
+               (op1 (-> Unit Int)))
+           (effect Eff2
+               (op2 (-> Unit String)))
+           (handle
+             (begin (perform op1 ()) (perform op2 ()))
+             ((op1 k) -> (resume k 0))
+             ((op2 k) -> (resume k "hi")))

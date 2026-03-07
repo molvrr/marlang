@@ -1,0 +1,6 @@
+(define lib 42)
+         (foreign lib
+           (GetStruct (-> String FFIStruct))
+            (GetPointer (-> Unit FFIPointer)))
+         (ffi-call lib "GetStruct" "test")
+         (ffi-call lib "GetPointer")

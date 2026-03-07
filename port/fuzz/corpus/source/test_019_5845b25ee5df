@@ -1,0 +1,6 @@
+(effect State
+               (get (-> Unit Int))
+               (put (-> Int Unit)))
+           (handle
+             (perform get ())
+             ((get k) -> (resume k 0)))

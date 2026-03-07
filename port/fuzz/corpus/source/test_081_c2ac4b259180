@@ -1,0 +1,6 @@
+(define lib 42)
+         (foreign lib
+           (InitWindow (-> Int Int String Unit))
+           (CloseWindow (-> Unit Unit)))
+          (ffi-call lib "InitWindow" 800 600 "hello")
+          (ffi-call lib "CloseWindow")

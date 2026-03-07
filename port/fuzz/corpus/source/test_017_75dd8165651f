@@ -1,0 +1,4 @@
+(effect Ask
+               (ask (-> Unit Int)))
+           (handle (perform ask ())
+               ((ask k) -> (resume k 42)))

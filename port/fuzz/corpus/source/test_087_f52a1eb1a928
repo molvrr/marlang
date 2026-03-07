@@ -1,0 +1,4 @@
+(define lib 42)
+         (foreign lib
+           (CloseWindow (-> Unit Unit)))
+          (+ (ffi-call lib "CloseWindow") 1)

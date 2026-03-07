@@ -1,0 +1,7 @@
+(foreign-lib rl "libraylib.dylib"
+           (InitWindow (-> I32 I32 CString Void))
+           (CloseWindow (-> Unit Void))
+            (IsReady (-> Unit Bool)))
+         (rl/InitWindow 800 600 "hello")
+         (rl/CloseWindow)
+         (rl/IsReady)

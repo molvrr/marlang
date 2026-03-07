@@ -1,0 +1,2 @@
+(define stringify (lambda (x) (show x)))
+         (stringify 42)
