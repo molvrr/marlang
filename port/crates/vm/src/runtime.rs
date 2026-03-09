@@ -6,7 +6,9 @@
 
 use crate::bytecode::{Chunk, FunctionPrototype};
 use crate::errors::VMError;
-use crate::object::{Closure, HandlerEntry, VMHandlerFrame, VMObject};
+use crate::object::{
+    Closure, HandlerEntry, VMHandlerFrame, VMObject, make_err, make_none, make_ok, make_some,
+};
 use crate::value::{Value, format_value, format_value_unquoted};
 use crate::vm::{
     EffectSignal, VM, VMSignal, call_closure, call_value, next_handler_id, resume_continuation,
@@ -181,15 +183,11 @@ struct SharedState {
     trap_exit: Mutex<HashSet<FiberId>>,
 
     // Termination detection
-    idle_count: AtomicUsize,
     total_schedulers: usize,
     shutdown: AtomicBool,
 
     // Per-scheduler inboxes (for sending messages to specific schedulers)
     scheduler_senders: Vec<Sender<SchedulerMessage>>,
-
-    // Main fiber result channel
-    result_sender: Mutex<Option<Sender<Result<Value, VMError>>>>,
 
     // Captured output (for tests — all schedulers append here)
     captured_output: Arc<Mutex<Option<String>>>,
@@ -254,38 +252,6 @@ fn call_predicate_safe(vm: &mut VM, predicate: &Closure, value: &Value) -> bool 
     }
 }
 
-/// Construct an `(Ok value)` ADT value.
-fn make_ok(value: Value) -> Value {
-    Value::object(VMObject::AdtValue {
-        tag: "Ok".to_string(),
-        fields: vec![value],
-    })
-}
-
-/// Construct an `(Err msg)` ADT value.
-fn make_err(msg: &str) -> Value {
-    Value::object(VMObject::AdtValue {
-        tag: "Err".to_string(),
-        fields: vec![Value::string(msg)],
-    })
-}
-
-/// Construct a `(Some value)` ADT value.
-fn make_some(value: Value) -> Value {
-    Value::object(VMObject::AdtValue {
-        tag: "Some".to_string(),
-        fields: vec![value],
-    })
-}
-
-/// Construct a `None` ADT value.
-fn make_none() -> Value {
-    Value::object(VMObject::AdtValue {
-        tag: "None".to_string(),
-        fields: vec![],
-    })
-}
-
 fn make_dummy_closure() -> Closure {
     use crate::bytecode::ROOT_MODULE;
     Closure {
@@ -330,6 +296,8 @@ const HANDLED_EFFECTS: &[&str] = &[
     "tcp-recv",
     "tcp-close",
     "tcp-close-listener",
+    // Layer 5: HTTP
+    "http-request",
     // "throw" is NOT here — with CPS dispatch, user handlers catch throw inline.
     // Unhandled throw uses try_default_handler → "Uncaught exception: ..." error.
 ];
@@ -1476,6 +1444,67 @@ fn handle_effect(
             });
         }
 
+        // --- Layer 5: HTTP Client ---
+        "http-request" => {
+            // args: [HttpMethod ADT, url: String, headers: List (Pair String String), body: Bytes]
+            let method_str = args
+                .first()
+                .and_then(|v| v.as_object())
+                .and_then(|obj| match obj {
+                    VMObject::AdtValue { tag, fields } if fields.is_empty() => Some(tag.as_str()),
+                    _ => None,
+                })
+                .ok_or_else(|| VMError::runtime("http-request: first arg must be an HttpMethod"))?;
+
+            let method = match method_str {
+                "GET" => hyper::Method::GET,
+                "POST" => hyper::Method::POST,
+                "PUT" => hyper::Method::PUT,
+                "DELETE" => hyper::Method::DELETE,
+                "PATCH" => hyper::Method::PATCH,
+                "HEAD" => hyper::Method::HEAD,
+                "OPTIONS" => hyper::Method::OPTIONS,
+                other => {
+                    return Err(VMError::runtime(format!(
+                        "http-request: unknown method '{}'",
+                        other
+                    )));
+                }
+            };
+
+            let url = args
+                .get(1)
+                .and_then(|v| v.as_string())
+                .ok_or_else(|| VMError::runtime("http-request: url must be a string"))?
+                .to_string();
+
+            // Extract headers: (List (Pair String String)) -> Vec<(String, String)>
+            let headers_val = args
+                .get(2)
+                .ok_or_else(|| VMError::runtime("http-request: missing headers argument"))?;
+            let header_pairs = http_collect_pair_list(headers_val, "http-request headers")?;
+
+            let body_bytes = args
+                .get(3)
+                .and_then(|v| v.as_bytes())
+                .ok_or_else(|| VMError::runtime("http-request: body must be Bytes"))?
+                .to_vec();
+
+            let sender = shared.scheduler_senders[sched.id].clone();
+            let pid = sched.current_pid;
+
+            sched.io_parked.insert(pid, cont);
+            shared.pending_io.fetch_add(1, Ordering::AcqRel);
+
+            shared.tokio_handle.spawn(async move {
+                let result = http_do_request(method, &url, &header_pairs, body_bytes).await;
+                let _ = sender.send(SchedulerMessage::IoComplete {
+                    pid,
+                    result: Ok(result),
+                });
+            });
+        }
+
         // --- Exception effect (default handler: crash the fiber) ---
         "throw" => {
             let msg = args
@@ -1494,6 +1523,233 @@ fn handle_effect(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// HTTP helpers
+// ---------------------------------------------------------------------------
+
+/// Lazily-initialized TLS client configuration using native OS certificates.
+static TLS_CLIENT_CONFIG: std::sync::LazyLock<Arc<tokio_rustls::rustls::ClientConfig>> =
+    std::sync::LazyLock::new(|| {
+        let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+        let certs = rustls_native_certs::load_native_certs();
+        for cert in certs.certs {
+            let _ = root_store.add(cert);
+        }
+        Arc::new(
+            tokio_rustls::rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        )
+    });
+
+/// Walk a Cons/Nil list of MkPair ADT values, extracting (String, String) pairs.
+fn http_collect_pair_list(val: &Value, context: &str) -> Result<Vec<(String, String)>, VMError> {
+    let mut result = Vec::new();
+    let mut cur = val.clone();
+    loop {
+        if cur.is_nil() {
+            return Ok(result);
+        }
+        match cur.as_object() {
+            Some(VMObject::AdtValue { tag, fields }) if tag == "Nil" => {
+                return Ok(result);
+            }
+            Some(VMObject::AdtValue { tag, fields }) if tag == "Cons" && fields.len() == 2 => {
+                // Each element should be a MkPair
+                match fields[0].as_object() {
+                    Some(VMObject::AdtValue {
+                        tag: pair_tag,
+                        fields: pair_fields,
+                    }) if pair_tag == "MkPair" && pair_fields.len() == 2 => {
+                        let key = pair_fields[0]
+                            .as_string()
+                            .ok_or_else(|| {
+                                VMError::runtime(format!(
+                                    "{}: header key must be a string",
+                                    context
+                                ))
+                            })?
+                            .to_string();
+                        let value = pair_fields[1]
+                            .as_string()
+                            .ok_or_else(|| {
+                                VMError::runtime(format!(
+                                    "{}: header value must be a string",
+                                    context
+                                ))
+                            })?
+                            .to_string();
+                        result.push((key, value));
+                    }
+                    _ => {
+                        return Err(VMError::runtime(format!(
+                            "{}: expected (Pair String String) elements",
+                            context
+                        )));
+                    }
+                }
+                cur = fields[1].clone();
+            }
+            _ => {
+                return Err(VMError::runtime(format!(
+                    "{}: expected a list (Cons/Nil)",
+                    context
+                )));
+            }
+        }
+    }
+}
+
+/// Build a Cons/Nil list of MkPair ADT values from (String, String) pairs.
+fn http_build_pair_list(pairs: Vec<(String, String)>) -> Value {
+    use crate::object::vec_to_cons_list;
+    let items: Vec<Value> = pairs
+        .into_iter()
+        .map(|(k, v)| {
+            Value::object(VMObject::AdtValue {
+                tag: "MkPair".to_string(),
+                fields: vec![Value::string(&*k), Value::string(&*v)],
+            })
+        })
+        .collect();
+    vec_to_cons_list(items)
+}
+
+/// Send an HTTP request over an already-connected IO stream using hyper.
+/// Generic over the transport (plain TCP or TLS-wrapped TCP).
+async fn http_send_request<I>(
+    io: I,
+    method: hyper::Method,
+    host: &str,
+    path_and_query: &str,
+    headers: &[(String, String)],
+    body: Vec<u8>,
+) -> Value
+where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    use http_body_util::{BodyExt, Full};
+
+    // Use hyper's handshake to get a sender
+    let (mut sender, conn) = match hyper::client::conn::http1::handshake(io).await {
+        Ok(pair) => pair,
+        Err(e) => return make_err(&format!("HTTP handshake failed: {}", e)),
+    };
+
+    // Spawn the connection driver
+    tokio::spawn(async move {
+        if let Err(_e) = conn.await {
+            // Connection error — sender will see it
+        }
+    });
+
+    // Build the request
+    let mut req_builder = hyper::Request::builder()
+        .method(method)
+        .uri(path_and_query)
+        .header("Host", host);
+
+    for (key, value) in headers {
+        req_builder = req_builder.header(key.as_str(), value.as_str());
+    }
+
+    let req = match req_builder.body(Full::new(bytes::Bytes::from(body))) {
+        Ok(r) => r,
+        Err(e) => return make_err(&format!("failed to build request: {}", e)),
+    };
+
+    // Send the request
+    let response = match sender.send_request(req).await {
+        Ok(r) => r,
+        Err(e) => return make_err(&format!("HTTP request failed: {}", e)),
+    };
+
+    // Extract status, headers, body
+    let status = response.status().as_u16() as i64;
+
+    let resp_headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+
+    let body_bytes = match response.into_body().collect().await {
+        Ok(collected) => collected.to_bytes().to_vec(),
+        Err(e) => return make_err(&format!("failed to read response body: {}", e)),
+    };
+
+    // Build HttpResponse ADT: (HttpResponse status headers body)
+    let headers_list = http_build_pair_list(resp_headers);
+    let response_adt = Value::object(VMObject::AdtValue {
+        tag: "HttpResponse".to_string(),
+        fields: vec![Value::int(status), headers_list, Value::bytes(body_bytes)],
+    });
+
+    make_ok(response_adt)
+}
+
+/// Perform an HTTP/HTTPS request using hyper. Returns a Marlang Result value.
+async fn http_do_request(
+    method: hyper::Method,
+    url: &str,
+    headers: &[(String, String)],
+    body: Vec<u8>,
+) -> Value {
+    use hyper::Uri;
+
+    // Parse the URL
+    let uri: Uri = match url.parse() {
+        Ok(u) => u,
+        Err(e) => return make_err(&format!("invalid URL '{}': {}", url, e)),
+    };
+
+    let scheme = uri.scheme_str().unwrap_or("http");
+    let is_https = match scheme {
+        "http" => false,
+        "https" => true,
+        other => {
+            return make_err(&format!(
+                "unsupported scheme '{}' (only http and https are supported)",
+                other
+            ));
+        }
+    };
+
+    let host = match uri.host() {
+        Some(h) => h.to_string(),
+        None => return make_err(&format!("URL '{}' has no host", url)),
+    };
+
+    let default_port = if is_https { 443 } else { 80 };
+    let port = uri.port_u16().unwrap_or(default_port);
+    let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+
+    // Connect via tokio TCP
+    let addr = format!("{}:{}", host, port);
+    let tcp_stream = match tokio::net::TcpStream::connect(&addr).await {
+        Ok(s) => s,
+        Err(e) => return make_err(&format!("connection to {} failed: {}", addr, e)),
+    };
+
+    if is_https {
+        // Wrap in TLS
+        let connector = tokio_rustls::TlsConnector::from(TLS_CLIENT_CONFIG.clone());
+        let server_name = match rustls_pki_types::ServerName::try_from(host.clone()) {
+            Ok(sn) => sn,
+            Err(e) => return make_err(&format!("invalid TLS server name '{}': {}", host, e)),
+        };
+        let tls_stream = match connector.connect(server_name, tcp_stream).await {
+            Ok(s) => s,
+            Err(e) => return make_err(&format!("TLS handshake with {} failed: {}", host, e)),
+        };
+        let io = hyper_util::rt::TokioIo::new(tls_stream);
+        http_send_request(io, method, &host, path_and_query, headers, body).await
+    } else {
+        let io = hyper_util::rt::TokioIo::new(tcp_stream);
+        http_send_request(io, method, &host, path_and_query, headers, body).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2227,56 +2483,335 @@ fn check_termination(shared: &SharedState) -> bool {
 // ---------------------------------------------------------------------------
 // Scheduler loop (per thread)
 // ---------------------------------------------------------------------------
+// Always-On Scheduler (public API)
+// ---------------------------------------------------------------------------
 
-fn scheduler_loop(
-    sched: &mut PerScheduler,
-    shared: &SharedState,
-    vm: &mut VM,
-    is_main: bool,
-    result_sender: Option<Sender<Result<Value, VMError>>>,
-    main_body: Option<&Closure>,
-) {
-    let mut main_result = Value::nil();
-    let mut main_error: Option<VMError> = None;
+/// Always-on per-core scheduler. Created once at program start, runs N scheduler
+/// threads (scheduler 0 on the main thread, workers 1..N-1 on spawned threads).
+/// All effects (IO, TCP, HTTP, fibers, channels, actors) flow through this
+/// scheduler — no `run-fibers` wrapper needed.
+#[allow(dead_code)] // Fields reserved for Phase 9 (multi-threaded worker spawning)
+pub struct Scheduler {
+    shared: Arc<SharedState>,
+    local: PerScheduler,
+    tokio_rt: tokio::runtime::Runtime,
+    /// Receivers for worker threads (consumed on first `execute_main` call).
+    worker_receivers: Option<Vec<Receiver<SchedulerMessage>>>,
+    /// Work-stealing deque workers for worker threads (consumed on first `execute_main`).
+    worker_deque_workers: Option<Vec<Worker<Fiber>>>,
+    /// All stealers (including scheduler 0's).
+    all_stealers: Vec<Stealer<Fiber>>,
+    /// Number of scheduler threads (including scheduler 0).
+    num_threads: usize,
+    /// Whether worker threads have been spawned yet.
+    workers_spawned: bool,
+    /// Persistent main fiber PID (0), reused across all `execute_main` calls.
+    main_pid: FiberId,
+}
 
-    // If this is scheduler 0, run the main fiber first
-    if is_main && let Some(body) = main_body {
+impl Scheduler {
+    /// Create a new always-on scheduler with N threads (one per CPU core).
+    /// Scheduler 0 runs on the current thread; workers 1..N-1 are spawned lazily.
+    pub fn new(vm: &mut VM) -> Self {
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        // Create per-scheduler channels
+        let mut senders = Vec::with_capacity(num_threads);
+        let mut receivers = Vec::with_capacity(num_threads);
+        for _ in 0..num_threads {
+            let (tx, rx) = crossbeam_channel::unbounded();
+            senders.push(tx);
+            receivers.push(rx);
+        }
+
+        // Create work-stealing deques
+        let mut workers = Vec::with_capacity(num_threads);
+        let mut all_stealers = Vec::new();
+        for _ in 0..num_threads {
+            let w = Worker::new_fifo();
+            all_stealers.push(w.stealer());
+            workers.push(w);
+        }
+
+        // Create tokio runtime for async IO
+        let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("failed to create tokio runtime");
+
+        // Transfer captured_output to shared state
+        let captured = vm.captured_output.take();
+
+        let shared = Arc::new(SharedState {
+            next_pid: AtomicU64::new(1), // 0 reserved for first main fiber
+            alive: Mutex::new(HashSet::new()),
+            pid_to_scheduler: Mutex::new(HashMap::new()),
+            mailboxes: Mutex::new(HashMap::new()),
+            parked_pids: Mutex::new(HashMap::new()),
+            channels: Mutex::new(HashMap::new()),
+            next_channel_id: AtomicU64::new(0),
+            monitors: Mutex::new(HashMap::new()),
+            links: Mutex::new(HashMap::new()),
+            trap_exit: Mutex::new(HashSet::new()),
+            total_schedulers: num_threads,
+            shutdown: AtomicBool::new(false),
+            scheduler_senders: senders,
+            captured_output: Arc::new(Mutex::new(captured)),
+            pending_io: AtomicUsize::new(0),
+            tokio_handle: tokio_rt.handle().clone(),
+            tcp_socket_owners: Mutex::new(HashMap::new()),
+            tcp_listener_owners: Mutex::new(HashMap::new()),
+            next_tcp_id: AtomicU64::new(0),
+            active_listeners: AtomicUsize::new(0),
+        });
+
+        // Scheduler 0's local state
+        let sched0_receiver = receivers.remove(0);
+        let sched0_worker = workers.remove(0);
+        let sched0_stealers: Vec<Stealer<Fiber>> = all_stealers
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx != 0)
+            .map(|(_, s)| s.clone())
+            .collect();
+
+        let local = PerScheduler {
+            id: 0,
+            ready_queue: VecDeque::new(),
+            inbox: sched0_receiver,
+            parked_fibers: HashMap::new(),
+            current_pid: 0,
+            steal_worker: sched0_worker,
+            stealers: sched0_stealers,
+            spawn_counter: 0,
+            io_parked: HashMap::new(),
+            tcp_sockets: HashMap::new(),
+            tcp_listeners: HashMap::new(),
+        };
+
+        // Register the persistent main PID (0)
         let main_pid: FiberId = 0;
-        sched.current_pid = main_pid;
+        {
+            let mut alive = shared.alive.lock().unwrap();
+            alive.insert(main_pid);
+        }
+        {
+            let mut pid_map = shared.pid_to_scheduler.lock().unwrap();
+            pid_map.insert(main_pid, 0);
+        }
+        {
+            let mut mailboxes = shared.mailboxes.lock().unwrap();
+            mailboxes.insert(main_pid, VecDeque::new());
+        }
+
+        Scheduler {
+            shared,
+            local,
+            tokio_rt,
+            worker_receivers: Some(receivers),
+            worker_deque_workers: Some(workers),
+            all_stealers,
+            num_threads,
+            workers_spawned: false,
+            main_pid,
+        }
+    }
+
+    /// Execute a single top-level closure as a "main fiber" on scheduler 0.
+    /// Returns the result value. The main fiber keeps the same PID across all
+    /// `execute_main` calls so that actor state (mailbox, links, monitors,
+    /// trap-exit) persists across top-level expressions.
+    pub fn execute_main(&mut self, vm: &mut VM, closure: &Closure) -> Result<Value, VMError> {
+        let pid = self.main_pid;
+
+        self.local.current_pid = pid;
+        vm.current_pid = Some(pid);
 
         install_handler_frame(vm);
-        match call_closure(vm, body, &[]) {
+        let result = match call_closure(vm, closure, &[]) {
             Ok(result) => {
                 remove_handler_frame(vm);
-                main_result = result;
-                handle_fiber_exit(sched, shared, vm, main_pid, ExitReason::Normal);
+                // Don't call handle_fiber_exit — main PID persists across expressions.
+                Ok(result)
             }
             Err(VMSignal::Effect(signal)) => {
-                if let Err(e) = handle_effect(sched, shared, vm, signal) {
-                    main_error = Some(e.clone());
-                    handle_fiber_exit(sched, shared, vm, main_pid, ExitReason::CrashWithTrace(e));
+                match handle_effect(&mut self.local, &self.shared, vm, signal) {
+                    Ok(()) => {
+                        // Effect was handled and fiber was re-enqueued; drain ready queue
+                        self.drain_until_main_done(vm, pid)
+                    }
+                    Err(e) => {
+                        // Main fiber crashed — still don't remove from alive so subsequent
+                        // expressions can run. Just propagate the error.
+                        Err(e)
+                    }
                 }
             }
             Err(VMSignal::Error(e)) => {
-                main_error = Some(e.clone());
-                handle_fiber_exit(sched, shared, vm, main_pid, ExitReason::CrashWithTrace(e));
+                // Same — don't remove main PID from alive on crash.
+                Err(e)
+            }
+        };
+
+        vm.current_pid = None;
+        result
+    }
+
+    /// Drain ready queue on scheduler 0, running fibers until the main fiber
+    /// (identified by `main_pid`) completes or produces a result.
+    fn drain_until_main_done(&mut self, vm: &mut VM, main_pid: FiberId) -> Result<Value, VMError> {
+        let mut main_result: Option<Result<Value, VMError>> = None;
+
+        loop {
+            // Drain inbox
+            drain_inbox(&mut self.local, &self.shared, vm);
+
+            // Run all ready fibers
+            while let Some(fiber) = self.local.ready_queue.pop_front() {
+                let pid = fiber.pid();
+                self.local.current_pid = pid;
+                vm.current_pid = Some(pid);
+
+                let saved_frame_count = vm.frame_count;
+                let saved_stack_top = vm.stack_top;
+
+                install_handler_frame(vm);
+
+                let result = match &fiber {
+                    Fiber::New { closure, .. } => call_closure(vm, closure, &[]),
+                    Fiber::Suspended {
+                        continuation,
+                        resume_value,
+                        ..
+                    } => match continuation.as_object() {
+                        Some(VMObject::Continuation(c)) => {
+                            resume_continuation(vm, c.as_ref(), resume_value.clone())
+                        }
+                        _ => Err(VMSignal::Error(VMError::runtime(
+                            "Invalid continuation in fiber",
+                        ))),
+                    },
+                };
+
+                match result {
+                    Ok(value) => {
+                        remove_handler_frame(vm);
+                        if pid == main_pid {
+                            // Main PID persists — don't call handle_fiber_exit.
+                            main_result = Some(Ok(value));
+                        } else {
+                            handle_fiber_exit(
+                                &mut self.local,
+                                &self.shared,
+                                vm,
+                                pid,
+                                ExitReason::Normal,
+                            );
+                        }
+                    }
+                    Err(VMSignal::Effect(signal)) => {
+                        if let Err(e) = handle_effect(&mut self.local, &self.shared, vm, signal) {
+                            vm.clear_stack_slots(saved_stack_top);
+                            vm.frame_count = saved_frame_count;
+                            vm.stack_top = saved_stack_top;
+                            if !vm.handler_stack.is_empty() {
+                                remove_handler_frame(vm);
+                            }
+                            if pid == main_pid {
+                                // Main PID persists — don't remove from alive.
+                                main_result = Some(Err(e));
+                            } else {
+                                handle_fiber_exit(
+                                    &mut self.local,
+                                    &self.shared,
+                                    vm,
+                                    pid,
+                                    ExitReason::CrashWithTrace(e),
+                                );
+                            }
+                        }
+                    }
+                    Err(VMSignal::Error(e)) => {
+                        vm.clear_stack_slots(saved_stack_top);
+                        vm.frame_count = saved_frame_count;
+                        vm.stack_top = saved_stack_top;
+                        if !vm.handler_stack.is_empty() {
+                            remove_handler_frame(vm);
+                        }
+                        if pid == main_pid {
+                            // Main PID persists — don't remove from alive.
+                            main_result = Some(Err(e));
+                        } else {
+                            handle_fiber_exit(
+                                &mut self.local,
+                                &self.shared,
+                                vm,
+                                pid,
+                                ExitReason::CrashWithTrace(e),
+                            );
+                        }
+                    }
+                }
+
+                // If the main fiber finished, return its result immediately
+                if let Some(result) = main_result {
+                    return result;
+                }
+            }
+
+            // If main finished, return
+            if let Some(result) = main_result.take() {
+                return result;
+            }
+
+            // Try work stealing
+            if try_steal(&mut self.local) {
+                continue;
+            }
+
+            // Check if main fiber is still alive (it might have been killed by a link)
+            let main_alive = {
+                let alive = self.shared.alive.lock().unwrap();
+                alive.contains(&main_pid)
+            };
+            if !main_alive {
+                // Main fiber died without us seeing it — it was killed by supervision
+                return Err(VMError::runtime(
+                    "Main fiber was killed by a linked fiber crash",
+                ));
+            }
+
+            // Idle — wait briefly for new work
+            match self
+                .local
+                .inbox
+                .recv_timeout(std::time::Duration::from_millis(1))
+            {
+                Ok(msg) => {
+                    process_single_message(&mut self.local, &self.shared, vm, msg);
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    return Err(VMError::runtime("Scheduler channel disconnected"));
+                }
             }
         }
     }
 
-    loop {
-        // 1. Drain inbox
-        drain_inbox(sched, shared, vm);
+    /// Run any ready background fibers on scheduler 0 (non-blocking).
+    /// Called between top-level expressions to make progress on background fibers.
+    pub fn run_ready(&mut self, vm: &mut VM) {
+        // Drain inbox
+        drain_inbox(&mut self.local, &self.shared, vm);
 
-        // 2. Run all ready fibers
-        while let Some(fiber) = sched.ready_queue.pop_front() {
+        // Run all currently ready fibers (but don't wait for new ones)
+        while let Some(fiber) = self.local.ready_queue.pop_front() {
             let pid = fiber.pid();
-            sched.current_pid = pid;
-
-            // Push to steal deque so other threads can steal
-            // Actually, we run fibers from ready_queue directly.
-            // Only push excess work to steal_worker for stealing.
-            // For simplicity: run from ready_queue, populate steal_worker on spawn overflow.
+            self.local.current_pid = pid;
+            vm.current_pid = Some(pid);
 
             let saved_frame_count = vm.frame_count;
             let saved_stack_top = vm.stack_top;
@@ -2300,26 +2835,25 @@ fn scheduler_loop(
             };
 
             match result {
-                Ok(result) => {
+                Ok(_) => {
                     remove_handler_frame(vm);
-                    if pid == 0 {
-                        main_result = result;
-                    }
-                    handle_fiber_exit(sched, shared, vm, pid, ExitReason::Normal);
+                    handle_fiber_exit(&mut self.local, &self.shared, vm, pid, ExitReason::Normal);
                 }
                 Err(VMSignal::Effect(signal)) => {
-                    if let Err(e) = handle_effect(sched, shared, vm, signal) {
-                        // Effect handling failed — treat as crash
+                    if let Err(e) = handle_effect(&mut self.local, &self.shared, vm, signal) {
                         vm.clear_stack_slots(saved_stack_top);
                         vm.frame_count = saved_frame_count;
                         vm.stack_top = saved_stack_top;
                         if !vm.handler_stack.is_empty() {
                             remove_handler_frame(vm);
                         }
-                        if pid == 0 {
-                            main_error = Some(e.clone());
-                        }
-                        handle_fiber_exit(sched, shared, vm, pid, ExitReason::CrashWithTrace(e));
+                        handle_fiber_exit(
+                            &mut self.local,
+                            &self.shared,
+                            vm,
+                            pid,
+                            ExitReason::CrashWithTrace(e),
+                        );
                     }
                 }
                 Err(VMSignal::Error(e)) => {
@@ -2329,233 +2863,140 @@ fn scheduler_loop(
                     if !vm.handler_stack.is_empty() {
                         remove_handler_frame(vm);
                     }
-                    if pid == 0 {
-                        main_error = Some(e.clone());
-                    }
-                    handle_fiber_exit(sched, shared, vm, pid, ExitReason::CrashWithTrace(e));
-                }
-            }
-
-            // Check for shutdown after each fiber
-            if shared.shutdown.load(Ordering::Acquire) {
-                if is_main && let Some(ref sender) = result_sender {
-                    let _ = sender.send(
-                        main_error
-                            .take()
-                            .map_or_else(|| Ok(main_result.clone()), Err),
+                    handle_fiber_exit(
+                        &mut self.local,
+                        &self.shared,
+                        vm,
+                        pid,
+                        ExitReason::CrashWithTrace(e),
                     );
                 }
-                return;
             }
         }
 
-        // 3. Try work stealing
-        if try_steal(sched) {
-            continue;
-        }
-
-        // 4. Check termination
-        if check_termination(shared) {
-            if is_main && let Some(ref sender) = result_sender {
-                let _ = sender.send(
-                    main_error
-                        .take()
-                        .map_or_else(|| Ok(main_result.clone()), Err),
-                );
-            }
-            return;
-        }
-
-        // 5. Idle — wait briefly for new work
-        shared.idle_count.fetch_add(1, Ordering::AcqRel);
-
-        match sched
-            .inbox
-            .recv_timeout(std::time::Duration::from_millis(1))
-        {
-            Ok(msg) => {
-                shared.idle_count.fetch_sub(1, Ordering::AcqRel);
-                if process_single_message(sched, shared, vm, msg) {
-                    // Shutdown requested
-                    if is_main && let Some(ref sender) = result_sender {
-                        let _ = sender.send(
-                            main_error
-                                .take()
-                                .map_or_else(|| Ok(main_result.clone()), Err),
-                        );
-                    }
-                    return;
-                }
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                shared.idle_count.fetch_sub(1, Ordering::AcqRel);
-                if check_termination(shared) {
-                    if is_main && let Some(ref sender) = result_sender {
-                        let _ = sender.send(
-                            main_error
-                                .take()
-                                .map_or_else(|| Ok(main_result.clone()), Err),
-                        );
-                    }
-                    return;
-                }
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                shared.idle_count.fetch_sub(1, Ordering::AcqRel);
-                if is_main && let Some(ref sender) = result_sender {
-                    let _ = sender.send(
-                        main_error
-                            .take()
-                            .map_or_else(|| Ok(main_result.clone()), Err),
-                    );
-                }
-                return;
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Entry Point
-// ---------------------------------------------------------------------------
-
-/// Run a closure as the main fiber across N scheduler threads.
-/// Each thread gets its own VM with cloned globals.
-pub fn run_fibers_parallel(
-    vm: &mut VM,
-    body: &Closure,
-    num_threads: usize,
-) -> Result<Value, VMError> {
-    let num_threads = num_threads.max(1);
-
-    // Create per-scheduler channels
-    let mut senders = Vec::with_capacity(num_threads);
-    let mut receivers = Vec::with_capacity(num_threads);
-    for _ in 0..num_threads {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        senders.push(tx);
-        receivers.push(rx);
+        vm.current_pid = None;
     }
 
-    // Create work-stealing deques
-    let mut workers = Vec::with_capacity(num_threads);
-    let mut all_stealers = Vec::new();
-    for _ in 0..num_threads {
-        let w = Worker::new_fifo();
-        all_stealers.push(w.stealer());
-        workers.push(w);
-    }
+    /// Wait for all background fibers to complete, then shut down workers.
+    /// Called after the last top-level expression has been executed.
+    pub fn finish(&mut self, vm: &mut VM) {
+        // Remove the persistent main PID from alive so check_termination can
+        // detect when all background fibers have completed.
+        handle_fiber_exit(
+            &mut self.local,
+            &self.shared,
+            vm,
+            self.main_pid,
+            ExitReason::Normal,
+        );
 
-    // Result channel
-    let (result_tx, result_rx) = crossbeam_channel::bounded(1);
+        // Run scheduler 0's loop until all fibers are done
+        loop {
+            drain_inbox(&mut self.local, &self.shared, vm);
 
-    // Create tokio runtime for async IO
-    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .expect("failed to create tokio runtime");
+            while let Some(fiber) = self.local.ready_queue.pop_front() {
+                let pid = fiber.pid();
+                self.local.current_pid = pid;
+                vm.current_pid = Some(pid);
 
-    // Transfer captured_output to shared state
-    let captured = vm.captured_output.take();
+                let saved_frame_count = vm.frame_count;
+                let saved_stack_top = vm.stack_top;
 
-    let shared = Arc::new(SharedState {
-        next_pid: AtomicU64::new(1), // 0 is main
-        alive: Mutex::new(HashSet::from([0])),
-        pid_to_scheduler: Mutex::new(HashMap::from([(0, 0)])),
-        mailboxes: Mutex::new(HashMap::from([(0, VecDeque::new())])),
-        parked_pids: Mutex::new(HashMap::new()),
-        channels: Mutex::new(HashMap::new()),
-        next_channel_id: AtomicU64::new(0),
-        monitors: Mutex::new(HashMap::new()),
-        links: Mutex::new(HashMap::new()),
-        trap_exit: Mutex::new(HashSet::new()),
-        idle_count: AtomicUsize::new(0),
-        total_schedulers: num_threads,
-        shutdown: AtomicBool::new(false),
-        scheduler_senders: senders,
-        result_sender: Mutex::new(Some(result_tx)),
-        captured_output: Arc::new(Mutex::new(captured)),
-        pending_io: AtomicUsize::new(0),
-        tokio_handle: tokio_rt.handle().clone(),
-        tcp_socket_owners: Mutex::new(HashMap::new()),
-        tcp_listener_owners: Mutex::new(HashMap::new()),
-        next_tcp_id: AtomicU64::new(0),
-        active_listeners: AtomicUsize::new(0),
-    });
+                install_handler_frame(vm);
 
-    // Clone module globals for each thread
-    let module_globals = vm.module_globals.clone();
-    let body_clone = body.clone();
-
-    // Use thread::scope for safe borrowing
-    std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-
-        for i in 0..num_threads {
-            let shared = Arc::clone(&shared);
-            let module_globals = module_globals.clone();
-            let body_clone = body_clone.clone();
-            let receiver = receivers.remove(0);
-            let worker = workers.remove(0);
-            let stealers: Vec<Stealer<Fiber>> = all_stealers
-                .iter()
-                .enumerate()
-                .filter(|(idx, _)| *idx != i)
-                .map(|(_, s)| s.clone())
-                .collect();
-            let result_sender = if i == 0 {
-                shared.result_sender.lock().unwrap().take()
-            } else {
-                None
-            };
-
-            let handle = scope.spawn(move || {
-                let mut thread_vm = VM::new_with_module_globals(module_globals);
-
-                let mut sched = PerScheduler {
-                    id: i,
-                    ready_queue: VecDeque::new(),
-                    inbox: receiver,
-                    parked_fibers: HashMap::new(),
-                    current_pid: 0,
-                    steal_worker: worker,
-                    stealers,
-                    spawn_counter: i, // Offset for better distribution
-                    io_parked: HashMap::new(),
-                    tcp_sockets: HashMap::new(),
-                    tcp_listeners: HashMap::new(),
+                let result = match &fiber {
+                    Fiber::New { closure, .. } => call_closure(vm, closure, &[]),
+                    Fiber::Suspended {
+                        continuation,
+                        resume_value,
+                        ..
+                    } => match continuation.as_object() {
+                        Some(VMObject::Continuation(c)) => {
+                            resume_continuation(vm, c.as_ref(), resume_value.clone())
+                        }
+                        _ => Err(VMSignal::Error(VMError::runtime(
+                            "Invalid continuation in fiber",
+                        ))),
+                    },
                 };
 
-                scheduler_loop(
-                    &mut sched,
-                    &shared,
-                    &mut thread_vm,
-                    i == 0,
-                    result_sender,
-                    if i == 0 { Some(&body_clone) } else { None },
-                );
-            });
+                match result {
+                    Ok(_) => {
+                        remove_handler_frame(vm);
+                        handle_fiber_exit(
+                            &mut self.local,
+                            &self.shared,
+                            vm,
+                            pid,
+                            ExitReason::Normal,
+                        );
+                    }
+                    Err(VMSignal::Effect(signal)) => {
+                        if let Err(e) = handle_effect(&mut self.local, &self.shared, vm, signal) {
+                            vm.clear_stack_slots(saved_stack_top);
+                            vm.frame_count = saved_frame_count;
+                            vm.stack_top = saved_stack_top;
+                            if !vm.handler_stack.is_empty() {
+                                remove_handler_frame(vm);
+                            }
+                            handle_fiber_exit(
+                                &mut self.local,
+                                &self.shared,
+                                vm,
+                                pid,
+                                ExitReason::CrashWithTrace(e),
+                            );
+                        }
+                    }
+                    Err(VMSignal::Error(e)) => {
+                        vm.clear_stack_slots(saved_stack_top);
+                        vm.frame_count = saved_frame_count;
+                        vm.stack_top = saved_stack_top;
+                        if !vm.handler_stack.is_empty() {
+                            remove_handler_frame(vm);
+                        }
+                        handle_fiber_exit(
+                            &mut self.local,
+                            &self.shared,
+                            vm,
+                            pid,
+                            ExitReason::CrashWithTrace(e),
+                        );
+                    }
+                }
+            }
 
-            handles.push(handle);
+            // Try work stealing
+            if try_steal(&mut self.local) {
+                continue;
+            }
+
+            // Check termination
+            if check_termination(&self.shared) {
+                break;
+            }
+
+            // Idle wait
+            match self
+                .local
+                .inbox
+                .recv_timeout(std::time::Duration::from_millis(1))
+            {
+                Ok(msg) => {
+                    process_single_message(&mut self.local, &self.shared, vm, msg);
+                }
+                Err(_) => {
+                    if check_termination(&self.shared) {
+                        break;
+                    }
+                }
+            }
         }
 
-        // Wait for all threads
-        for handle in handles {
-            handle.join().unwrap();
-        }
-    });
+        vm.current_pid = None;
 
-    // Drop tokio runtime (waits for spawned tasks to finish)
-    drop(tokio_rt);
-
-    // Restore captured output
-    let captured = shared.captured_output.lock().unwrap().take();
-    vm.captured_output = captured;
-
-    // Get result
-    match result_rx.try_recv() {
-        Ok(result) => result,
-        Err(_) => Ok(Value::nil()),
+        // Restore captured output to VM
+        let captured = self.shared.captured_output.lock().unwrap().take();
+        vm.captured_output = captured;
     }
 }

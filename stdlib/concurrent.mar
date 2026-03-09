@@ -29,4 +29,3 @@
 
 (define chan-recv  (lambda (ch) (perform chan-recv ch)))
 (define chan-close (lambda (ch) (perform chan-close ch)))
-(define run       (lambda (f) (run-fibers f)))

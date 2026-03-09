@@ -23,7 +23,7 @@ cargo run -p marlang-cli -- repl                   # Interactive REPL
 cargo test --workspace                # Run all tests
 cargo test -p marlang-core            # Core: lexer + parser
 cargo test -p marlang-types           # Type system
-cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI + scheduler + macros + TCP + Exception + Variadic + CPS handler dispatch
+cargo test -p marlang-vm              # VM: compiler + execution + modules + FFI + scheduler + macros + TCP + Exception + Variadic + CPS handler dispatch + Bytes + HTTP
 ```
 
 ## Project Structure
@@ -43,7 +43,7 @@ ts-archive/   - Archived TypeScript implementation (historical reference)
 
 ### Standard Library
 Located in `stdlib/`:
-- `prelude.mar` - Auto-loaded prelude: data types (Option, List, Pair, Result), Exception effect, `when` macro, utility functions (not, cons, car, cdr, append, string->int, string->float). No `(declare ...)` forms — builtin type declarations live in `types/src/builtins.rs`.
+- `prelude.mar` - Auto-loaded prelude: data types (Option, List, Pair, Result), Exception effect, `when` macro, utility functions (not, cons, car, cdr, append, string->int, string->float). `(declare ...)` forms for all builtins live here.
 - `option.mar` - Option type utilities (map, flat-map, unwrap-or, etc.)
 - `result.mar` - Result type and utilities (Ok, Err, map, flat-map, etc.)
 - `io.mar` - IO effect and operations (print, println, read-line, read-file, write-file)
@@ -53,15 +53,15 @@ Located in `stdlib/`:
 - `concurrent.mar` - Concurrency wrappers (fibers, channels)
 - `actor.mar` - Actor model (mailboxes, supervision)
 - `codec.mar` - Bidirectional parser/printer: Iso type, Codec (parse/print/round-trip), combinators (seq, alt, many, between, sep-by, choice), character codecs (satisfy, digit, letter, space), numeric codecs (nat, integer), isomorphisms (iso-chars, iso-int, iso-float, iso-cons, iso-some), convenience (token, symbol, parens, braces, brackets), parse-only compat (chainl1, chainr1, or-else)
-- `net.mar` - TCP networking wrappers (listen, accept, connect, send, recv, close)
-- `http.mar` - HTTP client/server (UNIMPLEMENTED — no runtime handlers)
+- `net.mar` - TCP networking wrappers: safe (connect, listen, send return Result) and throwing (connect!, listen!, send! raise on error), plus accept, recv, close, close-listener
+- `http.mar` - HTTP client: HttpMethod ADT (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS), HttpResponse ADT (status, headers, body as Bytes). Safe (get, post, request return Result) and throwing (get!, post!, request! raise on error) variants. Backed by hyper in the multi-threaded scheduler. Both HTTP and HTTPS supported (TLS via rustls with native OS certificates). Server effects not yet implemented.
 
 Note: ADT constructors (None, Some, Nil, Cons, MkPair, Ok, Err) and utility functions (not, cons, car, cdr, append, string->int, string->float) are defined in `stdlib/prelude.mar`, not as Rust builtins. The prelude is auto-loaded before every program.
 
 ## Language Conventions
 
 ### Primitive Types
-The language has these primitive types: `Int`, `Float`, `Bool`, `String`, `Char`, `Unit`. `Char` is a Unicode codepoint stored inline (no heap allocation). Character literals are displayed as `'A'` by `show`. Use `char-from-code` to create chars and `char-code` to extract the codepoint.
+The language has these primitive types: `Int`, `Float`, `Bool`, `String`, `Char`, `Unit`, `Bytes`. `Char` is a Unicode codepoint stored inline (no heap allocation). Character literals are displayed as `'A'` by `show`. Use `char-from-code` to create chars and `char-code` to extract the codepoint. `Bytes` is an immutable byte array for raw binary data (used by HTTP, file I/O, etc.).
 
 ### Function Type Convention
 Every function takes at least one argument. Zero-argument thunks (`(lambda () body)`) are typed as taking an implicit `Unit` parameter:
@@ -102,7 +102,7 @@ Effect row rules:
 The VM handles IO effects (`print`, `println`, `read-line`, `read-file`, `write-file`) without needing explicit `handle` blocks.
 
 ### Built-in Functions
-Defined in `vm/builtins.rs`. Categories: Int arithmetic (`+`, `-`, `*`, `/`, `rem`, `abs`, `negate`, `sign`), Float arithmetic (`+.`, `-.`, `*.`, `/.`, `rem.`, `abs.`, `negate.`, `sign.`), Int comparison (`<`, `>`, `=`, `<=`, `>=`), Float comparison (`<.`, `>.`, `=.`, `<=.`, `>=.`), string comparison (`string=`, `string<`, `string>`, `string<=`, `string>=`), polymorphic (`equal?`, `show`, `int->float`), math (`sqrt`, `pow`, `exp`, `log`, `log10`, `log2`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`), conversions (`floor`, `ceil`, `round`, `truncate`), float checks (`is-nan`, `is-infinite`, `is-finite`), lists (`list`), strings (`string-length`, `string-append`, `string-is-empty`, `string-reverse`, `string-repeat`, `string-to-upper`, `string-to-lower`, `string-trim`, `string-trim-start`, `string-trim-end`, `string-starts-with`, `string-ends-with`, `string-contains`, `string-index-of`, `string-substring`, `string-char-at`, `string-split`, `string-join`, `string-replace`, `string-replace-all`, `string-pad-start`, `string-pad-end`, `number->string`), chars (`char-code`, `char-from-code`, `char->string`, `chars->string`, `string->chars`), FFI (`ffi-open`, `ffi-call`, `ffi-close`), structs (`struct-new`, `struct-get`, `struct-set`), macros (`gensym`, `symbol->string`, `string->symbol`), type predicates (`symbol?`, `pair?`, `nil?`, `number?`, `string?`, `list?`). See `vm/builtins.rs` for the full list.
+Defined in `vm/builtins.rs`. Categories: Int arithmetic (`+`, `-`, `*`, `/`, `rem`, `abs`, `negate`, `sign`), Float arithmetic (`+.`, `-.`, `*.`, `/.`, `rem.`, `abs.`, `negate.`, `sign.`), Int comparison (`<`, `>`, `=`, `<=`, `>=`), Float comparison (`<.`, `>.`, `=.`, `<=.`, `>=.`), string comparison (`string=`, `string<`, `string>`, `string<=`, `string>=`), polymorphic (`equal?`, `show`, `int->float`), math (`sqrt`, `pow`, `exp`, `log`, `log10`, `log2`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`), conversions (`floor`, `ceil`, `round`, `truncate`), float checks (`is-nan`, `is-infinite`, `is-finite`), lists (`list`), strings (`string-length`, `string-append`, `string-is-empty`, `string-reverse`, `string-repeat`, `string-to-upper`, `string-to-lower`, `string-trim`, `string-trim-start`, `string-trim-end`, `string-starts-with`, `string-ends-with`, `string-contains`, `string-index-of`, `string-substring`, `string-char-at`, `string-split`, `string-join`, `string-replace`, `string-replace-all`, `string-pad-start`, `string-pad-end`, `number->string`), chars (`char-code`, `char-from-code`, `char->string`, `chars->string`, `string->chars`), bytes (`bytes-new`, `bytes-length`, `bytes-get`, `bytes-set`, `bytes-slice`, `bytes-concat`, `bytes-from-string`, `bytes-to-string`, `bytes-from-list`, `bytes-to-list`), FFI (`ffi-open`, `ffi-call`, `ffi-close`), structs (`struct-new`, `struct-get`, `struct-set`), macros (`gensym`, `symbol->string`, `string->symbol`), type predicates (`symbol?`, `pair?`, `nil?`, `number?`, `string?`, `list?`). See `vm/builtins.rs` for the full list.
 
 ### Failable Operations Convention
 Operations that can fail follow a consistent pattern:
@@ -175,7 +175,7 @@ Compare the results against the baseline in `bench/README.md`. Investigate any s
 
 ### New Built-in Function
 1. Add to `vm/builtins.rs` (`register_builtins`)
-2. Add type scheme in `types/builtins.rs` (`builtin_env`)
+2. Add `(declare ...)` form in `stdlib/prelude.mar`
 
 ### New Stdlib Module
 1. Create `stdlib/module-name.mar`

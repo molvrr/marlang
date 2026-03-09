@@ -473,6 +473,7 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                 "String" => Ok(t_string()),
                 "Char" => Ok(t_char()),
                 "Unit" => Ok(t_unit()),
+                "Bytes" => Ok(t_bytes()),
                 _ => {
                     // Check for user-defined data type
                     if lookup_data_type(env, name).is_some() {

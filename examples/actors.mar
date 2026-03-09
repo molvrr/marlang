@@ -33,9 +33,9 @@
         (match msg
           ((Pong _) (ping partner (- n 1)))
           (_ nil)))))))
-(run-fibers (lambda ()
-  (let ((p (conc/spawn pong)))
-    (ping p 5))))
+
+(let ((p (conc/spawn pong)))
+  (ping p 5))
 
 ; Output:
 ;   ping-pong done!
@@ -60,16 +60,15 @@
           (actor/send sender (Count count))
           (counter count)))))))
 
-(run-fibers (lambda ()
-  (let ((c (conc/spawn (lambda () (counter 0))))
-        (me (conc/self)))
-    (actor/send c (Increment 5))
-    (actor/send c (Increment 3))
-    (actor/send c (Increment 10))
-    (actor/send c (GetCount me))
-    (let ((reply (actor/receive)))
-      (match reply
-        ((Count n) (begin (io/print "count = ") (io/println n))))))))
+(let ((c (conc/spawn (lambda () (counter 0))))
+      (me (conc/self)))
+  (actor/send c (Increment 5))
+  (actor/send c (Increment 3))
+  (actor/send c (Increment 10))
+  (actor/send c (GetCount me))
+  (let ((reply (actor/receive)))
+    (match reply
+      ((Count n) (begin (io/print "count = ") (io/println n))))))
 
 ; Output:
 ;   count = 18
@@ -81,34 +80,33 @@
 
 (data Priority (High String) (Low String))
 
-(run-fibers (lambda ()
-  (let ((me (conc/self)))
+(let ((me (conc/self)))
 
-    ; Send low-priority then high-priority
-    (conc/spawn (lambda ()
-      (actor/send me (Low "boring"))
-      (actor/send me (High "urgent"))
-      (actor/send me (Low "meh"))))
+  ; Send low-priority then high-priority
+  (conc/spawn (lambda ()
+    (actor/send me (Low "boring"))
+    (actor/send me (High "urgent"))
+    (actor/send me (Low "meh"))))
 
-    (conc/yield)
-    (conc/yield)
+  (conc/yield)
+  (conc/yield)
 
-    ; Receive only High messages first
-    (let ((msg (actor/receive-match
-                 (lambda (m) (match m ((High _) #t) (_ #f))))))
-      (match msg
-        ((High s) (io/println s))
-        (_ nil)))
+  ; Receive only High messages first
+  (let ((msg (actor/receive-match
+               (lambda (m) (match m ((High _) #t) (_ #f))))))
+    (match msg
+      ((High s) (io/println s))
+      (_ nil)))
 
-    ; Then drain the rest
-    (let ((msg (actor/receive)))
-      (match msg
-        ((Low s) (io/println s))
-        (_ nil)))
-    (let ((msg (actor/receive)))
-      (match msg
-        ((Low s) (io/println s))
-        (_ nil))))))
+  ; Then drain the rest
+  (let ((msg (actor/receive)))
+    (match msg
+      ((Low s) (io/println s))
+      (_ nil)))
+  (let ((msg (actor/receive)))
+    (match msg
+      ((Low s) (io/println s))
+      (_ nil))))
 
 ; Output:
 ;   urgent

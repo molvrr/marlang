@@ -106,8 +106,6 @@ const FUZZ_PRELUDE: &str = r#"
 (declare number->string (-> Float String))
 (declare __try-string->int (-> String (Option Int)))
 (declare __try-string->float (-> String (Option Float)))
-(declare run-fibers (-> (-> Unit {| e} a) a))
-(declare run-fibers-parallel (-> (-> Unit {| e} a) Int a))
 (declare time-it (-> (-> Unit {| e} a) (Pair a Float)))
 (declare ffi-open (-> String (List a) FFILibrary))
 (declare ffi-call (-> FFILibrary String a))

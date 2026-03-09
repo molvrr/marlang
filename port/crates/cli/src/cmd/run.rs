@@ -33,6 +33,7 @@ pub fn cmd_run(file: &Path) -> ExitCode {
         Some(file),
         &mut loader,
         &ef.interner,
+        None, // Create a new scheduler for this program
     ) {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {

@@ -16,19 +16,18 @@
 ; A monitor watches another fiber. When the watched fiber exits
 ; (normally or by crashing), a Down message is delivered.
 
-(run-fibers (lambda ()
-  (let ((worker (conc/spawn (lambda ()
-                  (io/println "worker: doing work...")
-                  (conc/yield)
-                  (error "something went wrong!")))))
-    (actor/monitor worker)
-    (conc/yield)
-    (conc/yield)
-    (conc/yield)
-    (let ((msg (actor/receive)))
-      (match msg
-        ((Down pid reason) (begin (io/print "supervisor: worker crashed with: ") (io/println reason)))
-        (_ nil))))))
+(let ((worker (conc/spawn (lambda ()
+                (io/println "worker: doing work...")
+                (conc/yield)
+                (error "something went wrong!")))))
+  (actor/monitor worker)
+  (conc/yield)
+  (conc/yield)
+  (conc/yield)
+  (let ((msg (actor/receive)))
+    (match msg
+      ((Down pid reason) (begin (io/print "supervisor: worker crashed with: ") (io/println reason)))
+      (_ nil))))
 
 ; Output:
 ;   worker: doing work...
@@ -41,19 +40,18 @@
 ; partner also crashes — unless it has trap-exit enabled, in which
 ; case the crash is converted to an Exit message.
 
-(run-fibers (lambda ()
-  (actor/trap-exit #t)
-  (let ((worker (conc/spawn (lambda ()
-                  (conc/yield)
-                  (error "crash!")))))
-    (actor/link worker)
-    (conc/yield)
-    (conc/yield)
-    (conc/yield)
-    (let ((msg (actor/receive)))
-      (match msg
-        ((Exit pid reason) (begin (io/print "trapped exit: ") (io/println reason)))
-        (_ nil))))))
+(actor/trap-exit #t)
+(let ((worker (conc/spawn (lambda ()
+                (conc/yield)
+                (error "crash!")))))
+  (actor/link worker)
+  (conc/yield)
+  (conc/yield)
+  (conc/yield)
+  (let ((msg (actor/receive)))
+    (match msg
+      ((Exit pid reason) (begin (io/print "trapped exit: ") (io/println reason)))
+      (_ nil))))
 
 ; Output:
 ;   trapped exit: crash!
@@ -85,8 +83,7 @@
               (supervisor (- restarts-left 1))))
           (_ nil)))))))
 
-(run-fibers (lambda ()
-  (supervisor 3)))
+(supervisor 3)
 
 ; Output:
 ;   worker started

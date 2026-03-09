@@ -260,6 +260,9 @@ pub fn t_pid() -> Type {
 pub fn t_channel() -> Type {
     type_const("Channel")
 }
+pub fn t_bytes() -> Type {
+    type_const("Bytes")
+}
 
 // ===== Type Scheme Helpers =====
 

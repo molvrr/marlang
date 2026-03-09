@@ -705,7 +705,7 @@ fn perform_from_jit(vm: &mut VM, op_name: &str, args: &[Value]) -> Option<Value>
         // Non-tail-resumptive user handler — must bail for full continuation capture
         None
     } else {
-        // No handler found — try default handler (IO effects at top level)
-        crate::vm::try_default_handler(vm, op_name, args)
+        // No handler found — all effects flow through the always-on scheduler
+        None
     }
 }

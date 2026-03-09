@@ -756,7 +756,12 @@ pub fn merge_module_env(target: &TypeEnv, source: &TypeEnv, form: &ImportForm) -
             } else {
                 dt.clone()
             };
-            inner.data_types.insert(new_name, new_dt);
+            inner.data_types.insert(new_name.clone(), new_dt.clone());
+            // Also register data types under unqualified names so pattern matching
+            // and exhaustiveness checking work without the module prefix.
+            if is_qualified && !inner.data_types.contains_key(name) {
+                inner.data_types.insert(name.clone(), new_dt);
+            }
         }
     }
 
@@ -770,7 +775,16 @@ pub fn merge_module_env(target: &TypeEnv, source: &TypeEnv, form: &ImportForm) -
                 let rewritten_dt = rewrite_data_type(dt, &type_name_map, &dt_new_name);
                 inner
                     .constructors
-                    .insert(new_name, (rewritten_dt, rewritten_ctor));
+                    .insert(new_name, (rewritten_dt.clone(), rewritten_ctor.clone()));
+                // Also register constructors under unqualified names so they work
+                // in pattern matching without the module prefix. ADT constructors
+                // are PascalCase and typically unique, so collisions are rare.
+                // Only insert if not already present (don't shadow prelude constructors).
+                if !inner.constructors.contains_key(name) {
+                    inner
+                        .constructors
+                        .insert(name.clone(), (rewritten_dt, rewritten_ctor));
+                }
             } else {
                 inner
                     .constructors

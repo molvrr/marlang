@@ -3,7 +3,7 @@ use crate::errors::{StackTraceEntry, VMError};
 use crate::object::{
     CallFrame, Closure, HandlerDispatch, HandlerEntry, VMContinuation, VMHandlerFrame, VMObject,
 };
-use crate::value::{Value, format_value, format_value_unquoted};
+use crate::value::{Value, format_value};
 use rustc_hash::FxHashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -471,6 +471,28 @@ fn rebase_handler_dispatch(d: &HandlerDispatch, frame_offset: i64) -> HandlerDis
     }
 }
 
+// --- Script Closure ---
+
+/// Create a closure from a compiled chunk, suitable for running as a top-level
+/// expression via `call_closure`. Unlike `interpret`, this does NOT reset the VM's
+/// frame_count and stack_top — it's designed for use with the scheduler, where
+/// the scheduler handler frame must survive below the script's frames.
+pub fn make_script_closure(chunk: &Chunk, module_id: ModuleId) -> Closure {
+    let script_proto = FunctionPrototype {
+        name: "<script>".to_string(),
+        arity: 0,
+        is_variadic: false,
+        upvalues: Vec::new(),
+        chunk: chunk.clone(),
+        module_id,
+    };
+    Closure {
+        proto: Arc::new(script_proto),
+        upvalues: Vec::new(),
+        module_id,
+    }
+}
+
 // --- Interpret ---
 
 pub fn interpret(vm: &mut VM, chunk: &Chunk) -> Result<Value, VMError> {
@@ -650,22 +672,6 @@ fn find_matching_bracket(s: &str, open: usize) -> Result<usize, String> {
     Err("unmatched bracket".to_string())
 }
 
-// --- Default IO handlers ---
-
-fn default_make_ok(value: Value) -> Value {
-    Value::object(VMObject::AdtValue {
-        tag: "Ok".to_string(),
-        fields: vec![value],
-    })
-}
-
-fn default_make_err(msg: &str) -> Value {
-    Value::object(VMObject::AdtValue {
-        tag: "Err".to_string(),
-        fields: vec![Value::string(msg)],
-    })
-}
-
 /// Fast-path handler for effects that can be resolved inline without
 /// continuation capture. Only used for effects that don't depend on
 /// scheduler-level shared state (e.g. shared captured_output in the
@@ -682,65 +688,7 @@ pub(crate) fn try_fast_path_handler(vm: &mut VM, op_name: &str, _args: &[Value])
     }
 }
 
-/// Default handler for effects when no user handler is found (outside any
-/// scheduler context). This is the fallback for top-level programs.
-pub(crate) fn try_default_handler(vm: &mut VM, op_name: &str, args: &[Value]) -> Option<Value> {
-    match op_name {
-        "fiber-self" => {
-            let pid = vm.current_pid?;
-            Some(Value::object(VMObject::Pid(pid)))
-        }
-        "print" => {
-            let msg = args.first().cloned().unwrap_or_else(Value::nil);
-            let text = format_value_unquoted(&msg);
-            if let Some(ref mut buf) = vm.captured_output {
-                buf.push_str(&text);
-            } else {
-                print!("{}", text);
-            }
-            Some(Value::nil())
-        }
-        "println" => {
-            let msg = args.first().cloned().unwrap_or_else(Value::nil);
-            let text = format_value_unquoted(&msg);
-            if let Some(ref mut buf) = vm.captured_output {
-                buf.push_str(&text);
-                buf.push('\n');
-            } else {
-                println!("{}", text);
-            }
-            Some(Value::nil())
-        }
-        "read-line" => {
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line).ok();
-            if line.ends_with('\n') {
-                line.pop();
-                if line.ends_with('\r') {
-                    line.pop();
-                }
-            }
-            Some(Value::string(line.as_str()))
-        }
-        "read-file" => {
-            let path = args.first()?;
-            let path_str = path.as_string()?;
-            match std::fs::read_to_string(path_str) {
-                Ok(content) => Some(default_make_ok(Value::string(content.as_str()))),
-                Err(e) => Some(default_make_err(&format!("read-file: {}", e))),
-            }
-        }
-        "write-file" => {
-            let path = args.first()?.as_string()?;
-            let content = args.get(1)?.as_string()?;
-            match std::fs::write(path, content) {
-                Ok(_) => Some(default_make_ok(Value::nil())),
-                Err(e) => Some(default_make_err(&format!("write-file: {}", e))),
-            }
-        }
-        _ => None,
-    }
-}
+// try_default_handler removed — all effects flow through the always-on scheduler.
 
 // --- Main Execution Loop ---
 
@@ -2363,10 +2311,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     continue;
                 }
 
-                // No user handler found — try default handlers
-                if let Some(result) = try_default_handler(vm, op_name_ref, &args) {
-                    vm.push(result);
-                } else if op_name_ref == "throw" {
+                // No handler found at all — error
+                if op_name_ref == "throw" {
                     // Better error message for unhandled throw
                     let msg = args
                         .first()
@@ -2565,6 +2511,7 @@ fn objects_equal(a: &VMObject, b: &VMObject) -> bool {
         }
         (VMObject::Pid(a), VMObject::Pid(b)) => a == b,
         (VMObject::Port(a), VMObject::Port(b)) => a == b,
+        (VMObject::ByteArray(a), VMObject::ByteArray(b)) => a == b,
         _ => false,
     }
 }

@@ -2,7 +2,7 @@
 ;
 ; Fibers are lightweight, cooperatively-scheduled threads.
 ; All concurrency operations are algebraic effects handled
-; by the run-fibers scheduler.
+; by the always-on scheduler — no wrapper needed.
 ;
 ; Run with: cargo run -p marlang-cli -- run examples/fibers.mar
 
@@ -13,19 +13,18 @@
 ;
 ; Fibers interleave execution at yield points
 
-(run-fibers (lambda ()
-  (conc/spawn (lambda ()
-    (io/println "B1")
-    (conc/yield)
-    (io/println "B2")
-    (conc/yield)
-    (io/println "B3")))
+(conc/spawn (lambda ()
+  (io/println "B1")
+  (conc/yield)
+  (io/println "B2")
+  (conc/yield)
+  (io/println "B3")))
 
-  (io/println "A1")
-  (conc/yield)
-  (io/println "A2")
-  (conc/yield)
-  (io/println "A3")))
+(io/println "A1")
+(conc/yield)
+(io/println "A2")
+(conc/yield)
+(io/println "A3")
 
 ; Output (interleaved):
 ;   A1

@@ -1,7 +1,16 @@
 # Concurrency System for Marlang
 
 **Type:** Feature Spec
-**Status:** Implemented
+**Status:** Implemented (refactored to always-on scheduler)
+
+> **Note:** This spec was originally written for the two-tier scheduler model
+> (`run-fibers` / `run-fibers-parallel`). The architecture has been refactored
+> to an **always-on per-core scheduler** that starts automatically at program
+> startup. All effects (IO, TCP, HTTP, fibers, channels, actors) now work at
+> the top level — no wrapper functions needed. The `run-fibers` and
+> `run-fibers-parallel` builtins have been removed. Code examples in this
+> document may still reference the old wrappers; the actual behavior is that
+> effect operations work directly at the top level.
 
 ## Problem
 
@@ -423,11 +432,11 @@ TCP operations are effects handled only by the multi-threaded scheduler. Attempt
 
 Following the failable operations convention, `stdlib/net.mar` provides two wrapper styles:
 
-| Operation | Throwing wrapper | Try wrapper |
-|-----------|-----------------|-------------|
-| `tcp-connect` | `connect` — throws on failure | `try-connect` — returns `(Result String TcpSocket)` |
-| `tcp-listen` | `listen` — throws on failure | `try-listen` — returns `(Result String TcpListener)` |
-| `tcp-send` | `send` — throws on failure | `try-send` — returns `(Result String Unit)` |
+| Operation | Safe wrapper | Throwing wrapper |
+|-----------|-------------|-----------------|
+| `tcp-connect` | `connect` — returns `(Result String TcpSocket)` | `connect!` — throws on failure |
+| `tcp-listen` | `listen` — returns `(Result String TcpListener)` | `listen!` — throws on failure |
+| `tcp-send` | `send` — returns `(Result String Unit)` | `send!` — throws on failure |
 | `tcp-accept` | `accept` — returns `(Option TcpSocket)` | Same (not failable) |
 | `tcp-recv` | `recv` — returns `(Option String)` | Same (not failable) |
 | `tcp-close` | `close` — always succeeds | Same |

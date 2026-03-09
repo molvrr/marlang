@@ -390,25 +390,22 @@ Marlang provides green threads (fibers), CSP-style channels, and an Erlang-inspi
 (import "std:actor" as act)
 (import "std:io" as io)
 
-; Spawn fibers
-(run-fibers (lambda ()
-  (conc/spawn (lambda ()
-    (io/println "child")))
-  (io/println "parent")))
+; Spawn fibers — effects work at the top level
+(conc/spawn (lambda ()
+  (io/println "child")))
+(io/println "parent")
 
 ; Channels
-(run-fibers (lambda ()
-  (let ((ch (conc/chan-new 0)))
-    (conc/spawn (lambda ()
-      (conc/chan-send! ch 42)))
-    (io/println (show (conc/chan-recv ch))))))
+(let ((ch (conc/chan-new 0)))
+  (conc/spawn (lambda ()
+    (conc/chan-send! ch 42)))
+  (io/println (show (conc/chan-recv ch))))
 
 ; Actors with mailboxes
-(run-fibers (lambda ()
-  (let ((me (conc/self)))
-    (conc/spawn (lambda ()
-      (act/send me "hello")))
-    (io/println (act/receive)))))
+(let ((me (conc/self)))
+  (conc/spawn (lambda ()
+    (act/send me "hello")))
+  (io/println (act/receive)))
 ```
 
 ## FFI (Foreign Function Interface)

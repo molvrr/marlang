@@ -1,92 +1,136 @@
-; HTTP module - HTTP client and server using the effect system
+; HTTP module - HTTP client using the effect system
 ;
-; STATUS: UNIMPLEMENTED — The effect types and wrapper functions below define
-; the planned API, but no runtime handlers exist in the scheduler. Attempting
-; to use these effects at runtime will result in "Unhandled effect" errors.
-; This module serves as a design sketch for future HTTP support.
+; All HTTP operations are effects handled by the always-on scheduler.
+; They work at the top level — no wrapper needed.
 ;
-; All HTTP operations are effects handled by the scheduler (run-fibers).
+; The client API uses a type-safe HttpMethod ADT and returns HttpResponse values
+; with status code, headers, and a Bytes body. Convenience wrappers handle
+; common cases (GET/POST with string bodies).
 ;
-; Example client:
+; Failable operations follow the stdlib convention:
+;   - Safe variants (request, get, post, ...): return (Result String HttpResponse)
+;   - Throwing variants (request!, get!, post!, ...): unwrap and raise on error
+;
+; Example usage (throwing):
 ;   (import "std:http" as http)
-;   (run-fibers (lambda ()
-;     (let ((resp (http/get "http://example.com")))
-;       (match resp
-;         ((HttpResponse status headers body)
-;           (io/println body))))))
+;   (import "std:io" as io)
 ;
-; Example server:
+;   (let ((resp (http/get! "http://example.com")))
+;     (match resp
+;       ((HttpResponse status headers body)
+;         (match (bytes-to-string body)
+;           ((Ok text) (io/println text))
+;           ((Err msg) (io/println (string-append "decode error: " msg)))))))
+;
+; Example usage (safe):
 ;   (import "std:http" as http)
-;   (run-fibers (lambda ()
-;     (let ((server (http/serve 8080)))
-;       (define handle-requests (lambda ()
-;         (let ((req (http/accept-request server)))
-;           (match req
-;             ((HttpReq handle method url headers body)
-;               (http/respond-text handle 200 "Hello!"))
-;             (_ nil)))
-;         (handle-requests)))
-;       (handle-requests))))
+;   (import "std:io" as io)
+;
+;   (match (http/get "http://example.com")
+;     ((Ok (HttpResponse status headers body))
+;       (io/println (string-append "status: " (show status))))
+;     ((Err msg)
+;       (io/println (string-append "request failed: " msg))))
+;
+; Both HTTP and HTTPS are supported. HTTPS uses rustls with native OS
+; certificates (no bundled certificate store). TLS errors are returned as
+; (Err msg) just like connection errors.
+;
+; Future work:
+;   - HTTP server effects (http-serve, http-accept, http-respond)
+;   - Streaming request/response bodies
+;   - Pure Marlang HTTP parser on TCP + codec (alternative implementation)
 
 ; === Data Types ===
 
-(data HttpResponse (HttpResponse Int (List (List String)) String))
-(data HttpReq (HttpReq HttpRequest String String (List (List String)) String))
-(data HttpOption (Method String) (Header String String) (Body String))
+(data HttpMethod GET POST PUT DELETE PATCH HEAD OPTIONS)
+
+(data HttpResponse (HttpResponse Int (List (Pair String String)) Bytes))
+;                   status       headers                        body
 
 ; === HTTP Client Effect ===
 
 (effect HttpClient
-  (http-fetch (-> String (List HttpOption) HttpResponse)))
+  (http-request (-> HttpMethod String (List (Pair String String)) Bytes
+                    (Result String HttpResponse))))
 
-; === HTTP Server Effect ===
+; === Safe wrappers (return Result) ===
 
-(effect HttpServ
-  (http-serve        (-> Int HttpServer))
-  (http-accept       (-> HttpServer HttpReq))
-  (http-respond      (-> HttpRequest Int (List (List String)) String Unit))
-  (http-close-server (-> HttpServer Unit)))
+; request : (-> HttpMethod String (List (Pair String String)) Bytes
+;               {HttpClient} (Result String HttpResponse))
+; Make an HTTP request. Returns (Ok response) or (Err msg).
+(define request (lambda (method url headers body)
+  (perform http-request method url headers body)))
 
-; === HTTP Client Operations ===
+; get : (-> String {HttpClient} (Result String HttpResponse))
+; Make a GET request. Returns (Ok response) or (Err msg).
+(define get (lambda (url)
+  (request GET url (list) (bytes-new 0))))
 
-; fetch : (-> String (List HttpOption) {HttpClient} HttpResponse)
-; Make an HTTP request with options
-(define fetch (lambda (url options) (perform http-fetch url options)))
+; post : (-> String (List (Pair String String)) Bytes
+;             {HttpClient} (Result String HttpResponse))
+; Make a POST request. Returns (Ok response) or (Err msg).
+(define post (lambda (url headers body)
+  (request POST url headers body)))
 
-; get : (-> String {HttpClient} HttpResponse)
-; Make a GET request
-(define get (lambda (url) (fetch url (list))))
+; put : (-> String (List (Pair String String)) Bytes
+;            {HttpClient} (Result String HttpResponse))
+; Make a PUT request. Returns (Ok response) or (Err msg).
+(define put (lambda (url headers body)
+  (request PUT url headers body)))
 
-; post : (-> String String {HttpClient} HttpResponse)
-; Make a POST request with body
-(define post (lambda (url body)
-  (fetch url (list (Method "POST") (Body body)))))
+; delete : (-> String {HttpClient} (Result String HttpResponse))
+; Make a DELETE request. Returns (Ok response) or (Err msg).
+(define delete (lambda (url)
+  (request DELETE url (list) (bytes-new 0))))
 
-; === HTTP Server Operations ===
+; === Internal helper ===
 
-; serve : (-> Int {HttpServ} HttpServer)
-; Start an HTTP server on the given port
-(define serve (lambda (port) (perform http-serve port)))
+(define unwrap-or-throw (lambda (result label)
+  (match result
+    ((Ok v) v)
+    ((Err msg) (raise (string-append label ": " msg))))))
 
-; accept-request : (-> HttpServer {HttpServ} HttpReq)
-; Accept the next HTTP request (blocks until one arrives, nil when server closed)
-(define accept-request (lambda (server) (perform http-accept server)))
+; === Throwing wrappers ===
 
-; respond : (-> HttpRequest Int (List (List String)) String {HttpServ} Unit)
-; Send an HTTP response
-(define respond (lambda (handle status headers body)
-  (perform http-respond handle status headers body)))
+; request! : (-> HttpMethod String (List (Pair String String)) Bytes
+;                {HttpClient, Exception} HttpResponse)
+; Make an HTTP request. Throws on failure.
+(define request! (lambda (method url headers body)
+  (unwrap-or-throw (request method url headers body) "http-request")))
 
-; respond-text : (-> HttpRequest Int String {HttpServ} Unit)
-; Send a plain text response
-(define respond-text (lambda (handle status body)
-  (respond handle status (list (list "content-type" "text/plain")) body)))
+; get! : (-> String {HttpClient, Exception} HttpResponse)
+; Make a GET request. Throws on failure.
+(define get! (lambda (url)
+  (unwrap-or-throw (get url) "http-get")))
 
-; respond-json : (-> HttpRequest Int String {HttpServ} Unit)
-; Send a JSON response
-(define respond-json (lambda (handle status body)
-  (respond handle status (list (list "content-type" "application/json")) body)))
+; post! : (-> String (List (Pair String String)) Bytes
+;              {HttpClient, Exception} HttpResponse)
+; Make a POST request. Throws on failure.
+(define post! (lambda (url headers body)
+  (unwrap-or-throw (post url headers body) "http-post")))
 
-; close-server : (-> HttpServer {HttpServ} Unit)
-; Stop the HTTP server
-(define close-server (lambda (server) (perform http-close-server server)))
+; put! : (-> String (List (Pair String String)) Bytes
+;             {HttpClient, Exception} HttpResponse)
+; Make a PUT request. Throws on failure.
+(define put! (lambda (url headers body)
+  (unwrap-or-throw (put url headers body) "http-put")))
+
+; delete! : (-> String {HttpClient, Exception} HttpResponse)
+; Make a DELETE request. Throws on failure.
+(define delete! (lambda (url)
+  (unwrap-or-throw (delete url) "http-delete")))
+
+; === String convenience wrappers ===
+
+; post-text : (-> String (List (Pair String String)) String
+;                 {HttpClient} (Result String HttpResponse))
+; Make a POST request with a string body (UTF-8 encoded).
+(define post-text (lambda (url headers body)
+  (post url headers (bytes-from-string body))))
+
+; post-text! : (-> String (List (Pair String String)) String
+;                  {HttpClient, Exception} HttpResponse)
+; Make a POST request with a string body. Throws on failure.
+(define post-text! (lambda (url headers body)
+  (post! url headers (bytes-from-string body))))

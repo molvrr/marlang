@@ -20,18 +20,17 @@
         (io/println v)
         (consume ch))))))
 
-(run-fibers (lambda ()
-  (let ((ch (conc/chan-new 0)))
+(let ((ch (conc/chan-new 0)))
 
-    ; Producer: sends three values then closes
-    (conc/spawn (lambda ()
-      (conc/chan-send ch 10)
-      (conc/chan-send ch 20)
-      (conc/chan-send ch 30)
-      (conc/chan-close ch)))
+  ; Producer: sends three values then closes
+  (conc/spawn (lambda ()
+    (conc/chan-send ch 10)
+    (conc/chan-send ch 20)
+    (conc/chan-send ch 30)
+    (conc/chan-close ch)))
 
-    ; Consumer: receives until channel is closed (returns None)
-    (consume ch))))
+  ; Consumer: receives until channel is closed (returns None)
+  (consume ch))
 
 ; Output:
 ;   10
@@ -49,35 +48,34 @@
     ((Some v) v)
     ((None) (raise "channel closed unexpectedly")))))
 
-(run-fibers (lambda ()
-  (let ((jobs (conc/chan-new 10))
-        (results (conc/chan-new 10)))
+(let ((jobs (conc/chan-new 10))
+      (results (conc/chan-new 10)))
 
-    ; Spawn 3 workers
-    (conc/spawn (lambda ()
-      (let ((j (recv! jobs)))
-        (conc/chan-send results (* j j))
-        nil)))
-    (conc/spawn (lambda ()
-      (let ((j (recv! jobs)))
-        (conc/chan-send results (* j j))
-        nil)))
-    (conc/spawn (lambda ()
-      (let ((j (recv! jobs)))
-        (conc/chan-send results (* j j))
-        nil)))
+  ; Spawn 3 workers
+  (conc/spawn (lambda ()
+    (let ((j (recv! jobs)))
+      (conc/chan-send results (* j j))
+      nil)))
+  (conc/spawn (lambda ()
+    (let ((j (recv! jobs)))
+      (conc/chan-send results (* j j))
+      nil)))
+  (conc/spawn (lambda ()
+    (let ((j (recv! jobs)))
+      (conc/chan-send results (* j j))
+      nil)))
 
-    ; Send 3 jobs
-    (conc/chan-send jobs 2)
-    (conc/chan-send jobs 3)
-    (conc/chan-send jobs 4)
+  ; Send 3 jobs
+  (conc/chan-send jobs 2)
+  (conc/chan-send jobs 3)
+  (conc/chan-send jobs 4)
 
-    ; Collect results
-    (let ((a (recv! results))
-          (b (recv! results))
-          (c (recv! results)))
-      (io/print "sum of squares: ")
-      (io/println (+ a (+ b c)))))))
+  ; Collect results
+  (let ((a (recv! results))
+        (b (recv! results))
+        (c (recv! results)))
+    (io/print "sum of squares: ")
+    (io/println (+ a (+ b c)))))
 
 ; Output:
 ;   sum of squares: 29

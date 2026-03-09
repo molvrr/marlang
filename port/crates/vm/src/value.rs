@@ -90,6 +90,10 @@ impl Value {
         Value::object(VMObject::Symbol(name.into()))
     }
 
+    pub fn bytes(data: Vec<u8>) -> Self {
+        Value::object(VMObject::ByteArray(data))
+    }
+
     /// Create a Char value (inline, no heap allocation).
     #[inline]
     pub fn char(c: char) -> Self {
@@ -228,6 +232,13 @@ impl Value {
     pub fn as_string(&self) -> Option<&str> {
         self.as_object().and_then(|obj| match obj {
             VMObject::String(s) => Some(s.as_ref()),
+            _ => None,
+        })
+    }
+
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        self.as_object().and_then(|obj| match obj {
+            VMObject::ByteArray(b) => Some(b.as_slice()),
             _ => None,
         })
     }
@@ -526,6 +537,15 @@ fn format_object(obj: &VMObject) -> String {
         }
         VMObject::Pid(id) => format!("#<pid {}>", id),
         VMObject::Port(id) => format!("#<port {}>", id),
+        VMObject::ByteArray(bytes) => {
+            if bytes.len() <= 32 {
+                // Show hex for small byte arrays
+                let hex: Vec<String> = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                format!("#<bytes {} [{}]>", bytes.len(), hex.join(" "))
+            } else {
+                format!("#<bytes {}>", bytes.len())
+            }
+        }
         #[cfg(feature = "ffi")]
         VMObject::FfiLibrary(lib) => format!("#<ffi-library {}>", lib.path),
         #[cfg(feature = "ffi")]

@@ -627,6 +627,7 @@ fn eval(source: &str) -> Result<Value, ProgramError> {
         None,
         &mut loader,
         &interner,
+        None,
     )
 }
 
@@ -651,6 +652,7 @@ fn eval_with_output(source: &str) -> (Result<Value, ProgramError>, String) {
         None,
         &mut loader,
         &interner,
+        None,
     );
     let output = vm.captured_output.take().unwrap_or_default();
     (result, output)
@@ -3090,9 +3092,8 @@ fn ffi_struct_type_in_parse() {
 fn fiber_spawn_returns_pid() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (let ((pid (perform fiber-spawn (lambda () nil))))
-    (perform println (show pid)))))
+(let ((pid (perform fiber-spawn (lambda () nil))))
+  (perform println (show pid)))
 "#,
     );
     assert!(result.is_ok());
@@ -3103,23 +3104,21 @@ fn fiber_spawn_returns_pid() {
 fn fiber_self_returns_pid() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (let ((me (perform fiber-self)))
-    (perform println (show me)))))
+(let ((me (perform fiber-self)))
+  (perform println (show me)))
 "#,
     );
     assert!(result.is_ok());
-    assert!(output.contains("#<pid 0>"));
+    assert!(output.contains("#<pid"));
 }
 
 #[test]
 fn fiber_spawn_runs_to_completion() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (perform fiber-spawn (lambda ()
-    (perform println "child")))
-  (perform println "main")))
+(perform fiber-spawn (lambda ()
+  (perform println "child")))
+(perform println "main")
 "#,
     );
     assert!(result.is_ok());
@@ -3131,14 +3130,13 @@ fn fiber_spawn_runs_to_completion() {
 fn fiber_yield_interleaves() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (perform fiber-spawn (lambda ()
-    (perform println "B1")
-    (perform fiber-yield)
-    (perform println "B2")))
-  (perform println "A1")
+(perform fiber-spawn (lambda ()
+  (perform println "B1")
   (perform fiber-yield)
-  (perform println "A2")))
+  (perform println "B2")))
+(perform println "A1")
+(perform fiber-yield)
+(perform println "A2")
 "#,
     );
     assert!(result.is_ok());
@@ -3150,11 +3148,10 @@ fn fiber_yield_interleaves() {
 fn fiber_multiple_run_to_completion() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (perform fiber-spawn (lambda () (perform println "f1")))
-  (perform fiber-spawn (lambda () (perform println "f2")))
-  (perform fiber-spawn (lambda () (perform println "f3")))
-  (perform println "main")))
+(perform fiber-spawn (lambda () (perform println "f1")))
+(perform fiber-spawn (lambda () (perform println "f2")))
+(perform fiber-spawn (lambda () (perform println "f3")))
+(perform println "main")
 "#,
     );
     assert!(result.is_ok());
@@ -3168,10 +3165,9 @@ fn fiber_multiple_run_to_completion() {
 fn fiber_crash_does_not_kill_main() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (perform fiber-spawn (lambda () (error "boom")))
-  (perform fiber-yield)
-  (perform println "main survived")))
+(perform fiber-spawn (lambda () (error "boom")))
+(perform fiber-yield)
+(perform println "main survived")
 "#,
     );
     assert!(result.is_ok());
@@ -3187,11 +3183,10 @@ fn channel_buffered_send_recv() {
 (define unwrap-some (lambda (opt)
   (match opt ((Some v) v) (None (error "unwrap-some: got None")))))
 
-(run-fibers (lambda ()
-  (let ((ch (perform chan-new 10)))
-    (perform chan-send ch 42)
-    (let ((v (unwrap-some (perform chan-recv ch))))
-      (perform println v)))))
+(let ((ch (perform chan-new 10)))
+  (perform chan-send ch 42)
+  (let ((v (unwrap-some (perform chan-recv ch))))
+    (perform println v)))
 "#,
     );
     assert!(result.is_ok());
@@ -3205,12 +3200,11 @@ fn channel_unbuffered_synchronizes() {
 (define unwrap-some (lambda (opt)
   (match opt ((Some v) v) (None (error "unwrap-some: got None")))))
 
-(run-fibers (lambda ()
-  (let ((ch (perform chan-new 0)))
-    (perform fiber-spawn (lambda ()
-      (perform chan-send ch 99)))
-    (let ((v (unwrap-some (perform chan-recv ch))))
-      (perform println v)))))
+(let ((ch (perform chan-new 0)))
+  (perform fiber-spawn (lambda ()
+    (perform chan-send ch 99)))
+  (let ((v (unwrap-some (perform chan-recv ch))))
+    (perform println v)))
 "#,
     );
     assert!(result.is_ok());
@@ -3221,21 +3215,20 @@ fn channel_unbuffered_synchronizes() {
 fn channel_producer_consumer() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (let ((ch (perform chan-new 0)))
-    (perform fiber-spawn (lambda ()
-      (perform chan-send ch 1)
-      (perform chan-send ch 2)
-      (perform chan-send ch 3)
-      (perform chan-close ch)))
-    (define consume (lambda ()
-      (match (perform chan-recv ch)
-        (None nil)
-        ((Some v)
-          (begin
-            (perform println v)
-            (consume))))))
-    (consume))))
+(let ((ch (perform chan-new 0)))
+  (perform fiber-spawn (lambda ()
+    (perform chan-send ch 1)
+    (perform chan-send ch 2)
+    (perform chan-send ch 3)
+    (perform chan-close ch)))
+  (define consume (lambda ()
+    (match (perform chan-recv ch)
+      (None nil)
+      ((Some v)
+        (begin
+          (perform println v)
+          (consume))))))
+  (consume))
 "#,
     );
     assert!(result.is_ok());
@@ -3246,14 +3239,13 @@ fn channel_producer_consumer() {
 fn channel_close_wakes_receivers() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (let ((ch (perform chan-new 0)))
-    (perform fiber-spawn (lambda ()
-      (let ((v (perform chan-recv ch)))
-        (perform println (match v (None "got-none") ((Some _) "got-val"))))))
-    (perform fiber-yield)
-    (perform chan-close ch)
-    (perform fiber-yield))))
+(let ((ch (perform chan-new 0)))
+  (perform fiber-spawn (lambda ()
+    (let ((v (perform chan-recv ch)))
+      (perform println (match v (None "got-none") ((Some _) "got-val"))))))
+  (perform fiber-yield)
+  (perform chan-close ch)
+  (perform fiber-yield))
 "#,
     );
     assert!(result.is_ok());
@@ -3264,13 +3256,12 @@ fn channel_close_wakes_receivers() {
 fn channel_send_closed_returns_err() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (let ((ch (perform chan-new 0)))
-    (perform chan-close ch)
-    (let ((r (perform chan-send ch 42)))
-      (perform println (match r
-        ((Ok _) "ok")
-        ((Err msg) (string-append "err:" msg))))))))
+(let ((ch (perform chan-new 0)))
+  (perform chan-close ch)
+  (let ((r (perform chan-send ch 42)))
+    (perform println (match r
+      ((Ok _) "ok")
+      ((Err msg) (string-append "err:" msg))))))
 "#,
     );
     assert!(result.is_ok(), "chan-send closed test failed: {:?}", result);
@@ -3284,15 +3275,14 @@ fn channel_fan_out() {
 (define unwrap-some (lambda (opt)
   (match opt ((Some v) v) (None (error "unwrap-some: got None")))))
 
-(run-fibers (lambda ()
-  (let ((ch (perform chan-new 10)))
-    (perform fiber-spawn (lambda () (perform chan-send ch (+ 1 1))))
-    (perform fiber-spawn (lambda () (perform chan-send ch (+ 2 2))))
-    (perform fiber-spawn (lambda () (perform chan-send ch (+ 3 3))))
-    (let ((a (unwrap-some (perform chan-recv ch)))
-          (b (unwrap-some (perform chan-recv ch)))
-          (c (unwrap-some (perform chan-recv ch))))
-      (perform println (+ a (+ b c)))))))
+(let ((ch (perform chan-new 10)))
+  (perform fiber-spawn (lambda () (perform chan-send ch (+ 1 1))))
+  (perform fiber-spawn (lambda () (perform chan-send ch (+ 2 2))))
+  (perform fiber-spawn (lambda () (perform chan-send ch (+ 3 3))))
+  (let ((a (unwrap-some (perform chan-recv ch)))
+        (b (unwrap-some (perform chan-recv ch)))
+        (c (unwrap-some (perform chan-recv ch))))
+    (perform println (+ a (+ b c)))))
 "#,
     );
     assert!(result.is_ok());
@@ -3305,12 +3295,11 @@ fn channel_fan_out() {
 fn actor_send_receive_basic() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (let ((me (perform fiber-self)))
-    (perform fiber-spawn (lambda ()
-      (perform actor-send me "hello")))
-    (let ((msg (perform actor-receive)))
-      (perform println msg)))))
+(let ((me (perform fiber-self)))
+  (perform fiber-spawn (lambda ()
+    (perform actor-send me "hello")))
+  (let ((msg (perform actor-receive)))
+    (perform println msg)))
 "#,
     );
     assert!(result.is_ok());
@@ -3321,13 +3310,12 @@ fn actor_send_receive_basic() {
 fn actor_receive_blocks_until_message() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (let ((me (perform fiber-self)))
-    (perform fiber-spawn (lambda ()
-      (perform fiber-yield)
-      (perform actor-send me "delayed")))
-    (let ((msg (perform actor-receive)))
-      (perform println msg)))))
+(let ((me (perform fiber-self)))
+  (perform fiber-spawn (lambda ()
+    (perform fiber-yield)
+    (perform actor-send me "delayed")))
+  (let ((msg (perform actor-receive)))
+    (perform println msg)))
 "#,
     );
     assert!(result.is_ok());
@@ -3339,21 +3327,20 @@ fn actor_selective_receive() {
     let (result, output) = eval_with_output(
         r#"
 (data Msg (A Int) (B Int))
-(run-fibers (lambda ()
-  (let ((me (perform fiber-self)))
-    (perform fiber-spawn (lambda ()
-      (perform actor-send me (A 1))
-      (perform actor-send me (B 2))
-      (perform actor-send me (A 3))))
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (let ((msg (perform actor-receive-match
-                 (lambda (m)
-                   (match m
-                     ((B _) #t)
-                     (_ #f))))))
-      (match msg
-        ((B n) (perform println n)))))))
+(let ((me (perform fiber-self)))
+  (perform fiber-spawn (lambda ()
+    (perform actor-send me (A 1))
+    (perform actor-send me (B 2))
+    (perform actor-send me (A 3))))
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (let ((msg (perform actor-receive-match
+               (lambda (m)
+                 (match m
+                   ((B _) #t)
+                   (_ #f))))))
+    (match msg
+      ((B n) (perform println n)))))
 "#,
     );
     assert!(result.is_ok());
@@ -3367,17 +3354,16 @@ fn monitor_delivers_down_on_crash() {
     let (result, output) = eval_with_output(
         r#"
 (data Signal (Down Pid String) (Exit Pid String))
-(run-fibers (lambda ()
-  (let ((worker (perform fiber-spawn (lambda ()
-                  (perform fiber-yield)
-                  (error "boom")))))
-    (perform actor-monitor worker)
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (let ((msg (perform actor-receive)))
-      (match msg
-        ((Down pid reason) (perform println reason)))))))
+(let ((worker (perform fiber-spawn (lambda ()
+                (perform fiber-yield)
+                (error "boom")))))
+  (perform actor-monitor worker)
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (let ((msg (perform actor-receive)))
+    (match msg
+      ((Down pid reason) (perform println reason)))))
 "#,
     );
     assert!(result.is_ok());
@@ -3389,14 +3375,13 @@ fn monitor_delivers_down_normal_on_clean_exit() {
     let (result, output) = eval_with_output(
         r#"
 (data Signal (Down Pid String) (Exit Pid String))
-(run-fibers (lambda ()
-  (let ((worker (perform fiber-spawn (lambda () nil))))
-    (perform actor-monitor worker)
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (let ((msg (perform actor-receive)))
-      (match msg
-        ((Down pid reason) (perform println reason)))))))
+(let ((worker (perform fiber-spawn (lambda () nil))))
+  (perform actor-monitor worker)
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (let ((msg (perform actor-receive)))
+    (match msg
+      ((Down pid reason) (perform println reason)))))
 "#,
     );
     assert!(result.is_ok());
@@ -3408,32 +3393,30 @@ fn trap_exit_converts_crash_to_message() {
     let (result, output) = eval_with_output(
         r#"
 (data Signal (Down Pid String) (Exit Pid String))
-(run-fibers (lambda ()
-  (perform actor-trap-exit #t)
-  (let ((worker (perform fiber-spawn (lambda ()
-                  (perform fiber-yield)
-                  (error "crash")))))
-    (perform actor-link worker)
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (let ((msg (perform actor-receive)))
-      (match msg
-        ((Exit pid reason) (perform println (string-append "caught: " reason))))))))
+(perform actor-trap-exit #t)
+(let ((worker (perform fiber-spawn (lambda ()
+                (perform fiber-yield)
+                (error "crash")))))
+  (perform actor-link worker)
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (let ((msg (perform actor-receive)))
+    (match msg
+      ((Exit pid reason) (perform println (string-append "caught: " reason))))))
 "#,
     );
     assert!(result.is_ok());
     assert_eq!(output.trim(), "caught: crash");
 }
 
-// ===== Concurrency - IO inside run-fibers =====
+// ===== Concurrency - IO =====
 
 #[test]
-fn io_println_inside_run_fibers() {
+fn io_println_inside_scheduler() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (perform println "hello from fibers")))
+(perform println "hello from fibers")
 "#,
     );
     assert!(result.is_ok());
@@ -3444,10 +3427,9 @@ fn io_println_inside_run_fibers() {
 fn io_multiple_fibers_printing() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (perform fiber-spawn (lambda () (perform println "fiber1")))
-  (perform fiber-spawn (lambda () (perform println "fiber2")))
-  (perform println "main")))
+(perform fiber-spawn (lambda () (perform println "fiber1")))
+(perform fiber-spawn (lambda () (perform println "fiber2")))
+(perform println "main")
 "#,
     );
     assert!(result.is_ok());
@@ -3465,9 +3447,8 @@ fn io_file_read_inside_fibers() {
 (define unwrap-ok (lambda (r)
   (match r ((Ok v) v) ((Err msg) (error msg)))))
 
-(run-fibers (lambda ()
-  (let ((content (unwrap-ok (perform read-file "{}"))))
-    (perform println content))))
+(let ((content (unwrap-ok (perform read-file "{}"))))
+  (perform println content))
 "#,
         tmp_path
     );
@@ -3490,16 +3471,15 @@ fn io_concurrent_file_reads() {
 (define unwrap-ok (lambda (r)
   (match r ((Ok v) v) ((Err msg) (error msg)))))
 
-(run-fibers (lambda ()
-  (let ((ch (perform chan-new 10)))
-    (perform fiber-spawn (lambda ()
-      (perform chan-send ch (unwrap-ok (perform read-file "{}")))))
-    (perform fiber-spawn (lambda ()
-      (perform chan-send ch (unwrap-ok (perform read-file "{}")))))
-    (let ((a (unwrap-some (perform chan-recv ch)))
-          (b (unwrap-some (perform chan-recv ch))))
-      (perform println a)
-      (perform println b)))))
+(let ((ch (perform chan-new 10)))
+  (perform fiber-spawn (lambda ()
+    (perform chan-send ch (unwrap-ok (perform read-file "{}")))))
+  (perform fiber-spawn (lambda ()
+    (perform chan-send ch (unwrap-ok (perform read-file "{}")))))
+  (let ((a (unwrap-some (perform chan-recv ch)))
+        (b (unwrap-some (perform chan-recv ch))))
+    (perform println a)
+    (perform println b)))
 "#,
         tmp1, tmp2
     );
@@ -3517,14 +3497,13 @@ fn io_concurrent_file_reads() {
 fn concurrency_main_result_returned() {
     assert_int(
         r#"
-(run-fibers (lambda () 42))
-"#,
-        42,
+42
+"#, 42,
     );
 }
 
 #[test]
-fn io_outside_run_fibers_still_works() {
+fn io_basic_println() {
     let (result, output) = eval_with_output(
         r#"
 (perform println "sync io")
@@ -3553,15 +3532,14 @@ fn counter_actor_pattern() {
           (perform actor-send sender (Count count))
           (counter count)))))))
 
-(run-fibers (lambda ()
-  (let ((c (perform fiber-spawn (lambda () (counter 0))))
-        (me (perform fiber-self)))
-    (perform actor-send c (Increment 5))
-    (perform actor-send c (Increment 3))
-    (perform actor-send c (GetCount me))
-    (let ((reply (perform actor-receive)))
-      (match reply
-        ((Count n) (perform println n)))))))
+(let ((c (perform fiber-spawn (lambda () (counter 0))))
+      (me (perform fiber-self)))
+  (perform actor-send c (Increment 5))
+  (perform actor-send c (Increment 3))
+  (perform actor-send c (GetCount me))
+  (let ((reply (perform actor-receive)))
+    (match reply
+      ((Count n) (perform println n)))))
 "#,
     );
     assert!(result.is_ok());
@@ -3591,9 +3569,8 @@ fn ping_pong_pattern() {
         (match msg
           ((Pong _) (ping partner (- n 1)))))))))
 
-(run-fibers (lambda ()
-  (let ((p (perform fiber-spawn pong)))
-    (ping p 100))))
+(let ((p (perform fiber-spawn pong)))
+  (ping p 100))
 "#,
     );
     assert!(result.is_ok());
@@ -3605,12 +3582,11 @@ fn fiber_crash_isolation() {
     // Multiple child fibers crash, main survives
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (perform fiber-spawn (lambda () (error "crash1")))
-  (perform fiber-spawn (lambda () (error "crash2")))
-  (perform fiber-yield)
-  (perform fiber-yield)
-  (perform println "survived")))
+(perform fiber-spawn (lambda () (error "crash1")))
+(perform fiber-spawn (lambda () (error "crash2")))
+(perform fiber-yield)
+(perform fiber-yield)
+(perform println "survived")
 "#,
     );
     assert!(result.is_ok());
@@ -3623,9 +3599,8 @@ fn fiber_crash_isolation() {
 fn parallel_main_result_returned() {
     assert_int(
         r#"
-(run-fibers-parallel (lambda () 42) 2)
-"#,
-        42,
+42
+"#, 42,
     );
 }
 
@@ -3633,9 +3608,8 @@ fn parallel_main_result_returned() {
 fn parallel_spawn_returns_pid() {
     let val = eval(
         r#"
-(run-fibers-parallel (lambda ()
-  (let ((pid (perform fiber-spawn (lambda () 99))))
-    pid)) 2)
+(let ((pid (perform fiber-spawn (lambda () 99))))
+  pid)
 "#,
     )
     .expect("eval failed");
@@ -3647,8 +3621,7 @@ fn parallel_spawn_returns_pid() {
 fn parallel_basic_println() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers-parallel (lambda ()
-  (perform println "hello from parallel")) 2)
+(perform println "hello from parallel")
 "#,
     );
     assert!(result.is_ok());
@@ -3659,10 +3632,9 @@ fn parallel_basic_println() {
 fn parallel_multiple_fibers_printing() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers-parallel (lambda ()
-  (perform fiber-spawn (lambda () (perform println "fiber1")))
-  (perform fiber-spawn (lambda () (perform println "fiber2")))
-  (perform println "main")) 2)
+(perform fiber-spawn (lambda () (perform println "fiber1")))
+(perform fiber-spawn (lambda () (perform println "fiber2")))
+(perform println "main")
 "#,
     );
     assert!(result.is_ok());
@@ -3683,15 +3655,14 @@ fn parallel_fib_two_fibers() {
 (define unwrap-some (lambda (opt)
   (match opt ((Some v) v) (None (error "unwrap-some: got None")))))
 
-(run-fibers-parallel (lambda ()
-  (let ((ch (perform chan-new 10)))
-    (perform fiber-spawn (lambda ()
-      (perform chan-send ch (fib 20))))
-    (perform fiber-spawn (lambda ()
-      (perform chan-send ch (fib 20))))
-    (let ((a (unwrap-some (perform chan-recv ch)))
-          (b (unwrap-some (perform chan-recv ch))))
-      (perform println (string-append "results: " (show a) " " (show b)))))) 2)
+(let ((ch (perform chan-new 10)))
+  (perform fiber-spawn (lambda ()
+    (perform chan-send ch (fib 20))))
+  (perform fiber-spawn (lambda ()
+    (perform chan-send ch (fib 20))))
+  (let ((a (unwrap-some (perform chan-recv ch)))
+        (b (unwrap-some (perform chan-recv ch))))
+    (perform println (string-append "results: " (show a) " " (show b)))))
 "#,
     );
     assert!(result.is_ok());
@@ -3706,14 +3677,13 @@ fn parallel_cross_thread_channel() {
 (define unwrap-some (lambda (opt)
   (match opt ((Some v) v) (None (error "unwrap-some: got None")))))
 
-(run-fibers-parallel (lambda ()
-  (let ((ch (perform chan-new 0)))
-    (perform fiber-spawn (lambda ()
-      (perform chan-send ch "hello")
-      (perform chan-send ch "world")))
-    (let ((a (unwrap-some (perform chan-recv ch)))
-          (b (unwrap-some (perform chan-recv ch))))
-      (perform println (string-append a " " b))))) 2)
+(let ((ch (perform chan-new 0)))
+  (perform fiber-spawn (lambda ()
+    (perform chan-send ch "hello")
+    (perform chan-send ch "world")))
+  (let ((a (unwrap-some (perform chan-recv ch)))
+        (b (unwrap-some (perform chan-recv ch))))
+    (perform println (string-append a " " b))))
 "#,
     );
     assert!(result.is_ok());
@@ -3724,14 +3694,13 @@ fn parallel_cross_thread_channel() {
 fn parallel_actor_send_receive() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers-parallel (lambda ()
-  (let ((worker (perform fiber-spawn (lambda ()
-                  (let ((msg (perform actor-receive)))
-                    (perform println (string-append "got: " msg)))))))
-    (perform actor-send worker "ping")
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (perform fiber-yield))) 2)
+(let ((worker (perform fiber-spawn (lambda ()
+                (let ((msg (perform actor-receive)))
+                  (perform println (string-append "got: " msg)))))))
+  (perform actor-send worker "ping")
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform fiber-yield))
 "#,
     );
     assert!(result.is_ok());
@@ -3757,11 +3726,10 @@ fn parallel_many_fibers() {
     (let ((v (unwrap-some (perform chan-recv ch))))
       (collect ch (- n 1) (+ acc v))))))
 
-(run-fibers-parallel (lambda ()
-  (let ((ch (perform chan-new 100)))
-    (spawn-workers ch 10)
-    (let ((total (collect ch 10 0)))
-      (perform println total)))) 2)
+(let ((ch (perform chan-new 100)))
+  (spawn-workers ch 10)
+  (let ((total (collect ch 10 0)))
+    (perform println total)))
 "#,
     );
     assert!(result.is_ok());
@@ -3791,9 +3759,8 @@ fn parallel_actor_ping_pong() {
         (match msg
           ((Pong _) (ping-loop partner (- n 1)))))))))
 
-(run-fibers-parallel (lambda ()
-  (let ((p (perform fiber-spawn pong-loop)))
-    (ping-loop p 50))) 2)
+(let ((p (perform fiber-spawn pong-loop)))
+  (ping-loop p 50))
 "#,
     );
     assert!(result.is_ok());
@@ -3806,17 +3773,16 @@ fn parallel_monitor_cross_thread() {
         r#"
 (data Signal (Down Pid String))
 
-(run-fibers-parallel (lambda ()
-  (let ((worker (perform fiber-spawn (lambda ()
-                  (perform fiber-yield)
-                  (error "boom")))))
-    (perform actor-monitor worker)
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (let ((msg (perform actor-receive)))
-      (match msg
-        ((Down pid reason) (perform println (string-append "down: " reason))))))) 2)
+(let ((worker (perform fiber-spawn (lambda ()
+                (perform fiber-yield)
+                (error "boom")))))
+  (perform actor-monitor worker)
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (let ((msg (perform actor-receive)))
+    (match msg
+      ((Down pid reason) (perform println (string-append "down: " reason))))))
 "#,
     );
     assert!(result.is_ok());
@@ -3827,12 +3793,11 @@ fn parallel_monitor_cross_thread() {
 fn parallel_fiber_crash_isolation() {
     let (result, output) = eval_with_output(
         r#"
-(run-fibers-parallel (lambda ()
-  (perform fiber-spawn (lambda () (error "crash1")))
-  (perform fiber-spawn (lambda () (error "crash2")))
-  (perform fiber-yield)
-  (perform fiber-yield)
-  (perform println "survived")) 2)
+(perform fiber-spawn (lambda () (error "crash1")))
+(perform fiber-spawn (lambda () (error "crash2")))
+(perform fiber-yield)
+(perform fiber-yield)
+(perform println "survived")
 "#,
     );
     assert!(result.is_ok());
@@ -3850,9 +3815,8 @@ fn async_read_file() {
 (define unwrap-ok (lambda (r)
   (match r ((Ok v) v) ((Err msg) (error msg)))))
 
-(run-fibers-parallel (lambda ()
-  (let ((content (unwrap-ok (perform read-file "{}"))))
-    (perform println content))) 2)
+(let ((content (unwrap-ok (perform read-file "{}"))))
+  (perform println content))
 "#,
         tmp_path
     );
@@ -3868,8 +3832,7 @@ fn async_write_file() {
     let _ = std::fs::remove_file(tmp_path);
     let source = format!(
         r#"
-(run-fibers-parallel (lambda ()
-  (perform write-file "{}" "written by tokio")) 2)
+(perform write-file "{}" "written by tokio")
 "#,
         tmp_path
     );
@@ -3892,17 +3855,16 @@ fn async_io_concurrent() {
 (define unwrap-ok (lambda (r)
   (match r ((Ok v) v) ((Err msg) (error msg)))))
 
-(run-fibers-parallel (lambda ()
-  (let ((ch (perform chan-new 10)))
-    (perform fiber-spawn (lambda ()
-      (let ((content (unwrap-ok (perform read-file "{}"))))
-        (perform chan-send ch content))))
-    (perform fiber-spawn (lambda ()
-      (perform chan-send ch (show (+ 1 2)))))
-    (let ((a (unwrap-some (perform chan-recv ch)))
-          (b (unwrap-some (perform chan-recv ch))))
-      (perform println a)
-      (perform println b)))) 2)
+(let ((ch (perform chan-new 10)))
+  (perform fiber-spawn (lambda ()
+    (let ((content (unwrap-ok (perform read-file "{}"))))
+      (perform chan-send ch content))))
+  (perform fiber-spawn (lambda ()
+    (perform chan-send ch (show (+ 1 2)))))
+  (let ((a (unwrap-some (perform chan-recv ch)))
+        (b (unwrap-some (perform chan-recv ch))))
+    (perform println a)
+    (perform println b)))
 "#,
         tmp_path
     );
@@ -3918,13 +3880,12 @@ fn async_io_error() {
     // read-file on nonexistent path → fiber crashes cleanly, main survives
     let (result, output) = eval_with_output(
         r#"
-(run-fibers-parallel (lambda ()
-  (perform fiber-spawn (lambda ()
-    (perform read-file "/tmp/marlang-no-such-file-ever.txt")))
-  (perform fiber-yield)
-  (perform fiber-yield)
-  (perform fiber-yield)
-  (perform println "main ok")) 2)
+(perform fiber-spawn (lambda ()
+  (perform read-file "/tmp/marlang-no-such-file-ever.txt")))
+(perform fiber-yield)
+(perform fiber-yield)
+(perform fiber-yield)
+(perform println "main ok")
 "#,
     );
     assert!(result.is_ok());
@@ -4430,13 +4391,11 @@ fn tcp_listen_and_close() {
     // Verify tcp-listen with port 0 (ephemeral) works and close cleans up
     let (result, output) = eval_with_output(
         r#"
-(run-fibers-parallel (lambda ()
-  (let ((listener (match (perform tcp-listen 0)
-                    ((Ok l) l)
-                    ((Err msg) (perform throw msg)))))
-    (perform tcp-close listener)
-    (perform println "listen-ok")))
-  2)
+(let ((listener (match (perform tcp-listen 0)
+                  ((Ok l) l)
+                  ((Err msg) (perform throw msg)))))
+  (perform tcp-close listener)
+  (perform println "listen-ok"))
 "#,
     );
     assert!(result.is_ok(), "tcp listen/close failed: {:?}", result);
@@ -4459,24 +4418,22 @@ fn tcp_echo_server_fixed_port() {
     ((Some v) v)
     (None (perform throw "unwrap-some: got None")))))
 
-(run-fibers-parallel (lambda ()
-  (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
-    ;; Server fiber: accept one connection, echo data, close
-    (perform fiber-spawn (lambda ()
-      (let ((client (unwrap-some (perform tcp-accept listener))))
-        (let ((data (unwrap-some (perform tcp-recv client))))
-          (unwrap-ok (perform tcp-send client data) "send")
-          (perform tcp-close client)))))
-    ;; Client: connect, send, recv, print
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
-      (unwrap-ok (perform tcp-send sock "hello") "send")
-      (let ((resp (unwrap-some (perform tcp-recv sock))))
-        (perform println resp)
-        (perform tcp-close sock)))
-    (perform tcp-close listener)))
-  2)
+(let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
+  ;; Server fiber: accept one connection, echo data, close
+  (perform fiber-spawn (lambda ()
+    (let ((client (unwrap-some (perform tcp-accept listener))))
+      (let ((data (unwrap-some (perform tcp-recv client))))
+        (unwrap-ok (perform tcp-send client data) "send")
+        (perform tcp-close client)))))
+  ;; Client: connect, send, recv, print
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
+    (unwrap-ok (perform tcp-send sock "hello") "send")
+    (let ((resp (unwrap-some (perform tcp-recv sock))))
+      (perform println resp)
+      (perform tcp-close sock)))
+  (perform tcp-close listener))
 "#
     );
     let (result, output) = eval_with_output(&code);
@@ -4499,21 +4456,19 @@ fn tcp_recv_returns_none_on_close() {
     ((Some v) v)
     (None (perform throw "unwrap-some: got None")))))
 
-(run-fibers-parallel (lambda ()
-  (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
-    ;; Server: accept and immediately close
-    (perform fiber-spawn (lambda ()
-      (let ((client (unwrap-some (perform tcp-accept listener))))
-        (perform tcp-close client))))
-    (perform fiber-yield)
-    (perform fiber-yield)
-    ;; Client: connect, recv should get None
-    (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
-      (let ((data (perform tcp-recv sock)))
-        (perform println (match data (None "closed") ((Some _) "data"))))
-      (perform tcp-close sock))
-    (perform tcp-close listener)))
-  2)
+(let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
+  ;; Server: accept and immediately close
+  (perform fiber-spawn (lambda ()
+    (let ((client (unwrap-some (perform tcp-accept listener))))
+      (perform tcp-close client))))
+  (perform fiber-yield)
+  (perform fiber-yield)
+  ;; Client: connect, recv should get None
+  (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
+    (let ((data (perform tcp-recv sock)))
+      (perform println (match data (None "closed") ((Some _) "data"))))
+    (perform tcp-close sock))
+  (perform tcp-close listener))
 "#
     );
     let (result, output) = eval_with_output(&code);
@@ -4536,24 +4491,22 @@ fn tcp_send_and_receive_data() {
     ((Some v) v)
     (None (perform throw "unwrap-some: got None")))))
 
-(run-fibers-parallel (lambda ()
-  (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
-    ;; Server: accept, receive, echo with prefix
-    (perform fiber-spawn (lambda ()
-      (let ((client (unwrap-some (perform tcp-accept listener))))
-        (let ((d1 (unwrap-some (perform tcp-recv client))))
-          (unwrap-ok (perform tcp-send client (string-append "echo:" d1)) "send")
-          (perform tcp-close client)))))
-    (perform fiber-yield)
-    (perform fiber-yield)
-    ;; Client
-    (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
-      (unwrap-ok (perform tcp-send sock "foobar") "send")
-      (let ((resp (unwrap-some (perform tcp-recv sock))))
-        (perform println resp)
-        (perform tcp-close sock)))
-    (perform tcp-close listener)))
-  2)
+(let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
+  ;; Server: accept, receive, echo with prefix
+  (perform fiber-spawn (lambda ()
+    (let ((client (unwrap-some (perform tcp-accept listener))))
+      (let ((d1 (unwrap-some (perform tcp-recv client))))
+        (unwrap-ok (perform tcp-send client (string-append "echo:" d1)) "send")
+        (perform tcp-close client)))))
+  (perform fiber-yield)
+  (perform fiber-yield)
+  ;; Client
+  (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
+    (unwrap-ok (perform tcp-send sock "foobar") "send")
+    (let ((resp (unwrap-some (perform tcp-recv sock))))
+      (perform println resp)
+      (perform tcp-close sock)))
+  (perform tcp-close listener))
 "#
     );
     let (result, output) = eval_with_output(&code);
@@ -4571,21 +4524,19 @@ fn tcp_listener_close_wakes_acceptor() {
     ((Ok v) v)
     ((Err msg) (perform throw (string-append label ": " msg))))))
 
-(run-fibers-parallel (lambda ()
-  (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
-    ;; Fiber waiting to accept
-    (perform fiber-spawn (lambda ()
-      (let ((result (perform tcp-accept listener)))
-        (perform println (match result (None "woke-none") ((Some _) "got-conn"))))))
-    (perform fiber-yield)
-    (perform fiber-yield)
-    ;; Close the listener while someone is waiting
-    (perform tcp-close listener)
-    ;; Give the acceptor time to wake
-    (perform fiber-yield)
-    (perform fiber-yield)
-    (perform fiber-yield)))
-  2)
+(let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
+  ;; Fiber waiting to accept
+  (perform fiber-spawn (lambda ()
+    (let ((result (perform tcp-accept listener)))
+      (perform println (match result (None "woke-none") ((Some _) "got-conn"))))))
+  (perform fiber-yield)
+  (perform fiber-yield)
+  ;; Close the listener while someone is waiting
+  (perform tcp-close listener)
+  ;; Give the acceptor time to wake
+  (perform fiber-yield)
+  (perform fiber-yield)
+  (perform fiber-yield))
 "#
     );
     let (result, output) = eval_with_output(&code);
@@ -4612,34 +4563,32 @@ fn tcp_multiple_clients() {
     ((Some v) v)
     (None (perform throw "unwrap-some: got None")))))
 
-(run-fibers-parallel (lambda ()
-  (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
-    ;; Server: handle two connections sequentially
-    (perform fiber-spawn (lambda ()
-      (let ((c1 (unwrap-some (perform tcp-accept listener))))
-        (let ((d1 (unwrap-some (perform tcp-recv c1))))
-          (unwrap-ok (perform tcp-send c1 (string-append "1:" d1)) "send")
-          (perform tcp-close c1)))
-      (let ((c2 (unwrap-some (perform tcp-accept listener))))
-        (let ((d2 (unwrap-some (perform tcp-recv c2))))
-          (unwrap-ok (perform tcp-send c2 (string-append "2:" d2)) "send")
-          (perform tcp-close c2)))))
-    (perform fiber-yield)
-    (perform fiber-yield)
-    ;; Client 1
-    (let ((s1 (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
-      (unwrap-ok (perform tcp-send s1 "alpha") "send")
-      (let ((r1 (unwrap-some (perform tcp-recv s1))))
-        (perform println r1)
-        (perform tcp-close s1)))
-    ;; Client 2
-    (let ((s2 (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
-      (unwrap-ok (perform tcp-send s2 "beta") "send")
-      (let ((r2 (unwrap-some (perform tcp-recv s2))))
-        (perform println r2)
-        (perform tcp-close s2)))
-    (perform tcp-close listener)))
-  2)
+(let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
+  ;; Server: handle two connections sequentially
+  (perform fiber-spawn (lambda ()
+    (let ((c1 (unwrap-some (perform tcp-accept listener))))
+      (let ((d1 (unwrap-some (perform tcp-recv c1))))
+        (unwrap-ok (perform tcp-send c1 (string-append "1:" d1)) "send")
+        (perform tcp-close c1)))
+    (let ((c2 (unwrap-some (perform tcp-accept listener))))
+      (let ((d2 (unwrap-some (perform tcp-recv c2))))
+        (unwrap-ok (perform tcp-send c2 (string-append "2:" d2)) "send")
+        (perform tcp-close c2)))))
+  (perform fiber-yield)
+  (perform fiber-yield)
+  ;; Client 1
+  (let ((s1 (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
+    (unwrap-ok (perform tcp-send s1 "alpha") "send")
+    (let ((r1 (unwrap-some (perform tcp-recv s1))))
+      (perform println r1)
+      (perform tcp-close s1)))
+  ;; Client 2
+  (let ((s2 (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
+    (unwrap-ok (perform tcp-send s2 "beta") "send")
+    (let ((r2 (unwrap-some (perform tcp-recv s2))))
+      (perform println r2)
+      (perform tcp-close s2)))
+  (perform tcp-close listener))
 "#
     );
     let (result, output) = eval_with_output(&code);
@@ -4663,24 +4612,22 @@ fn tcp_bidirectional() {
     ((Some v) v)
     (None (perform throw "unwrap-some: got None")))))
 
-(run-fibers-parallel (lambda ()
-  (let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
-    ;; Server: recv then send
-    (perform fiber-spawn (lambda ()
-      (let ((client (unwrap-some (perform tcp-accept listener))))
-        (let ((msg (unwrap-some (perform tcp-recv client))))
-          (unwrap-ok (perform tcp-send client "pong") "send")
-          (perform tcp-close client)))))
-    (perform fiber-yield)
-    (perform fiber-yield)
-    ;; Client: send then recv
-    (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
-      (unwrap-ok (perform tcp-send sock "ping") "send")
-      (let ((resp (unwrap-some (perform tcp-recv sock))))
-        (perform println resp)
-        (perform tcp-close sock)))
-    (perform tcp-close listener)))
-  2)
+(let ((listener (unwrap-ok (perform tcp-listen {port}) "listen")))
+  ;; Server: recv then send
+  (perform fiber-spawn (lambda ()
+    (let ((client (unwrap-some (perform tcp-accept listener))))
+      (let ((msg (unwrap-some (perform tcp-recv client))))
+        (unwrap-ok (perform tcp-send client "pong") "send")
+        (perform tcp-close client)))))
+  (perform fiber-yield)
+  (perform fiber-yield)
+  ;; Client: send then recv
+  (let ((sock (unwrap-ok (perform tcp-connect "127.0.0.1" {port}) "connect")))
+    (unwrap-ok (perform tcp-send sock "ping") "send")
+    (let ((resp (unwrap-some (perform tcp-recv sock))))
+      (perform println resp)
+      (perform tcp-close sock)))
+  (perform tcp-close listener))
 "#
     );
     let (result, output) = eval_with_output(&code);
@@ -4693,19 +4640,17 @@ fn tcp_connect_failure() {
     // Connect to a port that's not listening — returns (Err msg)
     let (result, output) = eval_with_output(
         r#"
-(run-fibers-parallel (lambda ()
-  (perform fiber-spawn (lambda ()
-    (let ((r (perform tcp-connect "127.0.0.1" 19399)))
-      (match r
-        ((Err msg) (perform println (string-append "err:" msg)))
-        ((Ok _) (perform println "unexpected-ok"))))))
-  ;; Main fiber waits a bit for the child to attempt connection
-  (perform fiber-yield)
-  (perform fiber-yield)
-  (perform fiber-yield)
-  (perform fiber-yield)
-  (perform println "main-ok"))
-  2)
+(perform fiber-spawn (lambda ()
+  (let ((r (perform tcp-connect "127.0.0.1" 19399)))
+    (match r
+      ((Err msg) (perform println (string-append "err:" msg)))
+      ((Ok _) (perform println "unexpected-ok"))))))
+;; Main fiber waits a bit for the child to attempt connection
+(perform fiber-yield)
+(perform fiber-yield)
+(perform fiber-yield)
+(perform fiber-yield)
+(perform println "main-ok")
 "#,
     );
     assert!(
@@ -4718,24 +4663,21 @@ fn tcp_connect_failure() {
 }
 
 #[test]
-fn tcp_single_threaded_rejects() {
-    // TCP effects should fail in the single-threaded scheduler
-    let result = eval(
+fn tcp_effects_work_at_top_level() {
+    // TCP effects work at the top level with the always-on scheduler
+    let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (perform tcp-listen 19390)))
+(match (perform tcp-listen 19391)
+  ((Ok listener)
+    (begin
+      (perform tcp-close-listener listener)
+      (perform println "ok")))
+  ((Err msg)
+    (perform println (string-append "err: " msg))))
 "#,
     );
-    assert!(
-        result.is_err(),
-        "expected error for TCP in single-threaded scheduler"
-    );
-    let err_msg = result.unwrap_err().message().to_owned();
-    assert!(
-        err_msg.contains("multi-threaded"),
-        "error message: {}",
-        err_msg
-    );
+    assert!(result.is_ok(), "TCP at top level failed: {:?}", result);
+    assert_eq!(output.trim(), "ok");
 }
 
 // =========================================================================
@@ -4747,12 +4689,11 @@ fn throw_crashes_fiber_default() {
     // Unhandled throw should crash the fiber (default handler)
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (perform fiber-spawn (lambda ()
-    (perform throw "boom")))
-  (perform fiber-yield)
-  (perform fiber-yield)
-  (perform println "main-survived")))
+(perform fiber-spawn (lambda ()
+  (perform throw "boom")))
+(perform fiber-yield)
+(perform fiber-yield)
+(perform println "main-survived")
 "#,
     );
     // Main fiber should survive — the spawned fiber crashes
@@ -4765,13 +4706,12 @@ fn throw_caught_by_handle() {
     // User code can catch throw with a handle block
     let (result, output) = eval_with_output(
         r#"
-(run-fibers (lambda ()
-  (let ((r (handle
-             (begin
-               (perform throw "oops")
-               "unreachable")
-             ((throw msg k) -> (string-append "caught:" msg)))))
-    (perform println r))))
+(let ((r (handle
+           (begin
+             (perform throw "oops")
+             "unreachable")
+           ((throw msg k) -> (string-append "caught:" msg)))))
+  (perform println r))
 "#,
     );
     assert!(result.is_ok(), "throw handle test failed: {:?}", result);
@@ -4783,21 +4723,19 @@ fn throw_with_tcp_connect_and_handle() {
     // tcp-connect failure returns (Err msg), match on Result directly (recommended API)
     let (result, output) = eval_with_output(
         r#"
-(run-fibers-parallel (lambda ()
-  ;; Spawn a fiber that tries to connect and checks the Result
-  (perform fiber-spawn (lambda ()
-    (let ((result (perform tcp-connect "127.0.0.1" 19399)))
-      (match result
-        ((Ok v) (perform println "unexpected-ok"))
-        ((Err msg) (perform println (string-append "err:" msg)))))))
-  ;; Main fiber waits
-  (perform fiber-yield)
-  (perform fiber-yield)
-  (perform fiber-yield)
-  (perform fiber-yield)
-  (perform fiber-yield)
-  (perform println "done"))
-  2)
+;; Spawn a fiber that tries to connect and checks the Result
+(perform fiber-spawn (lambda ()
+  (let ((result (perform tcp-connect "127.0.0.1" 19399)))
+    (match result
+      ((Ok v) (perform println "unexpected-ok"))
+      ((Err msg) (perform println (string-append "err:" msg)))))))
+;; Main fiber waits
+(perform fiber-yield)
+(perform fiber-yield)
+(perform fiber-yield)
+(perform fiber-yield)
+(perform fiber-yield)
+(perform println "done")
 "#,
     );
     assert!(result.is_ok(), "throw tcp test failed: {:?}", result);
@@ -4815,17 +4753,15 @@ fn throw_with_tcp_listen_and_handle() {
     ((Ok v) v)
     ((Err msg) (perform throw (string-append label ": " msg))))))
 
-(run-fibers-parallel (lambda ()
-  ;; First bind the port
-  (let ((listener (unwrap-ok (perform tcp-listen 19391) "listen")))
-    ;; Try to bind the SAME port again — should fail with (Err msg)
-    ;; tcp-listen is synchronous so Result matching works directly
-    (let ((r2 (perform tcp-listen 19391)))
-      (match r2
-        ((Ok _) (perform println "unexpected-ok"))
-        ((Err msg) (perform println (string-append "err:" msg)))))
-    (perform tcp-close listener)))
-  2)
+;; First bind the port
+(let ((listener (unwrap-ok (perform tcp-listen 19391) "listen")))
+  ;; Try to bind the SAME port again — should fail with (Err msg)
+  ;; tcp-listen is synchronous so Result matching works directly
+  (let ((r2 (perform tcp-listen 19391)))
+    (match r2
+      ((Ok _) (perform println "unexpected-ok"))
+      ((Err msg) (perform println (string-append "err:" msg)))))
+  (perform tcp-close listener))
 "#,
     );
     assert!(result.is_ok(), "throw listen test failed: {:?}", result);
@@ -5064,4 +5000,352 @@ fn throw_custom_adt_unhandled_shows_value() {
 "#,
         r#"Uncaught exception: (NotFound "user")"#,
     );
+}
+
+// =====================================================================
+// ===== Bytes Tests ===================================================
+// =====================================================================
+
+#[test]
+fn bytes_new_and_length() {
+    assert_int("(bytes-length (bytes-new 0))", 0);
+    assert_int("(bytes-length (bytes-new 10))", 10);
+}
+
+#[test]
+fn bytes_get_set() {
+    // Set byte 2 to 42, read it back
+    assert_int("(bytes-get (bytes-set (bytes-new 5) 2 42) 2)", 42);
+    // Original is unchanged (immutable semantics)
+    assert_int(
+        r#"
+    (let ((b (bytes-new 5)))
+      (let ((_ (bytes-set b 2 42)))
+        (bytes-get b 2)))
+    "#,
+        0,
+    );
+}
+
+#[test]
+fn bytes_slice() {
+    assert_int("(bytes-length (bytes-slice (bytes-new 10) 3 7))", 4);
+}
+
+#[test]
+fn bytes_concat() {
+    assert_int(
+        "(bytes-length (bytes-concat (bytes-new 3) (bytes-new 5)))",
+        8,
+    );
+}
+
+#[test]
+fn bytes_from_string_roundtrip() {
+    let (result, output) = eval_with_output(
+        r#"
+(let ((b (bytes-from-string "hello")))
+  (match (bytes-to-string b)
+    ((Ok s) (perform println s))
+    ((Err msg) (perform println msg))))
+"#,
+    );
+    assert!(
+        result.is_ok(),
+        "bytes string roundtrip failed: {:?}",
+        result
+    );
+    assert_eq!(output.trim(), "hello");
+}
+
+#[test]
+fn bytes_from_string_length() {
+    assert_int(r#"(bytes-length (bytes-from-string "hello"))"#, 5);
+}
+
+#[test]
+fn bytes_from_list_roundtrip() {
+    let (result, output) = eval_with_output(
+        r#"
+(let ((b (bytes-from-list (list 72 101 108 108 111))))
+  (match (bytes-to-string b)
+    ((Ok s) (perform println s))
+    ((Err msg) (perform println msg))))
+"#,
+    );
+    assert!(
+        result.is_ok(),
+        "bytes from-list roundtrip failed: {:?}",
+        result
+    );
+    assert_eq!(output.trim(), "Hello");
+}
+
+#[test]
+fn bytes_to_list() {
+    let val = eval(r#"(bytes-to-list (bytes-from-string "AB"))"#).expect("eval failed");
+    assert_eq!(format_value(&val), "(65 66)");
+}
+
+#[test]
+fn bytes_equality() {
+    assert_eq!(
+        eval_to_string(r#"(equal? (bytes-from-string "abc") (bytes-from-string "abc"))"#),
+        "#t"
+    );
+    assert_eq!(
+        eval_to_string(r#"(equal? (bytes-from-string "abc") (bytes-from-string "xyz"))"#),
+        "#f"
+    );
+}
+
+#[test]
+fn bytes_show() {
+    // show should produce a #<bytes ...> representation
+    let val = eval_to_string(r#"(show (bytes-new 3))"#);
+    assert!(
+        val.contains("bytes"),
+        "show should contain 'bytes': {}",
+        val
+    );
+}
+
+// =====================================================================
+// ===== HTTP Tests ====================================================
+// =====================================================================
+
+#[test]
+fn http_request_get() {
+    // Spin up a local HTTP server on a random port, then make a request from Marlang
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener); // Free the port for hyper
+
+    // Start a background server thread using hyper
+    let server_handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use http_body_util::Full;
+            use hyper::body::Incoming;
+            use hyper::service::service_fn;
+
+            let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+                .await
+                .expect("server bind failed");
+
+            // Accept exactly one connection, respond, then exit
+            let (stream, _) = listener.accept().await.expect("accept failed");
+            let io = hyper_util::rt::TokioIo::new(stream);
+
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    io,
+                    service_fn(|_req: hyper::Request<Incoming>| async {
+                        Ok::<_, hyper::Error>(
+                            hyper::Response::builder()
+                                .status(200)
+                                .header("x-test", "hello")
+                                .body(Full::new(bytes::Bytes::from("test response body")))
+                                .unwrap(),
+                        )
+                    }),
+                )
+                .await
+                .ok();
+        });
+    });
+
+    // Give server time to start
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let code = format!(
+        r#"
+(import "std:http" as http)
+
+(match (http/get "http://127.0.0.1:{port}")
+  ((Ok (HttpResponse status headers body))
+    (begin
+      (perform println (show status))
+      (match (bytes-to-string body)
+        ((Ok text) (perform println text))
+        ((Err msg) (perform println msg)))))
+  ((Err msg)
+    (perform println (string-append "ERROR: " msg))))
+"#,
+    );
+
+    let (result, output) = eval_modules_with_output(&code, "dummy.mar");
+    assert!(result.is_ok(), "http GET failed: {:?}", result);
+    let lines: Vec<&str> = output.trim().lines().collect();
+    assert_eq!(lines[0], "200", "status should be 200");
+    assert_eq!(lines[1], "test response body", "body mismatch");
+
+    server_handle.join().ok();
+}
+
+#[test]
+fn http_request_post() {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let server_handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use http_body_util::{BodyExt, Full};
+            use hyper::body::Incoming;
+            use hyper::service::service_fn;
+
+            let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+                .await
+                .expect("server bind failed");
+
+            let (stream, _) = listener.accept().await.expect("accept failed");
+            let io = hyper_util::rt::TokioIo::new(stream);
+
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    io,
+                    service_fn(|req: hyper::Request<Incoming>| async move {
+                        let method = req.method().to_string();
+                        let body_bytes = req.into_body().collect().await.unwrap().to_bytes();
+                        let body_str = String::from_utf8_lossy(&body_bytes);
+                        let response_text = format!("method={} body={}", method, body_str);
+                        Ok::<_, hyper::Error>(
+                            hyper::Response::builder()
+                                .status(200)
+                                .body(Full::new(bytes::Bytes::from(response_text)))
+                                .unwrap(),
+                        )
+                    }),
+                )
+                .await
+                .ok();
+        });
+    });
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let code = format!(
+        r#"
+(import "std:http" as http)
+
+(match (http/post-text "http://127.0.0.1:{port}" (list) "hello world")
+  ((Ok (HttpResponse status headers body))
+    (match (bytes-to-string body)
+      ((Ok text) (perform println text))
+      ((Err msg) (perform println msg))))
+  ((Err msg)
+    (perform println (string-append "ERROR: " msg))))
+"#,
+    );
+
+    let (result, output) = eval_modules_with_output(&code, "dummy.mar");
+    assert!(result.is_ok(), "http POST failed: {:?}", result);
+    assert_eq!(output.trim(), "method=POST body=hello world");
+
+    server_handle.join().ok();
+}
+
+#[test]
+fn http_request_connect_failure() {
+    // Attempt to connect to a port nothing is listening on
+    let (result, output) = eval_modules_with_output(
+        r#"
+(import "std:http" as http)
+
+(match (http/get "http://127.0.0.1:19998")
+  ((Ok _) (perform println "unexpected success"))
+  ((Err msg) (perform println "got error")))
+"#,
+        "dummy.mar",
+    );
+    assert!(
+        result.is_ok(),
+        "http connect failure test failed: {:?}",
+        result
+    );
+    assert_eq!(output.trim(), "got error");
+}
+
+#[test]
+fn http_effects_work_at_top_level() {
+    // HTTP effects work at the top level with the always-on scheduler.
+    // Connection will fail (no server) but the effect handler should work.
+    let (result, output) = eval_modules_with_output(
+        r#"
+(import "std:http" as http)
+
+(match (http/get "http://127.0.0.1:1")
+  ((Ok resp) (perform println "unexpected ok"))
+  ((Err msg) (perform println "got error")))
+"#,
+        "dummy.mar",
+    );
+    assert!(result.is_ok(), "HTTP at top level failed: {:?}", result);
+    assert_eq!(output.trim(), "got error");
+}
+
+#[test]
+#[ignore] // Requires network access
+fn https_get_request() {
+    // Hit a real HTTPS endpoint via the Marlang scheduler
+    let (result, output) = eval_modules_with_output(
+        r#"
+(import "std:http" as http)
+
+(match (http/get "https://www.google.com/")
+  ((Ok (HttpResponse status headers body))
+    (perform println (show status)))
+  ((Err msg)
+    (perform println (string-append "ERROR: " msg))))
+"#,
+        "dummy.mar",
+    );
+    assert!(result.is_ok(), "HTTPS GET failed: {:?}", result);
+    assert_eq!(output.trim(), "200");
+}
+
+#[test]
+fn https_connection_refused() {
+    // Try HTTPS against a port where nothing is listening — connection should fail
+    // gracefully with an Err result (not crash).
+    let (result, output) = eval_modules_with_output(
+        r#"
+(import "std:http" as http)
+
+(match (http/get "https://127.0.0.1:19999")
+  ((Ok _) (perform println "unexpected success"))
+  ((Err msg) (perform println "got error")))
+"#,
+        "dummy.mar",
+    );
+    assert!(
+        result.is_ok(),
+        "HTTPS connection refused test failed: {:?}",
+        result
+    );
+    assert_eq!(output.trim(), "got error");
+}
+
+#[test]
+fn http_unsupported_scheme() {
+    let (result, output) = eval_modules_with_output(
+        r#"
+(import "std:http" as http)
+
+(match (http/get "ftp://example.com/file")
+  ((Ok _) (perform println "unexpected success"))
+  ((Err msg) (perform println "got error")))
+"#,
+        "dummy.mar",
+    );
+    assert!(
+        result.is_ok(),
+        "unsupported scheme test failed: {:?}",
+        result
+    );
+    assert_eq!(output.trim(), "got error");
 }

@@ -6,6 +6,38 @@ use std::sync::{Arc, Mutex};
 /// Uses `Arc<Mutex<Value>>` for thread-safety (required by multi-threaded scheduler).
 pub type UpvalueCell = Arc<Mutex<Value>>;
 
+/// Construct an `(Ok value)` ADT value.
+pub fn make_ok(value: Value) -> Value {
+    Value::object(VMObject::AdtValue {
+        tag: "Ok".to_string(),
+        fields: vec![value],
+    })
+}
+
+/// Construct an `(Err msg)` ADT value.
+pub fn make_err(msg: &str) -> Value {
+    Value::object(VMObject::AdtValue {
+        tag: "Err".to_string(),
+        fields: vec![Value::string(msg)],
+    })
+}
+
+/// Construct a `(Some value)` ADT value.
+pub fn make_some(value: Value) -> Value {
+    Value::object(VMObject::AdtValue {
+        tag: "Some".to_string(),
+        fields: vec![value],
+    })
+}
+
+/// Construct a `None` ADT value.
+pub fn make_none() -> Value {
+    Value::object(VMObject::AdtValue {
+        tag: "None".to_string(),
+        fields: vec![],
+    })
+}
+
 /// Build a Cons/Nil chain from a `Vec<Value>`.
 ///
 /// Converts `[a, b, c]` into `Cons(a, Cons(b, Cons(c, Nil)))` using `AdtValue`.
@@ -82,6 +114,8 @@ pub enum VMObject {
     },
     Pid(u64),
     Port(u64),
+    /// A raw byte array. Immutable once created (all "mutation" builtins return new copies).
+    ByteArray(Vec<u8>),
     /// A bound FFI function: stores the library global name and function name.
     /// When called, looks up the library from globals and dispatches via ffi_call.
     #[cfg(feature = "ffi")]
@@ -112,6 +146,7 @@ impl VMObject {
             VMObject::Builtin { .. } => "builtin",
             VMObject::Pid(_) => "pid",
             VMObject::Port(_) => "port",
+            VMObject::ByteArray(_) => "bytes",
             #[cfg(feature = "ffi")]
             VMObject::FfiBound { .. } => "ffi-bound",
             #[cfg(feature = "ffi")]
@@ -153,6 +188,7 @@ impl PartialEq for VMObject {
             ) => n1 == n2 && a1 == a2,
             (VMObject::Pid(a), VMObject::Pid(b)) => a == b,
             (VMObject::Port(a), VMObject::Port(b)) => a == b,
+            (VMObject::ByteArray(a), VMObject::ByteArray(b)) => a == b,
             #[cfg(feature = "ffi")]
             (VMObject::FfiPointer(a), VMObject::FfiPointer(b)) => a == b,
             #[cfg(feature = "ffi")]

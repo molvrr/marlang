@@ -2,8 +2,9 @@ use crate::bytecode::ModuleId;
 use crate::compiler::compile_expr_with_context;
 use crate::errors::{ProgramError, VMError};
 use crate::expand::MacroExpander;
+use crate::runtime::Scheduler;
 use crate::value::Value;
-use crate::vm::{VM, interpret};
+use crate::vm::{VM, make_script_closure};
 use marlang_core::ast::{self, Expr, LispValue};
 use marlang_core::intern::{Interner, Symbol};
 use marlang_core::lexer::lex;
@@ -151,6 +152,18 @@ pub fn run_program(
     loader: &mut ModuleLoader,
     interner: &Interner,
 ) -> Result<Value, ProgramError> {
+    run_program_with_scheduler(vm, source, file_path, loader, interner, None)
+}
+
+/// Run a program with an existing scheduler (used by module imports).
+fn run_program_with_scheduler(
+    vm: &mut VM,
+    source: &str,
+    file_path: Option<&Path>,
+    loader: &mut ModuleLoader,
+    interner: &Interner,
+    sched: Option<&mut Scheduler>,
+) -> Result<Value, ProgramError> {
     let tokens =
         lex(source, interner).map_err(|e| VMError::runtime(format!("Lex error: {}", e)))?;
     let exprs = parse_with_interner(&tokens, interner)
@@ -170,6 +183,7 @@ pub fn run_program(
         file_path,
         loader,
         interner,
+        sched,
     )
 }
 
@@ -220,6 +234,10 @@ pub fn expand_macros(
 /// `prelude_count` indicates how many leading expressions are from the prelude;
 /// after executing them, dirty_globals is cleared so prelude definitions don't
 /// leak as module exports.
+///
+/// If `sched` is `None`, a new Scheduler is created for this program invocation
+/// and `finish()` is called after all expressions execute. If `Some`, the caller
+/// owns the scheduler lifetime (used by module imports to share the parent scheduler).
 pub fn run_program_from_exprs(
     vm: &mut VM,
     exprs: &[Expr],
@@ -227,10 +245,23 @@ pub fn run_program_from_exprs(
     file_path: Option<&Path>,
     loader: &mut ModuleLoader,
     interner: &Interner,
+    sched: Option<&mut Scheduler>,
 ) -> Result<Value, ProgramError> {
     if exprs.is_empty() {
         return Ok(Value::nil());
     }
+
+    // Create a scheduler if one wasn't provided
+    let owns_scheduler = sched.is_none();
+    let mut owned_sched = if owns_scheduler {
+        Some(Scheduler::new(vm))
+    } else {
+        None
+    };
+    let sched = match owned_sched {
+        Some(ref mut s) => s,
+        None => sched.unwrap(),
+    };
 
     let mut known_constructors: HashSet<Symbol> = HashSet::new();
     let mut known_effect_ops: HashMap<Symbol, Symbol> = HashMap::new();
@@ -252,6 +283,7 @@ pub fn run_program_from_exprs(
                 interner,
                 &mut known_constructors,
                 as_sym,
+                sched,
             )?;
             last_value = Value::nil();
         } else {
@@ -267,8 +299,9 @@ pub fn run_program_from_exprs(
             known_constructors = result.known_constructors;
             known_effect_ops = result.known_effect_ops;
 
-            // Execute
-            last_value = interpret(vm, &result.chunk)?;
+            // Execute via the scheduler
+            let closure = make_script_closure(&result.chunk, vm.current_module);
+            last_value = sched.execute_main(vm, &closure)?;
         }
 
         // After prelude expressions, clear dirty_globals so prelude
@@ -278,6 +311,14 @@ pub fn run_program_from_exprs(
         {
             dirty.clear();
         }
+
+        // Make progress on background fibers between expressions
+        sched.run_ready(vm);
+    }
+
+    // If we own the scheduler, finish all background fibers
+    if owns_scheduler {
+        sched.finish(vm);
     }
 
     Ok(last_value)
@@ -348,6 +389,7 @@ fn parse_import_form(
     Err(VMError::runtime("Invalid import form"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_import(
     vm: &mut VM,
     expr: &Expr,
@@ -356,6 +398,7 @@ fn handle_import(
     interner: &Interner,
     known_constructors: &mut HashSet<Symbol>,
     as_sym: Symbol,
+    sched: &mut Scheduler,
 ) -> Result<(), ProgramError> {
     let elements = ast::list_to_array(expr);
     let (path_str, form) = parse_import_form(&elements, interner, as_sym)?;
@@ -399,9 +442,8 @@ fn handle_import(
     // Allocate a new module for this import
     let module_id = vm.allocate_module();
 
-    // Save parent state
+    // Save parent state (scheduler handler stays — no handler_stack save/restore)
     let parent_module = vm.current_module;
-    let parent_handler_stack = std::mem::take(&mut vm.handler_stack);
     let parent_resumed = std::mem::take(&mut vm.resumed_continuations);
     let parent_dirty = vm.dirty_globals.take();
 
@@ -410,8 +452,9 @@ fn handle_import(
     // Enable dirty-globals tracking for the module
     vm.dirty_globals = Some(HashSet::new());
 
-    // Run the module (builtins + prelude live in root module, accessible via fallback)
-    let module_result = run_program(vm, &source, Some(&resolved), loader, interner);
+    // Run the module through the same scheduler
+    let module_result =
+        run_program_with_scheduler(vm, &source, Some(&resolved), loader, interner, Some(sched));
 
     // Collect exports = globals that were explicitly written by module code
     let dirty = vm.dirty_globals.take().unwrap_or_default();
@@ -423,7 +466,6 @@ fn handle_import(
 
     // Restore parent state
     vm.current_module = parent_module;
-    vm.handler_stack = parent_handler_stack;
     vm.resumed_continuations = parent_resumed;
     vm.dirty_globals = parent_dirty;
 
@@ -493,16 +535,24 @@ fn merge_exports(
             }
         }
         ImportForm::Qualified(qualifier) => {
-            // Only install qualified names (e.g. "m/foo") in the importing module.
-            // No unqualified fallback needed — closures from the source module
-            // carry their module_id and resolve their own globals via
-            // PushGlobal's module-scoped lookup.
+            // Install qualified names (e.g. "m/foo") in the importing module.
+            // Closures from the source module carry their module_id and resolve
+            // their own globals via PushGlobal's module-scoped lookup.
             for (name, value) in exports {
                 let qualified_name = format!("{}/{}", qualifier, name);
                 vm.module_globals[target_module as usize]
                     .insert(qualified_name.clone(), value.clone());
                 if is_constructor_value(value) {
                     known_constructors.insert(interner.intern(&qualified_name));
+                    // Also register constructors under unqualified names so
+                    // pattern matching works without the module prefix.
+                    let unqualified = interner.intern(name);
+                    known_constructors.insert(unqualified);
+                    // Install the constructor value under unqualified name too
+                    // (needed for Construct opcode in patterns)
+                    vm.module_globals[target_module as usize]
+                        .entry(name.clone())
+                        .or_insert_with(|| value.clone());
                 }
             }
         }

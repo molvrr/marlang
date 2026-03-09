@@ -11,7 +11,6 @@ pub mod jit;
 pub mod modules;
 pub mod object;
 pub mod runtime;
-pub mod scheduler;
 pub mod value;
 pub mod vm;
 

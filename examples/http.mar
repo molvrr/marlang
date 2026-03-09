@@ -1,0 +1,64 @@
+; HTTP Client Examples
+;
+; HTTP operations are effects handled by the always-on scheduler.
+; Both HTTP and HTTPS are supported.
+;
+; Run with: cargo run -p marlang-cli -- run examples/http.mar
+;
+; NOTE: These examples make real HTTP requests to httpbin.org.
+; They require a working internet connection.
+
+(import "std:http" as http)
+(import "std:io" as io)
+
+; === Example 1: Simple GET request ===
+
+(io/println "=== GET request ===")
+(match (http/get "http://httpbin.org/get")
+  ((Ok (HttpResponse status headers body))
+    (begin
+      (io/println (string-append "Status: " (show status)))
+      (match (bytes-to-string body)
+        ((Ok text) (io/println (string-append "Body length: " (show (string-length text)))))
+        ((Err msg) (io/println (string-append "Decode error: " msg))))))
+  ((Err msg)
+    (io/println (string-append "Request failed: " msg))))
+
+; === Example 2: POST request with body ===
+
+(io/println "\n=== POST request ===")
+(match (http/post-text "http://httpbin.org/post"
+         (list (MkPair "Content-Type" "application/json"))
+         "{\"hello\": \"world\"}")
+  ((Ok (HttpResponse status headers body))
+    (begin
+      (io/println (string-append "Status: " (show status)))
+      (match (bytes-to-string body)
+        ((Ok text) (io/println (string-append "Body length: " (show (string-length text)))))
+        ((Err msg) (io/println (string-append "Decode error: " msg))))))
+  ((Err msg)
+    (io/println (string-append "Request failed: " msg))))
+
+; === Example 3: Error handling (connection refused) ===
+
+(io/println "\n=== Connection failure ===")
+(match (http/get "http://127.0.0.1:19999")
+  ((Ok _) (io/println "unexpected success"))
+  ((Err msg) (io/println (string-append "Expected error: " msg))))
+
+; === Example 4: HTTPS GET request ===
+
+(io/println "\n=== HTTPS GET request ===")
+(match (http/get "https://httpbin.org/get")
+  ((Ok (HttpResponse status headers body))
+    (io/println (string-append "Status: " (show status))))
+  ((Err msg)
+    (io/println (string-append "Request failed: " msg))))
+
+; === Example 5: Using the throwing API ===
+
+(io/println "\n=== Throwing API with error handling ===")
+(handle
+  (let ((resp (http/get! "http://127.0.0.1:19999")))
+    (io/println "should not reach here"))
+  ((throw msg k) -> (io/println (string-append "Caught: " msg))))

@@ -1922,9 +1922,9 @@ The owning scheduler processes the `TcpOp` and sends the result back via `TcpOpR
 
 Failable TCP operations (`tcp-connect`, `tcp-listen`, `tcp-send`) return `Result` ADT values (`(Ok value)` or `(Err msg)`) instead of crashing the fiber. This allows two patterns:
 
-1. **Throwing pattern:** The `net.mar` stdlib wrappers (`connect`, `listen`, `send`) unwrap the Result and `(perform throw msg)` on error. The default `throw` handler crashes the fiber. Users get clean crash semantics without needing to match on Results.
+1. **Safe pattern:** The `net.mar` stdlib wrappers (`connect`, `listen`, `send`) return the Result directly. Users pattern-match on `(Ok v)` / `(Err msg)` to handle errors gracefully.
 
-2. **Try pattern:** The `net.mar` stdlib `try-` wrappers (`try-connect`, `try-listen`, `try-send`) return the Result directly. Users pattern-match on `(Ok v)` / `(Err msg)` to handle errors gracefully.
+2. **Throwing pattern:** The `net.mar` stdlib `!`-suffixed wrappers (`connect!`, `listen!`, `send!`) unwrap the Result and `(perform throw msg)` on error. The default `throw` handler crashes the fiber. Users get clean crash semantics without needing to match on Results.
 
 The `throw` effect is declared in the prelude as `(effect Exception (throw (-> String Unit)))`. Both schedulers handle it as a default "crash the fiber" operation. User code can install `(handle ... ((throw msg k) -> ...))` blocks to catch exceptions, though this pattern does not work reliably across scheduler effect boundaries (e.g., inside the same handle block as TCP effects that park the fiber).
 
@@ -2833,7 +2833,7 @@ criterion_main!(benches);
 - [x] Exception effect: `throw` in `HANDLED_EFFECTS` (both schedulers), default handler crashes fiber
 - [x] TCP effects return `Result` ADT values (`(Ok value)` / `(Err msg)`) instead of crashing fibers
 - [x] `make_ok()` / `make_err()` helpers for constructing Result ADTs in runtime
-- [x] `net.mar` updated: throwing wrappers (connect, listen, send) and try wrappers (try-connect, try-listen, try-send)
+- [x] `net.mar` updated: safe wrappers (connect, listen, send) and throwing wrappers (connect!, listen!, send!)
 - [x] Exception effect `(effect Exception (throw (-> String Unit)))` declared in prelude
 - [x] Fix: single-threaded scheduler child fiber effect errors no longer propagate via `?` (crash fiber instead)
 - [x] Fix: `resume_continuation` uses `run_restored_continuation` for restored user handler dispatch

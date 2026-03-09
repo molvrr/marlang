@@ -160,19 +160,9 @@ All failures defer to runtime with the comment pattern: `"let runtime handle"`. 
 
 ## Low Impact / Tech Debt
 
-### 7. TCP Unavailable in Single-Threaded Scheduler
+### 7. ~~TCP Unavailable in Single-Threaded Scheduler~~ (Resolved)
 
-**Severity:** Low (by design)
-**Status:** Won't fix — architectural decision
-**Location:** `scheduler.rs:691-696`
-
-All 7 TCP effects (including `tcp-close-listener`) return explicit errors in the single-threaded scheduler:
-
-```
-"TCP effects require the multi-threaded scheduler (run-fibers-parallel)"
-```
-
-TCP requires Tokio's async runtime, which is only available in the multi-threaded scheduler (`runtime.rs`).
+**Status:** Resolved — the always-on scheduler architecture removed the distinction between single-threaded and multi-threaded schedulers. All effects (IO, TCP, HTTP, fibers, channels, actors) now work at the top level through a single unified scheduler with a built-in tokio runtime.
 
 ---
 

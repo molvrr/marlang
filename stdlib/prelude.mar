@@ -138,10 +138,6 @@
 (declare __try-string->int (-> String (Option Int)))
 (declare __try-string->float (-> String (Option Float)))
 
-; Concurrency
-(declare run-fibers (-> (-> Unit {| e} a) a))
-(declare run-fibers-parallel (-> (-> Unit {| e} a) Int a))
-
 ; Profiling
 (declare time-it (-> (-> Unit {| e} a) (Pair a Float)))
 
@@ -153,6 +149,18 @@
 (declare struct-new (-> FFIStructDef a FFIStruct))
 (declare struct-get (-> FFIStruct String a))
 (declare struct-set (-> FFIStruct String a Unit))
+
+; Bytes
+(declare bytes-new (-> Int Bytes))
+(declare bytes-length (-> Bytes Int))
+(declare bytes-get (-> Bytes Int Int))
+(declare bytes-set (-> Bytes Int Int Bytes))
+(declare bytes-slice (-> Bytes Int Int Bytes))
+(declare bytes-concat (-> Bytes Bytes Bytes))
+(declare bytes-from-string (-> String Bytes))
+(declare bytes-to-string (-> Bytes (Result String String)))
+(declare bytes-from-list (-> (List Int) Bytes))
+(declare bytes-to-list (-> Bytes (List Int)))
 
 ; Macro/quote builtins
 (declare make-symbol (-> String Symbol))

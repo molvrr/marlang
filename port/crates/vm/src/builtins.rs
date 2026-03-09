@@ -1,5 +1,5 @@
 use crate::errors::VMError;
-use crate::object::VMObject;
+use crate::object::{VMObject, make_err, make_ok};
 use crate::value::{Value, format_value};
 use crate::vm::VM;
 
@@ -912,45 +912,9 @@ pub fn register_builtins(vm: &mut VM) {
         Err(VMError::runtime(msg))
     });
 
-    // Concurrency
-    builtin(vm, "run-fibers", |vm, args| {
-        if args.len() != 1 {
-            return Err(VMError::runtime(
-                "run-fibers expects one argument (a thunk)",
-            ));
-        }
-        let closure = match args[0].as_object() {
-            Some(VMObject::Closure(c)) => (**c).clone(),
-            _ => return Err(VMError::runtime("run-fibers expects a closure")),
-        };
-        crate::scheduler::run_fibers(vm, &closure)
-    });
-
-    // Parallel concurrency (multi-threaded scheduler)
-    builtin(vm, "run-fibers-parallel", |vm, args| {
-        if args.is_empty() || args.len() > 2 {
-            return Err(VMError::runtime(
-                "run-fibers-parallel expects 1-2 arguments (thunk [num-threads])",
-            ));
-        }
-        let closure = match args[0].as_object() {
-            Some(VMObject::Closure(c)) => (**c).clone(),
-            _ => return Err(VMError::runtime("run-fibers-parallel expects a closure")),
-        };
-        let threads = args
-            .get(1)
-            .and_then(|v| v.as_int())
-            .map(|n| n as usize)
-            .unwrap_or(0);
-        let threads = if threads == 0 {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-        } else {
-            threads
-        };
-        crate::runtime::run_fibers_parallel(vm, &closure, threads)
-    });
+    // run-fibers and run-fibers-parallel removed — all effects flow through
+    // the always-on scheduler. Fibers, channels, actors, IO, TCP, and HTTP
+    // effects work at the top level without any wrapper.
 
     // Profiling: time a thunk and return (result ms)
     builtin(vm, "time-it", |vm, args| {
@@ -968,6 +932,156 @@ pub fn register_builtins(vm: &mut VM) {
             fields: vec![result, crate::value::Value::float(elapsed)],
         };
         Ok(crate::value::Value::object(pair))
+    });
+
+    // === Bytes builtins ===
+
+    // bytes-new: create zero-filled Bytes of given length
+    builtin(vm, "bytes-new", |_vm, args| {
+        debug_assert!(args.len() == 1, "bytes-new expects one integer");
+        let len = args[0].get_int();
+        if len < 0 {
+            return Err(VMError::runtime("bytes-new: length must be non-negative"));
+        }
+        Ok(Value::bytes(vec![0u8; len as usize]))
+    });
+
+    // bytes-length: length in bytes
+    builtin(vm, "bytes-length", |_vm, args| {
+        debug_assert!(args.len() == 1, "bytes-length expects one argument");
+        let b = args[0]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("bytes-length: expected Bytes"))?;
+        Ok(Value::int(b.len() as i64))
+    });
+
+    // bytes-get: get byte at index as Int
+    builtin(vm, "bytes-get", |_vm, args| {
+        debug_assert!(args.len() == 2, "bytes-get expects two arguments");
+        let b = args[0]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("bytes-get: expected Bytes"))?;
+        let idx = args[1].get_int();
+        if idx < 0 || idx as usize >= b.len() {
+            return Err(VMError::runtime(format!(
+                "bytes-get: index {} out of bounds (length {})",
+                idx,
+                b.len()
+            )));
+        }
+        Ok(Value::int(b[idx as usize] as i64))
+    });
+
+    // bytes-set: set byte at index, returns new Bytes
+    builtin(vm, "bytes-set", |_vm, args| {
+        debug_assert!(args.len() == 3, "bytes-set expects three arguments");
+        let b = args[0]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("bytes-set: expected Bytes"))?;
+        let idx = args[1].get_int();
+        let val = args[2].get_int();
+        if idx < 0 || idx as usize >= b.len() {
+            return Err(VMError::runtime(format!(
+                "bytes-set: index {} out of bounds (length {})",
+                idx,
+                b.len()
+            )));
+        }
+        if !(0..=255).contains(&val) {
+            return Err(VMError::runtime(format!(
+                "bytes-set: byte value {} out of range (0-255)",
+                val
+            )));
+        }
+        let mut new = b.to_vec();
+        new[idx as usize] = val as u8;
+        Ok(Value::bytes(new))
+    });
+
+    // bytes-slice: slice [start, end)
+    builtin(vm, "bytes-slice", |_vm, args| {
+        debug_assert!(args.len() == 3, "bytes-slice expects three arguments");
+        let b = args[0]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("bytes-slice: expected Bytes"))?;
+        let start = args[1].get_int();
+        let end = args[2].get_int();
+        if start < 0 || end < 0 || start as usize > b.len() || end as usize > b.len() || start > end
+        {
+            return Err(VMError::runtime(format!(
+                "bytes-slice: invalid range [{}, {}) for length {}",
+                start,
+                end,
+                b.len()
+            )));
+        }
+        Ok(Value::bytes(b[start as usize..end as usize].to_vec()))
+    });
+
+    // bytes-concat: concatenate two Bytes
+    builtin(vm, "bytes-concat", |_vm, args| {
+        debug_assert!(args.len() == 2, "bytes-concat expects two arguments");
+        let a = args[0]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("bytes-concat: expected Bytes"))?;
+        let b_val = args[1]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("bytes-concat: expected Bytes"))?;
+        let mut result = Vec::with_capacity(a.len() + b_val.len());
+        result.extend_from_slice(a);
+        result.extend_from_slice(b_val);
+        Ok(Value::bytes(result))
+    });
+
+    // bytes-from-string: UTF-8 encode a String to Bytes
+    builtin(vm, "bytes-from-string", |_vm, args| {
+        debug_assert!(args.len() == 1, "bytes-from-string expects one argument");
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("bytes-from-string: expected String"))?;
+        Ok(Value::bytes(s.as_bytes().to_vec()))
+    });
+
+    // bytes-to-string: UTF-8 decode Bytes to String, returns (Result String String)
+    builtin(vm, "bytes-to-string", |_vm, args| {
+        debug_assert!(args.len() == 1, "bytes-to-string expects one argument");
+        let b = args[0]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("bytes-to-string: expected Bytes"))?;
+        match std::str::from_utf8(b) {
+            Ok(s) => Ok(make_ok(Value::string(s))),
+            Err(e) => Ok(make_err(&format!("invalid UTF-8: {}", e))),
+        }
+    });
+
+    // bytes-from-list: convert (List Int) to Bytes
+    builtin(vm, "bytes-from-list", |_vm, args| {
+        debug_assert!(args.len() == 1, "bytes-from-list expects one argument");
+        let items = collect_list(&args[0], "bytes-from-list")?;
+        let mut bytes = Vec::with_capacity(items.len());
+        for (i, item) in items.iter().enumerate() {
+            let v = item
+                .as_int()
+                .ok_or_else(|| VMError::runtime("bytes-from-list: expected Int elements"))?;
+            if !(0..=255).contains(&v) {
+                return Err(VMError::runtime(format!(
+                    "bytes-from-list: element {} value {} out of range (0-255)",
+                    i, v
+                )));
+            }
+            bytes.push(v as u8);
+        }
+        Ok(Value::bytes(bytes))
+    });
+
+    // bytes-to-list: convert Bytes to (List Int)
+    builtin(vm, "bytes-to-list", |_vm, args| {
+        debug_assert!(args.len() == 1, "bytes-to-list expects one argument");
+        let b = args[0]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("bytes-to-list: expected Bytes"))?;
+        let items: Vec<Value> = b.iter().map(|&byte| Value::int(byte as i64)).collect();
+        Ok(crate::object::vec_to_cons_list(items))
     });
 
     // FFI builtins
