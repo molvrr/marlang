@@ -136,8 +136,9 @@
 (import "std:json" as json)
 (import "std:result" as res)
 
-(run-fibers-parallel
-  (lambda ()
-    (match (http/request http/GET "https://api.scryfall.com/sets" (list (MkPair "user-agent" "mar") (MkPair "accept" "appplication/json")) (bytes-new 0))
-      ((Ok (HttpResponse status headers body)) (io/println (res/map json/decode (bytes-to-string body))))
-      ((Err _) (io/println "erro")))) 2)
+(match (http/request http/GET "https://api.scryfall.com/sets" (list (MkPair "user-agent" "mar") (MkPair "accept" "application/json")) (bytes-new 0))
+      ((Ok (HttpResponse status headers body))
+        (match (json/decode (bytes-to-string body))
+          ((Ok json) (io/println "ok"))
+          ((Err msg) (io/println (string-append "json error: " msg)))))
+      ((Err msg) (io/println (string-append "http error: " msg))))

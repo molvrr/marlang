@@ -457,11 +457,22 @@ pub(crate) fn translate_function(
 
     // --- Translate bytecode ---
     let mut ip = 0;
+    let mut in_dead_code = false;
     while ip < code.len() {
         // Check if this instruction starts a new block
         if ip > 0
             && let Some(&block) = bc_to_block.get(&ip)
         {
+            // If this block was never reached by compute_block_depths, it is
+            // dead code (e.g. a Jump target that itself follows a TailCall).
+            // Skip it entirely until we find a reachable block.
+            if !block_depths.contains_key(&ip) {
+                in_dead_code = true;
+                ip += 1;
+                continue;
+            }
+            in_dead_code = false;
+
             let prev = &code[ip - 1];
             let is_terminated = matches!(
                 prev.op,
@@ -475,6 +486,13 @@ pub(crate) fn translate_function(
             bcx.switch_to_block(block);
             let depth = block_param_count.get(&ip).copied().unwrap_or(0);
             vstack = vstack_from_block_params(&bcx, block, depth);
+        }
+
+        // Skip instructions in dead code regions (after terminators with no
+        // reachable block boundary, or inside unreachable blocks).
+        if in_dead_code {
+            ip += 1;
+            continue;
         }
 
         let inst = &code[ip];
@@ -794,6 +812,7 @@ pub(crate) fn translate_function(
                 let target_block = bc_to_block[&target];
                 let args = vstack_as_block_args(&vstack);
                 bcx.ins().jump(target_block, &args);
+                in_dead_code = true;
             }
 
             Op::JumpIfFalse => {
@@ -813,11 +832,13 @@ pub(crate) fn translate_function(
                     fallthrough_block,
                     &fallthrough_args,
                 );
+                in_dead_code = true;
             }
 
             Op::Return => {
                 let result = vstack.pop().unwrap();
                 bcx.ins().return_(&[result.tag, result.payload]);
+                in_dead_code = true;
             }
 
             // --- Function calls ---
@@ -876,6 +897,7 @@ pub(crate) fn translate_function(
                         emit_call(&mut bcx, vm_ptr, &_callee, &args, ptr_type, runtime_funcs);
                     bcx.ins().return_(&[result.tag, result.payload]);
                 }
+                in_dead_code = true;
             }
 
             Op::Closure => {
@@ -936,6 +958,7 @@ pub(crate) fn translate_function(
                     ptr_type,
                     runtime_funcs,
                 );
+                in_dead_code = true;
             }
 
             // --- Effect operations ---

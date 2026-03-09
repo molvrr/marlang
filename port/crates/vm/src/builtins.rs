@@ -1084,6 +1084,31 @@ pub fn register_builtins(vm: &mut VM) {
         Ok(crate::object::vec_to_cons_list(items))
     });
 
+    // --- Parse state builtins ---
+
+    // __parse-push-input: (List Char) -> Unit
+    // Push a char list as mutable parse state. ParseState effects (peek, consume,
+    // get-input, set-input) are then handled inline by the VM — no continuation
+    // capture, no handler recursion.
+    builtin(vm, "__parse-push-input", |vm, args| {
+        debug_assert!(args.len() == 1, "__parse-push-input expects one argument");
+        let chars = crate::vm::list_to_values(&args[0]);
+        vm.parse_state_stack
+            .push(crate::vm::ParseState { chars, pos: 0 });
+        Ok(Value::nil())
+    });
+
+    // __parse-pop-input: Unit -> (List Char)
+    // Pop the current parse state and return remaining input as a char list.
+    builtin(vm, "__parse-pop-input", |vm, _args| {
+        match vm.parse_state_stack.pop() {
+            Some(crate::vm::ParseState { chars, pos }) => {
+                Ok(crate::vm::values_to_list(&chars[pos..]))
+            }
+            None => Err(VMError::runtime("__parse-pop-input: no active parse state")),
+        }
+    });
+
     // FFI builtins
     #[cfg(feature = "ffi")]
     register_ffi_builtins(vm, builtin);

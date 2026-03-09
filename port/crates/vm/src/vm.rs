@@ -8,6 +8,16 @@ use rustc_hash::FxHashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+// --- Parse state ---
+
+/// Mutable parse state for fast-path ParseState effect handling.
+/// Stores the full character buffer and current read position, so `consume`
+/// is O(1) (just bumps `pos`) instead of O(n) (`Vec::remove(0)`).
+pub(crate) struct ParseState {
+    pub chars: Vec<Value>,
+    pub pos: usize,
+}
+
 // --- VMSignal: unified error/effect propagation ---
 
 pub(crate) enum VMSignal {
@@ -89,6 +99,12 @@ pub struct VM {
     /// Current fiber PID when running under the scheduler (for fast-path fiber-self).
     pub(crate) current_pid: Option<u64>,
 
+    // --- Parse state ---
+    /// Stack of mutable parse states for fast-path ParseState effect handling.
+    /// Pushed by `__parse-push-input`, popped by `__parse-pop-input`.
+    /// When non-empty, Perform intercepts peek/consume/get-input/set-input inline.
+    pub(crate) parse_state_stack: Vec<ParseState>,
+
     // --- JIT ---
     /// JIT compilation engine (lazily initialized on first hot function).
     #[cfg(feature = "jit")]
@@ -120,6 +136,7 @@ impl VM {
             captured_output: None,
             dirty_globals: None,
             current_pid: None,
+            parse_state_stack: Vec::new(),
             #[cfg(feature = "jit")]
             jit_engine: None,
             #[cfg(feature = "jit")]
@@ -670,6 +687,26 @@ fn find_matching_bracket(s: &str, open: usize) -> Result<usize, String> {
         }
     }
     Err("unmatched bracket".to_string())
+}
+
+/// Convert a `&[Value]` to a Marlang List (Cons/Nil chain).
+pub(crate) fn values_to_list(values: &[Value]) -> Value {
+    crate::object::vec_to_cons_list(values.to_vec())
+}
+
+/// Convert a Marlang List value to a `Vec<Value>`.
+pub(crate) fn list_to_values(list: &Value) -> Vec<Value> {
+    let mut values = Vec::new();
+    let mut current = list.clone();
+    while let Some(VMObject::AdtValue { tag, fields, .. }) = current.as_object() {
+        if tag == "Cons" && fields.len() == 2 {
+            values.push(fields[0].clone());
+            current = fields[1].clone();
+        } else {
+            break;
+        }
+    }
+    values
 }
 
 /// Fast-path handler for effects that can be resolved inline without
@@ -2028,7 +2065,8 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 // Borrow effect name from the constant pool — avoids a String clone per perform.
                 // Only allocate an owned String when building EffectSignal (scheduler path) or
                 // error messages.
-                let op_name_ref: &str = match unsafe { &*constants.add(inst.operand as usize) } {
+                let mut op_name_ref: &str = match unsafe { &*constants.add(inst.operand as usize) }
+                {
                     ConstantValue::String(s) => s.as_str(),
                     _ => {
                         vm.frames[frame_idx].ip = ip;
@@ -2042,6 +2080,56 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let mut args = vec![Value::nil(); arity];
                 for i in (0..arity).rev() {
                     args[i] = vm.pop();
+                }
+
+                // ── Fast-path: VM-managed parse state ──
+                // When a parse state is active (pushed by __parse-push-input),
+                // handle ParseState operations inline — O(1) per operation,
+                // no continuation capture, no handler stack walk.
+                if let Some(ParseState { chars, pos }) = vm.parse_state_stack.last_mut() {
+                    // Extract the bare op name (strip any effect qualifier)
+                    let bare_op = op_name_ref
+                        .rsplit_once('/')
+                        .map_or(op_name_ref, |(_, op)| op);
+                    match bare_op {
+                        "peek" => {
+                            let result = if *pos >= chars.len() {
+                                crate::object::make_none()
+                            } else {
+                                crate::object::make_some(chars[*pos].clone())
+                            };
+                            vm.push(result);
+                            continue;
+                        }
+                        "consume" => {
+                            if *pos >= chars.len() {
+                                // Replicate the original with-input behavior:
+                                // (perform throw "unexpected end of input")
+                                // Redirect to the Exception handler by replacing
+                                // the op name and args, then falling through.
+                                op_name_ref = "throw";
+                                args = vec![Value::string("unexpected end of input")];
+                            } else {
+                                let ch = chars[*pos].clone();
+                                *pos += 1;
+                                vm.push(ch);
+                                continue;
+                            }
+                        }
+                        "get-input" => {
+                            let list = values_to_list(&chars[*pos..]);
+                            vm.push(list);
+                            continue;
+                        }
+                        "set-input" => {
+                            let new_input = &args[0];
+                            *chars = list_to_values(new_input);
+                            *pos = 0;
+                            vm.push(Value::nil());
+                            continue;
+                        }
+                        _ => {} // Not a ParseState op — fall through
+                    }
                 }
 
                 // Parse the performed operation name (could be "effectName/opName" or just "opName")
@@ -2312,7 +2400,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 }
 
                 // No handler found at all — error
-                if op_name_ref == "throw" {
+                if op_name_ref == "throw" || performed_op == "throw" {
                     // Better error message for unhandled throw
                     let msg = args
                         .first()

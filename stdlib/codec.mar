@@ -325,22 +325,19 @@
 ; ============================================================
 
 ; with-input : (List Char) -> (-> Unit a) -> a
-; Recursive handler for ParseState. Threads input via handler recursion.
+; Runs a thunk with ParseState effects handled by the VM.
+; The VM manages the parse state as a mutable Vec internally,
+; so peek/consume/get-input/set-input are O(1) with no
+; continuation capture overhead.
+; IMPORTANT: Callers must ensure __parse-pop-input is called on all
+; exit paths (normal and exception). See run-parse-safe.
 (define with-input (lambda (input thunk)
-  (handle
-    (thunk)
-    ((peek k) ->
-      (match input
-        (Nil       (with-input input (lambda () (resume k None))))
-        ((Cons c _) (with-input input (lambda () (resume k (Some c)))))))
-    ((consume k) ->
-      (match input
-        (Nil       (perform throw "unexpected end of input"))
-        ((Cons c rest) (with-input rest (lambda () (resume k c))))))
-    ((get-input k) ->
-      (with-input input (lambda () (resume k input))))
-    ((set-input new-input k) ->
-      (with-input new-input (lambda () (resume k nil)))))))
+  (begin
+    (__parse-push-input input)
+    (let ((result (thunk)))
+      (begin
+        (__parse-pop-input nil)
+        result)))))
 
 ; run-parse-safe : (List Char) -> (-> Unit a) -> (Result String (Pair a (List Char)))
 ; Runs a parser in a fresh handler scope.
@@ -353,7 +350,10 @@
         (MkPair val remaining))))))
     (handle
       (Ok (with-input input inner-thunk))
-      ((throw msg k) -> (Err msg))))))
+      ((throw msg k) ->
+        (begin
+          (__parse-pop-input nil)
+          (Err msg)))))))
 
 ; try-parse : (-> Unit a) -> (Option a)
 ; Try a parser; on failure restore input and return None.
@@ -841,10 +841,20 @@
 
 ; many-parse : (-> Unit a) -> (List a)
 ; Helper: greedily parse until failure.
+; Reverse a list (tail-recursive).
+(define list-rev (lambda (lst acc)
+  (match lst
+    (Nil acc)
+    ((Cons x rest) (list-rev rest (Cons x acc))))))
+
+; Tail-recursive helper: accumulates results in reverse, then reverses.
+; Avoids stack overflow on large inputs (e.g. long JSON strings).
 (define many-parse (lambda (p)
-  (match (try-parse p)
-    (None Nil)
-    ((Some x) (Cons x (many-parse p))))))
+  (define go (lambda (acc)
+    (match (try-parse p)
+      (None (list-rev acc Nil))
+      ((Some x) (go (Cons x acc))))))
+  (go Nil)))
 
 ; many-print : (-> a Unit) -> (List a) -> Unit
 ; Helper: print each element in the list.
