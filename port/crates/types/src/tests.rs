@@ -1198,7 +1198,8 @@ fn import_all() {
 
 #[test]
 fn import_qualified_effect_wrapper() {
-    // Effects are accessed through wrapper functions, not directly via qualified perform
+    // Effects are accessed through wrapper functions, not directly via qualified perform.
+    // The call must be wrapped in a handler since Greet is not a runtime-handled effect.
     let mut loader = MockModuleLoader::new();
     loader.add_module(
         "myeffect",
@@ -1211,11 +1212,48 @@ fn import_qualified_effect_wrapper() {
 
     let types = check_with_modules(
         r#"(import "myeffect" as g)
-           (g/greet "world")"#,
+           (handle (g/greet "world")
+             ((hello name k) -> (resume k (string-append "Hello, " name))))"#,
         &loader,
     )
     .unwrap();
     assert_eq!(last_type(&types), "String");
+}
+
+#[test]
+fn unhandled_effect_rejected_at_top_level() {
+    // A non-runtime effect used at the top level without a handler should be rejected
+    let err = check_err(
+        r#"(effect Foo
+               (bar (-> Unit Int)))
+           (perform bar)"#,
+    );
+    assert!(
+        err.contains("Unhandled effect"),
+        "expected unhandled effect error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn handled_effect_accepted_at_top_level() {
+    // A non-runtime effect properly handled should be accepted
+    check_ok(
+        r#"(effect Foo
+               (bar (-> Unit Int)))
+           (handle (perform bar)
+             ((bar k) -> (resume k 42)))"#,
+    );
+}
+
+#[test]
+fn runtime_effects_accepted_at_top_level() {
+    // Runtime-handled effects (IO, Exception) should be accepted without explicit handlers
+    check_ok(
+        r#"(effect IO
+               (println (-> String Unit)))
+           (perform println "hello")"#,
+    );
 }
 
 #[test]

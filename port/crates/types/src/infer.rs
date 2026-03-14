@@ -10,6 +10,21 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+// ===== Runtime-Handled Effects =====
+
+/// Effects that the VM/scheduler handles implicitly at the top level.
+/// Top-level expressions may use these without explicit `handle` blocks.
+const RUNTIME_HANDLED_EFFECTS: &[&str] = &[
+    "IO",
+    "Exception",
+    "Fiber",
+    "Channel",
+    "Actor",
+    "Tcp",
+    "HttpClient",
+    "ParseState", // VM-managed fast-path for codec parsing
+];
+
 // ===== Inference Session =====
 
 /// The kind of symbol being defined or referenced.
@@ -2329,7 +2344,43 @@ fn infer_handle(
     let final_type = result_type.unwrap_or_else(|| body_result.ty.clone());
 
     check_handler_exhaustiveness(env, &handled_ops_by_effect, elements[0].span())?;
-    let remaining_effects = remove_handled_effects(&body_result.effects, &handled_ops_by_effect);
+
+    // Ensure the body's effect row explicitly includes the handled effects.
+    // If the body has an open row variable (e.g. {ε12}), we expand it by
+    // binding ε12 → {HandledEffect | ε_fresh}. This propagates through
+    // substitution so e.g. a thunk parameter becomes (-> Unit {Foo | ε_fresh} t)
+    // while the handler's remaining effects become {ε_fresh}.
+    let body_effects = apply_effect_row_subst_via_type_subst(&subst, &body_result.effects);
+    let handled_effect_names: Vec<String> = handled_ops_by_effect.keys().cloned().collect();
+    let missing: Vec<String> = handled_effect_names
+        .iter()
+        .filter(|e| !body_effects.effects().contains(e))
+        .cloned()
+        .collect();
+    let expanded_effects = if !missing.is_empty() {
+        if let EffectRow::Open { row_var, effects } = &body_effects {
+            // Create a fresh row variable and bind the old one to {missing... + effects... | fresh}
+            let fresh_rv = fresh_effect_row_var();
+            let mut expanded = effects.clone();
+            for e in &missing {
+                if !expanded.contains(e) {
+                    expanded.push(e.clone());
+                }
+            }
+            let expansion_subst = single_subst(
+                row_var,
+                Type::EffectRowRef(effect_row_open(expanded.clone(), fresh_rv.clone())),
+            );
+            subst = compose_subst(&expansion_subst, &subst);
+            effect_row_open(expanded, fresh_rv)
+        } else {
+            // Closed row — just add the effects (they'll be removed)
+            combine_effect_rows(&body_effects, &effect_row_closed(missing))
+        }
+    } else {
+        body_effects
+    };
+    let remaining_effects = remove_handled_effects(&expanded_effects, &handled_ops_by_effect);
 
     Ok(InferResult {
         ty: apply_subst(&subst, &final_type),
@@ -3078,6 +3129,28 @@ fn infer_program_inner(
             // Regular expression
             let applied_env = apply_subst_env(&global_subst, &current_env);
             let result = infer_expr(&applied_env, expr, session)?;
+
+            // Check for unhandled effects at the top level.
+            // Effect names may be module-qualified (e.g. "io/IO"), so we
+            // strip the prefix before checking against the runtime set.
+            if expr_idx >= prelude_count {
+                let unhandled: Vec<String> = result
+                    .effects
+                    .effects()
+                    .iter()
+                    .filter(|e| {
+                        let base = e.rsplit_once('/').map_or(e.as_str(), |(_, name)| name);
+                        !RUNTIME_HANDLED_EFFECTS.contains(&base)
+                    })
+                    .cloned()
+                    .collect();
+                if !unhandled.is_empty() {
+                    return Err(TypeError::UnhandledEffect {
+                        effects: unhandled,
+                        span: Some(expr.span()),
+                    });
+                }
+            }
 
             global_subst = compose_subst(&result.subst, &global_subst);
             types.push(apply_subst(&global_subst, &result.ty));

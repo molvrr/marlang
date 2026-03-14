@@ -78,6 +78,10 @@ pub enum TypeError {
         message: String,
         span: Option<Span>,
     },
+    UnhandledEffect {
+        effects: Vec<String>,
+        span: Option<Span>,
+    },
     InternalError {
         message: String,
         span: Option<Span>,
@@ -218,6 +222,14 @@ pub fn format_error(err: &TypeError) -> String {
         TypeError::KindError { message, .. } => {
             format!("Kind error: {message}")
         }
+        TypeError::UnhandledEffect { effects, .. } => {
+            format!(
+                "Unhandled effect{}: {}. Use a `handle` block to handle {} or wrap in a function",
+                if effects.len() > 1 { "s" } else { "" },
+                effects.join(", "),
+                if effects.len() > 1 { "them" } else { "it" },
+            )
+        }
         TypeError::InternalError { message, .. } => {
             format!("Internal type error: {message}")
         }
@@ -239,6 +251,7 @@ pub fn error_span(err: &TypeError) -> Option<Span> {
         | TypeError::NonExhaustivePatterns { span, .. }
         | TypeError::NonExhaustiveHandlers { span, .. }
         | TypeError::AmbiguousEffectOperation { span, .. }
+        | TypeError::UnhandledEffect { span, .. }
         | TypeError::MissingTypeAnnotation { span, .. }
         | TypeError::InvalidTypeAnnotation { span, .. }
         | TypeError::CyclicTypeAlias { span, .. }
