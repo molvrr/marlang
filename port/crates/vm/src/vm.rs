@@ -100,7 +100,7 @@ pub struct VM {
     // --- Parse state ---
     /// Stack of mutable parse states for fast-path ParseState effect handling.
     /// Pushed by `__parse-push-input`, popped by `__parse-pop-input`.
-    /// When non-empty, Perform intercepts peek/consume/get-input/set-input inline.
+    /// When non-empty, Perform intercepts peek/consume/get-pos/set-pos inline.
     pub(crate) parse_state_stack: Vec<ParseState>,
 
     // --- JIT ---
@@ -688,25 +688,6 @@ fn find_matching_bracket(s: &str, open: usize) -> Result<usize, String> {
 }
 
 /// Convert a `&[Value]` to a Marlang List (Cons/Nil chain).
-pub(crate) fn values_to_list(values: &[Value]) -> Value {
-    crate::object::vec_to_cons_list(values.to_vec())
-}
-
-/// Convert a Marlang List value to a `Vec<Value>`.
-pub(crate) fn list_to_values(list: &Value) -> Vec<Value> {
-    let mut values = Vec::new();
-    let mut current = list.clone();
-    while let Some(VMObject::AdtValue { tag, fields, .. }) = current.as_object() {
-        if tag == "Cons" && fields.len() == 2 {
-            values.push(fields[0].clone());
-            current = fields[1].clone();
-        } else {
-            break;
-        }
-    }
-    values
-}
-
 /// Fast-path handler for effects that can be resolved inline without
 /// continuation capture. Only used for effects that don't depend on
 /// scheduler-level shared state (e.g. shared captured_output in the
@@ -1143,6 +1124,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                     }
                                     vm.pop(); // pop callee
 
+                                    let saved_stack_top = vm.stack_top;
                                     vm.frames[frame_idx].ip = ip;
                                     let saved_fc_call = vm.frame_count;
                                     let result = unsafe {
@@ -1161,6 +1143,10 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                     // Check for bail sentinel — JIT function encountered
                                     // a non-tail-resumptive Perform and needs the interpreter
                                     if result.tag == crate::jit::runtime::JIT_BAIL_TAG {
+                                        // Restore stack — the JIT function may have
+                                        // modified stack_top via internal calls
+                                        vm.stack_top = saved_stack_top;
+
                                         // Check for cross-boundary effect: the perform found
                                         // a handler in this run() scope but the JIT couldn't
                                         // dispatch it. The effect data is in vm.pending_effect.
@@ -1448,6 +1434,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                     }
                                     vm.pop(); // pop callee
 
+                                    let saved_stack_top_tc = vm.stack_top;
                                     vm.frames[frame_idx].ip = ip;
                                     let saved_fc_tc = vm.frame_count;
                                     let result = unsafe {
@@ -1465,6 +1452,9 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                                     // Check for bail sentinel
                                     if result.tag == crate::jit::runtime::JIT_BAIL_TAG {
+                                        // Restore stack — JIT may have leaked values
+                                        vm.stack_top = saved_stack_top_tc;
+
                                         // Check for cross-boundary effect
                                         if let Some(pending) = vm.pending_effect.take() {
                                             drop(jit_locals);
@@ -2020,15 +2010,15 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 continue;
                             }
                         }
-                        "get-input" => {
-                            let list = values_to_list(&chars[*pos..]);
-                            vm.push(list);
+                        "get-pos" => {
+                            let pos_val = *pos as i64;
+                            vm.push(Value::int(pos_val));
                             continue;
                         }
-                        "set-input" => {
-                            let new_input = &args[0];
-                            *chars = list_to_values(new_input);
-                            *pos = 0;
+                        "set-pos" => {
+                            if let Some(n) = args[0].as_int() {
+                                *pos = n as usize;
+                            }
                             vm.push(Value::nil());
                             continue;
                         }

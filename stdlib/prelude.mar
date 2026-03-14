@@ -163,8 +163,8 @@
 (declare bytes-to-list (-> Bytes (List Int)))
 
 ; Parse state builtins (VM-managed mutable parse state for codec)
-(declare __parse-push-input (-> (List Char) Unit))
-(declare __parse-pop-input (-> Unit (List Char)))
+(declare __parse-push-input (-> String Unit))
+(declare __parse-pop-input (-> Unit Unit))
 
 ; Macro/quote builtins
 (declare make-symbol (-> String Symbol))

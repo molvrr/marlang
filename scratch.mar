@@ -139,6 +139,6 @@
 (match (http/request http/GET "https://api.scryfall.com/sets" (list (MkPair "user-agent" "mar") (MkPair "accept" "application/json")) (bytes-new 0))
       ((Ok (HttpResponse status headers body))
         (match (res/map json/decode (bytes-to-string body))
-          ((Ok json) (io/println "ok"))
+          ((Ok json) (io/println json))
           ((Err msg) (io/println (string-append "json error: " msg)))))
       ((Err msg) (io/println (string-append "http error: " msg))))

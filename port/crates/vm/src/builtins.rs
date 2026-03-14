@@ -1086,25 +1086,24 @@ pub fn register_builtins(vm: &mut VM) {
 
     // --- Parse state builtins ---
 
-    // __parse-push-input: (List Char) -> Unit
-    // Push a char list as mutable parse state. ParseState effects (peek, consume,
-    // get-input, set-input) are then handled inline by the VM — no continuation
+    // __parse-push-input: String -> Unit
+    // Push a string as mutable parse state. ParseState effects (peek, consume,
+    // get-pos, set-pos) are then handled inline by the VM — no continuation
     // capture, no handler recursion.
     builtin(vm, "__parse-push-input", |vm, args| {
         debug_assert!(args.len() == 1, "__parse-push-input expects one argument");
-        let chars = crate::vm::list_to_values(&args[0]);
+        let s = args[0].as_string().unwrap_or("");
+        let chars: Vec<Value> = s.chars().map(Value::char).collect();
         vm.parse_state_stack
             .push(crate::vm::ParseState { chars, pos: 0 });
         Ok(Value::nil())
     });
 
-    // __parse-pop-input: Unit -> (List Char)
-    // Pop the current parse state and return remaining input as a char list.
+    // __parse-pop-input: Unit -> Unit
+    // Pop the current parse state.
     builtin(vm, "__parse-pop-input", |vm, _args| {
         match vm.parse_state_stack.pop() {
-            Some(crate::vm::ParseState { chars, pos }) => {
-                Ok(crate::vm::values_to_list(&chars[pos..]))
-            }
+            Some(_) => Ok(Value::nil()),
             None => Err(VMError::runtime("__parse-pop-input: no active parse state")),
         }
     });

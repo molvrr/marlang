@@ -43,8 +43,12 @@ pub(crate) fn can_jit(proto: &FunctionPrototype) -> bool {
         }
     }
 
+    // Identify self-recursive tail calls
+    let self_recursive =
+        find_self_recursive_calls(&proto.chunk.code, &proto.chunk.constants, &proto.name);
+
     // Scan for unsupported opcodes
-    for inst in &proto.chunk.code {
+    for (ip, inst) in proto.chunk.code.iter().enumerate() {
         match inst.op {
             // Supported
             Op::PushConst
@@ -81,8 +85,17 @@ pub(crate) fn can_jit(proto: &FunctionPrototype) -> bool {
             | Op::Closure
             | Op::Construct
             | Op::GetField
-            | Op::MatchTag
-            | Op::TailCall => {}
+            | Op::MatchTag => {}
+
+            // TailCall is only supported for self-recursive calls (loop header).
+            // Non-self TailCalls go through marlang_jit_call which runs the callee
+            // in the interpreter, sharing the VM stack. This causes stack corruption
+            // when the callee pushes values and the JIT function is unaware.
+            Op::TailCall => {
+                if !self_recursive.contains(&ip) {
+                    return false;
+                }
+            }
 
             // Unsupported — bail out
             // Call and Perform can trigger nested interpreter execution

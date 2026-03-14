@@ -83,7 +83,6 @@ impl JitEngine {
         if !translate::can_jit(proto) {
             return None;
         }
-
         let func_name = format!("marlang_jit_{}", self.func_counter);
         self.func_counter += 1;
 

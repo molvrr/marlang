@@ -76,7 +76,7 @@
 ;   converts (List Char) <-> String, iso-int converts String <-> Int,
 ;   and iso-float converts String <-> Float.
 ;
-; **Effects** — ParseState manages input (peek/consume/get-input/set-input).
+; **Effects** — ParseState manages input (peek/consume/get-pos/set-pos).
 ;   PrintState manages output (emit/emit-char). Exception handles failures.
 ;   The runners (parse, print, round-trip) install handlers for all of these,
 ;   so callers don't need to manage them.
@@ -291,10 +291,10 @@
 
 ; ParseState: manages input during parsing
 (effect ParseState
-  (peek      (-> Unit (Option Char)))
-  (consume   (-> Unit Char))
-  (get-input (-> Unit (List Char)))
-  (set-input (-> (List Char) Unit)))
+  (peek    (-> Unit (Option Char)))
+  (consume (-> Unit Char))
+  (get-pos (-> Unit Int))
+  (set-pos (-> Int Unit)))
 
 ; PrintState: manages output during printing
 (effect PrintState
@@ -324,10 +324,10 @@
 ; Internal: Parse Handlers
 ; ============================================================
 
-; with-input : (List Char) -> (-> Unit a) -> a
+; with-input : String -> (-> Unit a) -> a
 ; Runs a thunk with ParseState effects handled by the VM.
 ; The VM manages the parse state as a mutable Vec internally,
-; so peek/consume/get-input/set-input are O(1) with no
+; so peek/consume/get-pos/set-pos are O(1) with no
 ; continuation capture overhead.
 ; IMPORTANT: Callers must ensure __parse-pop-input is called on all
 ; exit paths (normal and exception). See run-parse-safe.
@@ -339,15 +339,13 @@
         (__parse-pop-input nil)
         result)))))
 
-; run-parse-safe : (List Char) -> (-> Unit a) -> (Result String (Pair a (List Char)))
+; run-parse-safe : String -> (-> Unit a) -> (Result String a)
 ; Runs a parser in a fresh handler scope.
 ; NOTE: inner-thunk is created BEFORE the handle block to work around
 ; a compiler limitation with closure captures inside handle bodies.
 (define run-parse-safe (lambda (input parser)
   (let ((inner-thunk (lambda ()
-    (let ((val (parser)))
-      (let ((remaining (perform get-input)))
-        (MkPair val remaining))))))
+    (parser))))
     (handle
       (Ok (with-input input inner-thunk))
       ((throw msg k) ->
@@ -356,15 +354,15 @@
           (Err msg)))))))
 
 ; try-parse : (-> Unit a) -> (Option a)
-; Try a parser; on failure restore input and return None.
+; Try a parser; on failure restore position and return None.
 (define try-parse (lambda (parser)
-  (let ((saved (perform get-input)))
-    (match (run-parse-safe saved parser)
-      ((Ok (MkPair val remaining))
+  (let ((saved (perform get-pos)))
+    (handle
+      (Some (parser))
+      ((throw msg k) ->
         (begin
-          (perform set-input remaining)
-          (Some val)))
-      ((Err _) None)))))
+          (perform set-pos saved)
+          None))))))
 
 ; ============================================================
 ; Internal: Print Handlers
@@ -398,10 +396,9 @@
 ; Run the parser half of a codec on a string.
 (define parse (lambda (codec input)
   (let ((parser (codec-parser codec)))
-    (let ((chars (string->chars input)))
-      (match (run-parse-safe chars parser)
-        ((Ok (MkPair val _remaining)) (Ok val))
-        ((Err msg) (Err msg)))))))
+    (match (run-parse-safe input parser)
+      ((Ok val) (Ok val))
+      ((Err msg) (Err msg))))))
 
 ; print : Codec a -> a -> (Result String String)
 ; Run the printer half of a codec on a value.
@@ -978,13 +975,13 @@
     (let ((printer (codec-printer codec)))
       (mk-codec
         (lambda ()
-          (let ((saved (perform get-input)))
-            (match (run-parse-safe saved parser)
-              ((Ok (MkPair val remaining))
+          (let ((saved (perform get-pos)))
+            (handle
+              (parser)
+              ((throw _ k) ->
                 (begin
-                  (perform set-input remaining)
-                  val))
-              ((Err _) (perform throw msg)))))
+                  (perform set-pos saved)
+                  (perform throw msg))))))
         printer)))))
 
 ; ============================================================
@@ -1121,15 +1118,15 @@
     (lambda (_) nil))))
 
 ; lookahead : Codec a -> Codec a
-; Parse and return result, but restore input. Print works normally.
+; Parse and return result, but restore position. Print works normally.
 (define lookahead (lambda (codec)
   (let ((parser (codec-parser codec)))
     (let ((printer (codec-printer codec)))
       (mk-codec
         (lambda ()
-          (let ((saved (perform get-input)))
+          (let ((saved (perform get-pos)))
             (let ((result (parser)))
-              (begin (perform set-input saved) result))))
+              (begin (perform set-pos saved) result))))
         printer)))))
 
 ; count-parse : (-> Unit a) -> Int -> (List a)
@@ -1190,7 +1187,7 @@
   (match codecs
     (Nil
       (mk-codec
-        (lambda () (begin (perform get-input) (perform throw "no alternatives matched")))
+        (lambda () (begin (perform get-pos) (perform throw "no alternatives matched")))
         (lambda (_) (perform throw "no alternatives matched"))))
     ((Cons c Nil) c)
     ((Cons c rest) (alt c (choice rest))))))

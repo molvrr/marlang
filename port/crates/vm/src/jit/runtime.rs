@@ -187,6 +187,7 @@ pub extern "C" fn marlang_jit_call(
             std::slice::from_raw_parts(args_ptr, num_args as usize)
         };
 
+        let stack_before = vm.stack_top;
         match call_value(vm, &callee, args) {
             Ok(result) => {
                 let tag = result.tag();
@@ -197,6 +198,8 @@ pub extern "C" fn marlang_jit_call(
                 0
             }
             Err(_) => {
+                // Restore stack — the callee may have pushed values before erroring
+                vm.stack_top = stack_before;
                 // Check if this is a cross-boundary effect bail
                 if vm.pending_effect.is_some() {
                     2 // bail — effect needs dispatch in outer run() loop
@@ -364,6 +367,7 @@ fn interpret_closure(
         open_upvalues: Vec::new(),
     };
 
+    let stack_before = vm.stack_top;
     let base = vm.frame_count;
     vm.push_frame(frame);
 
@@ -376,6 +380,7 @@ fn interpret_closure(
             // Restore VM state on error — run() may have unwound frames and
             // handler stack during handler dispatch.
             vm.frame_count = base;
+            vm.stack_top = stack_before;
             vm.handler_stack.truncate(saved_handler_len);
             vm.handler_dispatch_stack.truncate(saved_dispatch_len);
             Err(e)
@@ -693,13 +698,12 @@ fn perform_from_jit(vm: &mut VM, op_name: &str, args: &[Value]) -> Option<Value>
                 // Empty — bail to interpreter for throw dispatch
                 return None;
             }
-            "get-input" => {
-                return Some(crate::vm::values_to_list(&chars[*pos..]));
+            "get-pos" => {
+                return Some(Value::int(*pos as i64));
             }
-            "set-input" => {
-                if let Some(arg) = args.first() {
-                    *chars = crate::vm::list_to_values(arg);
-                    *pos = 0;
+            "set-pos" => {
+                if let Some(n) = args.first().and_then(|v| v.as_int()) {
+                    *pos = n as usize;
                 }
                 return Some(Value::nil());
             }
