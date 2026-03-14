@@ -261,13 +261,24 @@ fn call_closure_from_jit(
         for (i, arg) in args.iter().enumerate() {
             locals[i] = arg.clone();
         }
+        let saved_fc = vm.frame_count;
         let result = unsafe {
             let vm_ptr = vm as *mut VM as *mut u8;
             let closure_ptr = closure as *const Closure as *mut u8;
             let locals_ptr = locals.as_mut_ptr() as *mut u8;
             jit_fn(vm_ptr, closure_ptr, locals_ptr)
         };
+        // JIT functions don't push frames, so frame_count must be preserved
+        // UNLESS a cross-boundary effect fired (pending_effect is set), in which
+        // case the Perform handler already unwound frames into the continuation.
+        if vm.pending_effect.is_none() {
+            vm.frame_count = saved_fc;
+        }
         if result.tag == JIT_BAIL_TAG {
+            if vm.pending_effect.is_some() {
+                // Cross-boundary effect — propagate without restarting
+                return Err(crate::errors::VMError::runtime("__effect_bail"));
+            }
             // JIT bailed — fall back to interpreter with the same locals
             return interpret_closure(vm, closure, locals);
         }
@@ -294,13 +305,20 @@ fn call_closure_from_jit(
             for (i, arg) in args.iter().enumerate() {
                 locals[i] = arg.clone();
             }
+            let saved_fc2 = vm.frame_count;
             let result = unsafe {
                 let vm_ptr = vm as *mut VM as *mut u8;
                 let closure_ptr = closure as *const Closure as *mut u8;
                 let locals_ptr = locals.as_mut_ptr() as *mut u8;
                 jit_fn(vm_ptr, closure_ptr, locals_ptr)
             };
+            if vm.pending_effect.is_none() {
+                vm.frame_count = saved_fc2;
+            }
             if result.tag == JIT_BAIL_TAG {
+                if vm.pending_effect.is_some() {
+                    return Err(crate::errors::VMError::runtime("__effect_bail"));
+                }
                 return interpret_closure(vm, closure, locals);
             }
             drop(locals);
@@ -349,10 +367,20 @@ fn interpret_closure(
     let base = vm.frame_count;
     vm.push_frame(frame);
 
+    let saved_handler_len = vm.handler_stack.len();
+    let saved_dispatch_len = vm.handler_dispatch_stack.len();
+
     match crate::vm::run(vm, base) {
         Ok(val) => Ok(val),
-        Err(crate::vm::VMSignal::Error(e)) => Err(e),
-        Err(crate::vm::VMSignal::Effect(_)) => {
+        Err(crate::vm::VMSignal::Error(e)) => {
+            // Restore VM state on error — run() may have unwound frames and
+            // handler stack during handler dispatch.
+            vm.frame_count = base;
+            vm.handler_stack.truncate(saved_handler_len);
+            vm.handler_dispatch_stack.truncate(saved_dispatch_len);
+            Err(e)
+        }
+        Err(crate::vm::VMSignal::Effect(_sig)) => {
             // Cross-boundary effect: the inner run() detected that the handler's
             // unwind target is below its base frame count. The effect data is stored
             // in vm.pending_effect. Propagate as an error; marlang_jit_call will

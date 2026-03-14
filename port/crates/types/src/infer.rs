@@ -260,6 +260,85 @@ fn get_define_annotation(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Opt
 /// Infer a body sequence with letrec semantics for leading defines.
 /// Leading define forms get placeholder type variables inserted into the environment
 /// before their bodies are inferred, allowing mutual recursion.
+/// Collect all symbol names referenced in an expression.
+/// This is used for dependency analysis of local defines.
+fn collect_free_symbols(expr: &Expr, interner: &Interner, out: &mut HashSet<String>) {
+    match expr {
+        Expr::Atom(LispValue::Symbol(sym), _) => {
+            out.insert(interner.resolve(*sym).to_string());
+        }
+        Expr::List { head, tail, .. } => {
+            collect_free_symbols(head, interner, out);
+            collect_free_symbols(tail, interner, out);
+        }
+        _ => {}
+    }
+}
+
+/// Compute strongly connected components using Tarjan's algorithm.
+/// Returns SCCs in reverse topological order (dependencies come first when reversed).
+fn tarjan_scc(num_nodes: usize, adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    struct State {
+        index_counter: usize,
+        stack: Vec<usize>,
+        on_stack: Vec<bool>,
+        index: Vec<Option<usize>>,
+        lowlink: Vec<usize>,
+        result: Vec<Vec<usize>>,
+    }
+
+    fn strongconnect(v: usize, adj: &[Vec<usize>], state: &mut State) {
+        state.index[v] = Some(state.index_counter);
+        state.lowlink[v] = state.index_counter;
+        state.index_counter += 1;
+        state.stack.push(v);
+        state.on_stack[v] = true;
+
+        for &w in &adj[v] {
+            if state.index[w].is_none() {
+                strongconnect(w, adj, state);
+                state.lowlink[v] = state.lowlink[v].min(state.lowlink[w]);
+            } else if state.on_stack[w] {
+                state.lowlink[v] = state.lowlink[v].min(state.index[w].unwrap());
+            }
+        }
+
+        if state.lowlink[v] == state.index[v].unwrap() {
+            let mut component = Vec::new();
+            loop {
+                let w = state.stack.pop().unwrap();
+                state.on_stack[w] = false;
+                component.push(w);
+                if w == v {
+                    break;
+                }
+            }
+            state.result.push(component);
+        }
+    }
+
+    let mut state = State {
+        index_counter: 0,
+        stack: Vec::new(),
+        on_stack: vec![false; num_nodes],
+        index: vec![None; num_nodes],
+        lowlink: vec![0; num_nodes],
+        result: Vec::new(),
+    };
+
+    for v in 0..num_nodes {
+        if state.index[v].is_none() {
+            strongconnect(v, adj, &mut state);
+        }
+    }
+
+    // Tarjan's produces SCCs in reverse topological order of the condensation
+    // DAG, which means sinks (nodes with no outgoing edges / no dependencies)
+    // come first. This is exactly the order we need: process dependencies before
+    // their dependents.
+    state.result
+}
+
 fn infer_body_with_defines(
     env: &TypeEnv,
     body_exprs: &[&Expr],
@@ -284,77 +363,110 @@ fn infer_body_with_defines(
         return infer_body_sequence(env, body_exprs, session);
     }
 
-    // Phase 1: Collect define names and create placeholders
     let define_exprs = &body_exprs[..num_defines];
     let rest_exprs = &body_exprs[num_defines..];
 
-    // Enter level for the local define group
-    enter_level();
-
-    let mut placeholders: Vec<(String, Type)> = Vec::new();
-    let mut define_env = env.clone();
+    // Collect define names and their value expressions
+    let mut define_names: Vec<String> = Vec::new();
+    let mut define_value_exprs: Vec<&Expr> = Vec::new();
+    let mut define_full_exprs: Vec<&Expr> = Vec::new();
 
     for &def_expr in define_exprs {
         let name = is_define_form(def_expr, session.interner)
             .unwrap()
             .to_string();
-        let ann_type = get_define_annotation(def_expr, &define_env, session.interner);
-        let placeholder = ann_type.unwrap_or_else(fresh_type_var);
-        define_env
-            .bindings_mut()
-            .insert(name.clone(), monotype(placeholder.clone()));
-        placeholders.push((name, placeholder));
+        let elements = ast::list_to_array(def_expr);
+        define_names.push(name);
+        define_value_exprs.push(elements[2]);
+        define_full_exprs.push(def_expr);
     }
 
-    // Phase 2: Infer each define's value in the extended environment
+    // Build name-to-index map
+    let name_to_idx: HashMap<&str, usize> = define_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+
+    // Build dependency graph: edge from i to j means define i references define j
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); num_defines];
+    for (i, &val_expr) in define_value_exprs.iter().enumerate() {
+        let mut refs = HashSet::new();
+        collect_free_symbols(val_expr, session.interner, &mut refs);
+        for ref_name in &refs {
+            if let Some(&j) = name_to_idx.get(ref_name.as_str())
+                && !adj[i].contains(&j)
+            {
+                adj[i].push(j);
+            }
+        }
+    }
+
+    // Compute SCCs in topological order (dependencies first)
+    let sccs = tarjan_scc(num_defines, &adj);
+
+    // Process each SCC: create placeholders, infer, generalize
+    let mut current_env = env.clone();
     let mut subst = empty_subst();
     let mut all_effects = effect_row_empty();
 
-    for (i, &def_expr) in define_exprs.iter().enumerate() {
-        let elements = ast::list_to_array(def_expr);
-        let value_expr = elements[2];
-        let applied_env = apply_subst_env(&subst, &define_env);
-        let result = infer_expr(&applied_env, value_expr, session)?;
-        subst = compose_subst(&result.subst, &subst);
-        all_effects = combine_effect_rows(&all_effects, &result.effects);
+    for scc in &sccs {
+        // Enter level for this SCC group
+        enter_level();
 
-        // Unify inferred type with placeholder
-        let (ref name, ref placeholder) = placeholders[i];
-        let placeholder_applied = apply_subst(&subst, placeholder);
-        let value_type_applied = apply_subst(&subst, &result.ty);
-        let unify_result = unify_with_context(
-            &placeholder_applied,
-            &value_type_applied,
-            &format!("local definition of {name}"),
-        )?;
-        subst = compose_subst(&unify_result, &subst);
+        // Create placeholders for all names in this SCC
+        let mut scc_placeholders: Vec<(String, Type)> = Vec::new();
+        let mut scc_env = current_env.clone();
+
+        for &idx in scc {
+            let name = &define_names[idx];
+            let ann_type =
+                get_define_annotation(define_full_exprs[idx], &scc_env, session.interner);
+            let placeholder = ann_type.unwrap_or_else(fresh_type_var);
+            scc_env
+                .bindings_mut()
+                .insert(name.clone(), monotype(placeholder.clone()));
+            scc_placeholders.push((name.clone(), placeholder));
+        }
+
+        // Infer each define's value in the extended environment
+        for (scc_i, &idx) in scc.iter().enumerate() {
+            let applied_env = apply_subst_env(&subst, &scc_env);
+            let result = infer_expr(&applied_env, define_value_exprs[idx], session)?;
+            subst = compose_subst(&result.subst, &subst);
+            all_effects = combine_effect_rows(&all_effects, &result.effects);
+
+            // Unify inferred type with placeholder
+            let (ref name, ref placeholder) = scc_placeholders[scc_i];
+            let placeholder_applied = apply_subst(&subst, placeholder);
+            let value_type_applied = apply_subst(&subst, &result.ty);
+            let unify_result = unify_with_context(
+                &placeholder_applied,
+                &value_type_applied,
+                &format!("local definition of {name}"),
+            )?;
+            subst = compose_subst(&unify_result, &subst);
+        }
+
+        // Exit level before generalizing
+        exit_level();
+
+        // Generalize and add to current_env for subsequent SCCs
+        current_env = apply_subst_env(&subst, &current_env);
+        for (name, placeholder) in &scc_placeholders {
+            let ty = apply_subst(&subst, placeholder);
+            let scheme = generalize(&current_env, &ty);
+            current_env.bindings_mut().insert(name.clone(), scheme);
+        }
     }
 
-    // Exit level before generalizing
-    exit_level();
-
-    // Phase 3: Generalize and update the environment with final types
-    let mut final_env = apply_subst_env(&subst, env);
-    for (name, _) in &placeholders {
-        // Look up the final type from the define_env (which has the placeholder)
-        // and apply all accumulated substitutions
-        let final_type = if let Some(scheme) = lookup_var(&define_env, name) {
-            let ty = apply_subst(&subst, &scheme.ty);
-            generalize(&final_env, &ty)
-        } else {
-            monotype(t_unit())
-        };
-        final_env.bindings_mut().insert(name.clone(), final_type);
-    }
-
-    // Phase 4: Infer remaining (non-define) body expressions
+    // Infer remaining (non-define) body expressions
     if rest_exprs.is_empty() {
-        // All expressions were defines — the body type is Unit (from last define)
         return Ok((subst, t_unit(), all_effects));
     }
 
     let (subst, all_effects, types) =
-        infer_exprs(&final_env, rest_exprs, session, subst, all_effects)?;
+        infer_exprs(&current_env, rest_exprs, session, subst, all_effects)?;
     let body_type = types.into_iter().last().unwrap_or_else(t_unit);
     Ok((subst, body_type, all_effects))
 }

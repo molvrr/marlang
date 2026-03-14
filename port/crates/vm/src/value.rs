@@ -377,12 +377,58 @@ impl Clone for Value {
 
 impl Drop for Value {
     fn drop(&mut self) {
-        if self.tag == TAG_OBJECT {
-            let ptr = self.payload as *const VMObject;
-            // Safety: ptr came from Arc::into_raw. We decrement the refcount,
-            // potentially freeing the object.
-            unsafe {
-                Arc::decrement_strong_count(ptr);
+        if self.tag != TAG_OBJECT {
+            return;
+        }
+
+        // Iteratively drop Cons chains to avoid stack overflow on long lists.
+        // A Cons list like (Cons a (Cons b (Cons c Nil))) would normally
+        // recurse through Drop: dropping the outer Cons drops its tail field,
+        // which drops the next Cons, etc. For 10K+ elements this overflows.
+        //
+        // Instead, we walk the chain iteratively: if this Value is the sole
+        // owner of a Cons, we extract the tail before dropping the node,
+        // then continue with the tail.
+        let ptr = self.payload as *const VMObject;
+        // Reconstruct the Arc from the raw pointer
+        let mut arc = unsafe { Arc::from_raw(ptr) };
+        // Clear self to prevent double-free from the implicit drop
+        self.tag = TAG_NIL;
+        self.payload = 0;
+
+        loop {
+            // Try to take sole ownership. If other references exist, just drop
+            // our Arc reference (decrement refcount) and stop.
+            let mut obj = match Arc::try_unwrap(arc) {
+                Ok(obj) => obj,
+                Err(_shared_arc) => break, // drop _shared_arc decrements refcount
+            };
+
+            // We have sole ownership. Check if it's a Cons node.
+            match &mut obj {
+                VMObject::AdtValue { tag, fields } if tag == "Cons" && fields.len() == 2 => {
+                    // Take the tail value before dropping the node.
+                    // Replace the tail with Nil so it doesn't get recursively dropped.
+                    let tail = std::mem::replace(&mut fields[1], Value::nil());
+                    // Drop the node (drops the head field, the Nil tail, and the tag string)
+                    drop(obj);
+
+                    if tail.tag == TAG_OBJECT {
+                        // Continue with the tail
+                        let tail_ptr = tail.payload as *const VMObject;
+                        arc = unsafe { Arc::from_raw(tail_ptr) };
+                        // Prevent tail's Drop from also decrementing the refcount
+                        std::mem::forget(tail);
+                    } else {
+                        // Tail is not an object (e.g., Nil) — nothing more to iterate
+                        break;
+                    }
+                }
+                _ => {
+                    // Not a Cons chain — let normal Drop handle it
+                    drop(obj);
+                    break;
+                }
             }
         }
     }

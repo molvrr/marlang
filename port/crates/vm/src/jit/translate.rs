@@ -78,16 +78,19 @@ pub(crate) fn can_jit(proto: &FunctionPrototype) -> bool {
             | Op::Jump
             | Op::JumpIfFalse
             | Op::Return
-            | Op::Call
             | Op::Closure
             | Op::Construct
             | Op::GetField
             | Op::MatchTag
-            | Op::TailCall
-            | Op::Perform => {}
+            | Op::TailCall => {}
 
             // Unsupported — bail out
-            Op::SetUpvalue // mutable upvalues
+            // Call and Perform can trigger nested interpreter execution
+            // which may modify VM state. When the JIT bails and restarts
+            // from ip=0, these side effects would be replayed incorrectly.
+            Op::Call
+            | Op::Perform
+            | Op::SetUpvalue // mutable upvalues
             | Op::PushHandler
             | Op::PopHandler
             | Op::Resume
@@ -1181,8 +1184,8 @@ fn emit_call(
     );
     let status = bcx.inst_results(call)[0];
 
-    // Check if we need to bail (status == 2: cross-boundary effect)
-    let bail_cond = bcx.ins().icmp_imm(IntCC::Equal, status, 2);
+    // Check if we need to bail (status != 0: error or cross-boundary effect)
+    let bail_cond = bcx.ins().icmp_imm(IntCC::NotEqual, status, 0);
     let bail_block = bcx.create_block();
     let continue_block = bcx.create_block();
     bcx.ins()
