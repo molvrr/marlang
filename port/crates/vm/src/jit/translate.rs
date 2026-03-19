@@ -452,6 +452,10 @@ pub(crate) fn translate_function(
 
     // Virtual stack for stack machine → SSA translation
     let mut vstack: Vec<JitValue> = Vec::new();
+    // Per-block cache of local variable SSA values. Avoids redundant loads from
+    // locals_ptr after function calls (Cranelift treats calls as memory clobbers).
+    // Reset at every block boundary.
+    let mut local_cache: Vec<Option<JitValue>> = vec![None; local_count];
 
     /// Collect the current vstack as flat block arguments: [tag0, payload0, tag1, payload1, ...]
     fn vstack_as_block_args(vstack: &[JitValue]) -> Vec<BlockArg> {
@@ -511,6 +515,9 @@ pub(crate) fn translate_function(
             bcx.switch_to_block(block);
             let depth = block_param_count.get(&ip).copied().unwrap_or(0);
             vstack = vstack_from_block_params(&bcx, block, depth);
+            // Reset local cache at block boundary — SSA values from the previous
+            // block can't be used here (different SSA scope).
+            local_cache.fill(None);
         }
 
         // Skip instructions in dead code regions (after terminators with no
@@ -532,7 +539,15 @@ pub(crate) fn translate_function(
 
             Op::PushLocal => {
                 let slot = inst.operand as usize;
-                let jv = emit_load_local(&mut bcx, locals_ptr, slot);
+                // Use cached SSA value if available (avoids redundant memory loads
+                // after function calls — Cranelift can't GVN loads across calls).
+                let jv = if let Some(cached) = local_cache[slot] {
+                    cached
+                } else {
+                    let loaded = emit_load_local(&mut bcx, locals_ptr, slot);
+                    local_cache[slot] = Some(loaded);
+                    loaded
+                };
                 vstack.push(jv);
             }
 
@@ -540,6 +555,8 @@ pub(crate) fn translate_function(
                 let jv = vstack.pop().expect("vstack underflow on SetLocal");
                 let slot = inst.operand as usize;
                 emit_store_local(&mut bcx, locals_ptr, slot, &jv);
+                // Update cache with the new value
+                local_cache[slot] = Some(jv);
             }
 
             Op::PushUpvalue => {

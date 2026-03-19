@@ -1,3 +1,4 @@
 {"type":"config","name":"Optimize marlang fib(40) to match bun performance","metricName":"fib40_s","metricUnit":"s","bestDirection":"lower"}
 {"run":1,"commit":"c497a62","metric":37.582,"metrics":{"bun_s":0.386},"status":"keep","description":"Baseline: marlang 37.58s vs bun 0.39s (97x slower). JIT rejects Op::Call so fib runs in interpreter only.","timestamp":1773952011038,"segment":0,"confidence":null}
 {"run":2,"commit":"d0f4c9f","metric":0.758,"metrics":{"bun_s":0.383},"status":"keep","description":"Enable JIT for self-recursive Op::Call + skip dead PushGlobal for self-callees. 37.58s → 0.76s (49.5x faster, now 2x bun).","timestamp":1773952094066,"segment":0,"confidence":null}
+{"run":3,"commit":"95def04","metric":0.746,"metrics":{"bun_s":0.383},"status":"keep","description":"Fuse comparison+JumpIfFalse peephole in JIT. 0.758s → 0.746s (marginal, likely noise). Cleaner IR generation.","timestamp":1773952404585,"segment":0,"confidence":3069.666666666664}
