@@ -1282,9 +1282,16 @@ pub(crate) fn translate_function(
             // --- Control flow ---
             Op::Jump => {
                 let target = inst.operand as usize;
-                let target_block = bc_to_block[&target];
-                let args = vstack_as_block_args(&vstack);
-                bcx.ins().jump(target_block, &args);
+                // Peephole: JUMP to RETURN → direct RETURN.
+                // Enables shrink-wrapping: paths that return early can skip prologue.
+                if target < code.len() && code[target].op == Op::Return {
+                    let result = vstack.pop().unwrap();
+                    bcx.ins().return_(&[result.tag, result.payload]);
+                } else {
+                    let target_block = bc_to_block[&target];
+                    let args = vstack_as_block_args(&vstack);
+                    bcx.ins().jump(target_block, &args);
+                }
                 in_dead_code = true;
             }
 
