@@ -1,0 +1,1 @@
+{"type":"config","name":"Optimize marlang fib(40) to match bun performance","metricName":"fib40_s","metricUnit":"s","bestDirection":"lower"}
