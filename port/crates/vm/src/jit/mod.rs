@@ -21,4 +21,6 @@ pub use crate::jit::engine::{JitEngine, JitFn};
 
 /// Call count threshold before a function is JIT-compiled.
 /// This balances compilation cost against execution savings.
-pub const JIT_THRESHOLD: u32 = 500;
+/// Lower values trigger compilation earlier (better for long-running programs),
+/// but risk compiling functions that aren't truly hot.
+pub const JIT_THRESHOLD: u32 = 100;
