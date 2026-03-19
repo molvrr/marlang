@@ -80,15 +80,15 @@ impl JitEngine {
     /// Compile a function prototype to native code.
     /// Returns `Some(JitFn)` on success, `None` if the function can't be JIT-compiled.
     pub fn compile(&mut self, proto: &FunctionPrototype) -> Option<JitFn> {
-        if !translate::can_jit(proto) {
-            return None;
-        }
-
-        // Check if this is a pure integer recursive function — if so, compile a
-        // specialized "fast" inner function with lean calling convention (raw i64
-        // args/return, no tags, no bail checks, no vm/closure pointers).
+        // Check integer-pure recursive first — this bypasses can_jit() and uses
+        // a specialized fast path with lean calling convention (raw i64 args/return,
+        // no tags, no bail checks, no vm/closure pointers).
         if translate::is_integer_pure_recursive(proto) {
             return self.compile_integer_pure(proto);
+        }
+
+        if !translate::can_jit(proto) {
+            return None;
         }
 
         let func_name = format!("marlang_jit_{}", self.func_counter);

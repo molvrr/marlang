@@ -97,21 +97,14 @@ pub(crate) fn can_jit(proto: &FunctionPrototype) -> bool {
                 }
             }
 
-            // Call is supported for self-recursive calls — they use direct native
-            // recursion via emit_self_call, bypassing the VM stack entirely.
-            // Non-self Calls go through the runtime trampoline which can modify
-            // VM state; if a bail occurs, replaying from ip=0 would be incorrect.
-            Op::Call => {
-                if !self_recursive.contains(&ip) {
-                    return false;
-                }
-            }
-
             // Unsupported — bail out
-            // Perform can trigger nested interpreter execution
+            // Call and Perform can trigger nested interpreter execution
             // which may modify VM state. When the JIT bails and restarts
             // from ip=0, these side effects would be replayed incorrectly.
-            Op::Perform
+            // Note: self-recursive Call in integer-pure functions is handled
+            // separately by compile_integer_pure, which bypasses can_jit().
+            Op::Call
+            | Op::Perform
             | Op::SetUpvalue // mutable upvalues
             | Op::PushHandler
             | Op::PopHandler
