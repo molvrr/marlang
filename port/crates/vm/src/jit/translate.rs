@@ -731,9 +731,25 @@ pub(crate) fn translate_function(
             }
 
             // --- Comparisons ---
+            // Peephole: fuse comparison + JumpIfFalse into a single icmp + brif.
+            // This eliminates the select(cmp, TAG_TRUE, TAG_FALSE) + truthiness check.
             Op::LtInt => {
                 let b = vstack.pop().unwrap();
                 let a = vstack.pop().unwrap();
+                if try_fuse_cmp_branch(
+                    &mut bcx,
+                    &mut vstack,
+                    &mut ip,
+                    &mut in_dead_code,
+                    a.payload,
+                    b.payload,
+                    IntCC::SignedLessThan,
+                    code,
+                    &bc_to_block,
+                    &block_starts,
+                ) {
+                    continue;
+                }
                 emit_int_cmp(
                     &mut bcx,
                     &mut vstack,
@@ -745,6 +761,20 @@ pub(crate) fn translate_function(
             Op::GtInt => {
                 let b = vstack.pop().unwrap();
                 let a = vstack.pop().unwrap();
+                if try_fuse_cmp_branch(
+                    &mut bcx,
+                    &mut vstack,
+                    &mut ip,
+                    &mut in_dead_code,
+                    a.payload,
+                    b.payload,
+                    IntCC::SignedGreaterThan,
+                    code,
+                    &bc_to_block,
+                    &block_starts,
+                ) {
+                    continue;
+                }
                 emit_int_cmp(
                     &mut bcx,
                     &mut vstack,
@@ -756,6 +786,20 @@ pub(crate) fn translate_function(
             Op::LeInt => {
                 let b = vstack.pop().unwrap();
                 let a = vstack.pop().unwrap();
+                if try_fuse_cmp_branch(
+                    &mut bcx,
+                    &mut vstack,
+                    &mut ip,
+                    &mut in_dead_code,
+                    a.payload,
+                    b.payload,
+                    IntCC::SignedLessThanOrEqual,
+                    code,
+                    &bc_to_block,
+                    &block_starts,
+                ) {
+                    continue;
+                }
                 emit_int_cmp(
                     &mut bcx,
                     &mut vstack,
@@ -767,6 +811,20 @@ pub(crate) fn translate_function(
             Op::GeInt => {
                 let b = vstack.pop().unwrap();
                 let a = vstack.pop().unwrap();
+                if try_fuse_cmp_branch(
+                    &mut bcx,
+                    &mut vstack,
+                    &mut ip,
+                    &mut in_dead_code,
+                    a.payload,
+                    b.payload,
+                    IntCC::SignedGreaterThanOrEqual,
+                    code,
+                    &bc_to_block,
+                    &block_starts,
+                ) {
+                    continue;
+                }
                 emit_int_cmp(
                     &mut bcx,
                     &mut vstack,
@@ -1109,6 +1167,48 @@ fn emit_store_local(
         .store(MemFlags::trusted(), jv.tag, locals_ptr, offset);
     bcx.ins()
         .store(MemFlags::trusted(), jv.payload, locals_ptr, offset + 8);
+}
+
+/// Peephole: fuse an integer comparison with a following JumpIfFalse into a single
+/// `icmp + brif`, eliminating the intermediate boolean tag production and truthiness check.
+/// Returns true if fusion was performed (caller should `continue`).
+#[allow(clippy::too_many_arguments)]
+fn try_fuse_cmp_branch(
+    bcx: &mut FunctionBuilder,
+    vstack: &mut [JitValue],
+    ip: &mut usize,
+    in_dead_code: &mut bool,
+    a: cranelift_codegen::ir::Value,
+    b: cranelift_codegen::ir::Value,
+    cc: IntCC,
+    code: &[Instruction],
+    bc_to_block: &std::collections::HashMap<usize, cranelift_codegen::ir::Block>,
+    block_starts: &std::collections::BTreeSet<usize>,
+) -> bool {
+    // Only fuse if the next instruction is JumpIfFalse and is NOT a block boundary
+    // (block boundaries mean another instruction jumps here, so the JumpIfFalse may
+    // receive its condition from a different path).
+    if *ip >= code.len() || code[*ip].op != Op::JumpIfFalse || block_starts.contains(ip) {
+        return false;
+    }
+    let target = code[*ip].operand as usize;
+    *ip += 1; // consume the JumpIfFalse
+    let target_block = bc_to_block[&target];
+    let fallthrough_block = bc_to_block[ip];
+
+    // LtInt → JumpIfFalse: branch to target when condition is FALSE (not less-than).
+    // brif(cmp, fallthrough, target) — when cmp is true, fall through; when false, jump.
+    let cmp = bcx.ins().icmp(cc, a, b);
+    // Build block args inline (same as vstack_as_block_args but accessible here)
+    let mut args: Vec<BlockArg> = Vec::with_capacity(vstack.len() * 2);
+    for jv in vstack.iter() {
+        args.push(BlockArg::Value(jv.tag));
+        args.push(BlockArg::Value(jv.payload));
+    }
+    bcx.ins()
+        .brif(cmp, fallthrough_block, &args, target_block, &args);
+    *in_dead_code = true;
+    true
 }
 
 fn emit_int_cmp(
