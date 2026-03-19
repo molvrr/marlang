@@ -8,8 +8,8 @@ PORT_DIR="$REPO_ROOT/port"
 cargo build --release -p marlang-cli --manifest-path "$PORT_DIR/Cargo.toml" 2>&1 | tail -1
 MAR="$PORT_DIR/target/release/mar"
 
-# Run fib40 benchmark (3 runs, take median)
-RUNS=3
+# Run fib40 benchmark (5 runs, take median)
+RUNS=5
 times=()
 for ((i = 1; i <= RUNS; i++)); do
     start=$(perl -MTime::HiRes=time -e 'printf "%.6f\n", time')
@@ -20,7 +20,7 @@ for ((i = 1; i <= RUNS; i++)); do
 done
 med_mar=$(printf '%s\n' "${times[@]}" | sort -n | awk -v n="${#times[@]}" 'NR==int(n/2)+1{print}')
 
-# Run bun reference (3 runs, take median)
+# Run bun reference (5 runs, take median)
 bun_times=()
 for ((i = 1; i <= RUNS; i++)); do
     start=$(perl -MTime::HiRes=time -e 'printf "%.6f\n", time')

@@ -410,9 +410,17 @@ pub(crate) fn translate_fast_function(
             }
             Op::Jump => {
                 let target = inst.operand as usize;
-                let target_block = bc_to_block[&target];
-                let args = vstack_fast_as_args(&vstack_fast);
-                bcx.ins().jump(target_block, &args);
+                // Peephole: JUMP to RETURN → direct RETURN.
+                // This enables Cranelift's shrink-wrapping: the base case path
+                // can skip the function prologue (no callee-saved reg saves).
+                if target < code.len() && code[target].op == Op::Return {
+                    let result = vstack_fast.pop().unwrap();
+                    bcx.ins().return_(&[result]);
+                } else {
+                    let target_block = bc_to_block[&target];
+                    let args = vstack_fast_as_args(&vstack_fast);
+                    bcx.ins().jump(target_block, &args);
+                }
                 in_dead_code = true;
             }
             Op::JumpIfFalse => {
