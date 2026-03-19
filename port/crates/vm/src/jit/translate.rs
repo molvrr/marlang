@@ -123,6 +123,367 @@ pub(crate) fn can_jit(proto: &FunctionPrototype) -> bool {
     true
 }
 
+/// Check if a function is a "pure integer recursive" function — one that only uses
+/// integer arithmetic, comparisons, control flow, and self-recursive calls. Such
+/// functions can be compiled with a specialized calling convention that passes/returns
+/// raw i64 values instead of tagged (tag, payload) pairs, eliminating all tag overhead.
+pub(crate) fn is_integer_pure_recursive(proto: &FunctionPrototype) -> bool {
+    // Must have self-recursive calls to benefit
+    let self_recursive =
+        find_self_recursive_calls(&proto.chunk.code, &proto.chunk.constants, &proto.name);
+    if self_recursive.is_empty() {
+        return false;
+    }
+    // No upvalues
+    if !proto.upvalues.is_empty() {
+        return false;
+    }
+    // Scan all instructions
+    for (ip, inst) in proto.chunk.code.iter().enumerate() {
+        match inst.op {
+            // Safe integer-only operations
+            Op::PushLocal
+            | Op::SetLocal
+            | Op::Pop
+            | Op::Dup
+            | Op::AddInt
+            | Op::SubInt
+            | Op::MulInt
+            | Op::NegInt
+            | Op::LtInt
+            | Op::GtInt
+            | Op::LeInt
+            | Op::GeInt
+            | Op::Jump
+            | Op::JumpIfFalse
+            | Op::Return => {}
+            // Constants must be integers or booleans (booleans from comparisons)
+            Op::PushConst => {
+                match &proto.chunk.constants[inst.operand as usize] {
+                    ConstantValue::Int(_) | ConstantValue::Boolean(_) => {}
+                    _ => return false, // Float, string, etc.
+                }
+            }
+            // Self-recursive calls only
+            Op::Call | Op::TailCall => {
+                if !self_recursive.contains(&ip) {
+                    return false;
+                }
+            }
+            // PushGlobal is only OK for self-references (replaced with dummy)
+            Op::PushGlobal => match &proto.chunk.constants[inst.operand as usize] {
+                ConstantValue::String(s) if s == &proto.name => {}
+                _ => return false,
+            },
+            // Everything else disqualifies
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Translate a pure-integer self-recursive function into a specialized "fast" inner
+/// function that takes/returns raw i64 values. The function has signature:
+///   `(arg0: I64, arg1: I64, ...) -> I64`
+/// No tag tracking, no bail checks, no vm_ptr/closure_ptr overhead.
+pub(crate) fn translate_fast_function(
+    proto: &FunctionPrototype,
+    func_ctx: &mut FunctionBuilderContext,
+    ctx: &mut cranelift_codegen::Context,
+    self_func_ref: cranelift_codegen::ir::FuncRef,
+) -> TranslationResult {
+    let code = &proto.chunk.code;
+    let constants = &proto.chunk.constants;
+    let local_count = proto.chunk.local_count as usize;
+    let arity = proto.arity as usize;
+    let self_recursive_calls = find_self_recursive_calls(code, constants, &proto.name);
+
+    // Signature: (arg0: I64, ...) -> I64
+    for _ in 0..arity {
+        ctx.func
+            .signature
+            .params
+            .push(cranelift_codegen::ir::AbiParam::new(PTR_TY));
+    }
+    ctx.func
+        .signature
+        .returns
+        .push(cranelift_codegen::ir::AbiParam::new(PTR_TY));
+
+    let mut bcx = FunctionBuilder::new(&mut ctx.func, func_ctx);
+
+    // --- Identify basic block boundaries ---
+    let mut block_starts = std::collections::BTreeSet::new();
+    block_starts.insert(0usize);
+    for (i, inst) in code.iter().enumerate() {
+        match inst.op {
+            Op::Jump => {
+                block_starts.insert(inst.operand as usize);
+                if i + 1 < code.len() {
+                    block_starts.insert(i + 1);
+                }
+            }
+            Op::JumpIfFalse => {
+                block_starts.insert(inst.operand as usize);
+                if i + 1 < code.len() {
+                    block_starts.insert(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Compute stack depths
+    let block_depths = compute_block_depths(code, &block_starts);
+
+    // Create blocks with single I64 block parameters (no tags)
+    let mut bc_to_block = std::collections::HashMap::new();
+    let mut block_param_count: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
+    for &start in &block_starts {
+        let block = bcx.create_block();
+        bc_to_block.insert(start, block);
+        let depth = block_depths.get(&start).copied().unwrap_or(0);
+        block_param_count.insert(start, depth);
+        if start != 0 {
+            for _ in 0..depth {
+                bcx.append_block_param(block, PTR_TY); // just payload, no tag
+            }
+        }
+    }
+
+    // Check for self-recursive tail calls
+    let has_self_recursive_tailcalls = code
+        .iter()
+        .enumerate()
+        .any(|(i, inst)| inst.op == Op::TailCall && self_recursive_calls.contains(&i));
+
+    // Entry block
+    let entry_block = bcx.create_block();
+    bcx.switch_to_block(entry_block);
+    bcx.append_block_params_for_function_params(entry_block);
+
+    // Get args directly as i64 values
+    let mut fast_locals: Vec<cranelift_codegen::ir::Value> = vec![
+        bcx.ins().iconst(PTR_TY, 0); // dummy for locals beyond args
+        local_count
+    ];
+    fast_locals[..arity].copy_from_slice(&bcx.block_params(entry_block)[..arity]);
+
+    // Loop header for tail calls
+    let loop_header = if has_self_recursive_tailcalls {
+        let lh = bcx.create_block();
+        bcx.ins().jump(lh, &[]);
+        bcx.switch_to_block(lh);
+        Some(lh)
+    } else {
+        None
+    };
+
+    let first_block = bc_to_block[&0];
+    bcx.ins().jump(first_block, &[]);
+    bcx.switch_to_block(first_block);
+
+    // Virtual stack of i64 values (no tags)
+    let mut vstack_fast: Vec<cranelift_codegen::ir::Value> = Vec::new();
+
+    fn vstack_fast_as_args(
+        vstack: &[cranelift_codegen::ir::Value],
+    ) -> Vec<cranelift_codegen::ir::instructions::BlockArg> {
+        vstack
+            .iter()
+            .map(|v| cranelift_codegen::ir::instructions::BlockArg::Value(*v))
+            .collect()
+    }
+
+    fn vstack_fast_from_params(
+        bcx: &FunctionBuilder,
+        block: cranelift_codegen::ir::Block,
+        depth: usize,
+    ) -> Vec<cranelift_codegen::ir::Value> {
+        bcx.block_params(block)[..depth].to_vec()
+    }
+
+    let mut ip = 0;
+    let mut in_dead_code = false;
+
+    while ip < code.len() {
+        if ip > 0
+            && let Some(&block) = bc_to_block.get(&ip)
+        {
+            if !block_depths.contains_key(&ip) {
+                in_dead_code = true;
+                ip += 1;
+                continue;
+            }
+            in_dead_code = false;
+            let prev = &code[ip - 1];
+            let is_terminated = matches!(
+                prev.op,
+                Op::Jump | Op::JumpIfFalse | Op::Return | Op::TailCall
+            );
+            if !is_terminated {
+                let args = vstack_fast_as_args(&vstack_fast);
+                bcx.ins().jump(block, &args);
+            }
+            bcx.switch_to_block(block);
+            let depth = block_param_count.get(&ip).copied().unwrap_or(0);
+            vstack_fast = vstack_fast_from_params(&bcx, block, depth);
+        }
+
+        if in_dead_code {
+            ip += 1;
+            continue;
+        }
+
+        let inst = &code[ip];
+        ip += 1;
+
+        match inst.op {
+            Op::PushConst => {
+                match &constants[inst.operand as usize] {
+                    ConstantValue::Int(n) => {
+                        let v = bcx.ins().iconst(PTR_TY, *n);
+                        vstack_fast.push(v);
+                    }
+                    ConstantValue::Boolean(b) => {
+                        // Booleans are represented as 0/1 for fast truthiness check
+                        let v = bcx.ins().iconst(PTR_TY, if *b { 1 } else { 0 });
+                        vstack_fast.push(v);
+                    }
+                    _ => unreachable!("non-integer constant in integer-pure function"),
+                }
+            }
+            Op::PushLocal => {
+                vstack_fast.push(fast_locals[inst.operand as usize]);
+            }
+            Op::SetLocal => {
+                fast_locals[inst.operand as usize] = vstack_fast.pop().unwrap();
+            }
+            Op::Pop => {
+                vstack_fast.pop();
+            }
+            Op::Dup => {
+                let top = *vstack_fast.last().unwrap();
+                vstack_fast.push(top);
+            }
+            Op::AddInt => {
+                let b = vstack_fast.pop().unwrap();
+                let a = vstack_fast.pop().unwrap();
+                vstack_fast.push(bcx.ins().iadd(a, b));
+            }
+            Op::SubInt => {
+                let b = vstack_fast.pop().unwrap();
+                let a = vstack_fast.pop().unwrap();
+                vstack_fast.push(bcx.ins().isub(a, b));
+            }
+            Op::MulInt => {
+                let b = vstack_fast.pop().unwrap();
+                let a = vstack_fast.pop().unwrap();
+                vstack_fast.push(bcx.ins().imul(a, b));
+            }
+            Op::NegInt => {
+                let a = vstack_fast.pop().unwrap();
+                vstack_fast.push(bcx.ins().ineg(a));
+            }
+            Op::LtInt | Op::GtInt | Op::LeInt | Op::GeInt => {
+                let b = vstack_fast.pop().unwrap();
+                let a = vstack_fast.pop().unwrap();
+                let cc = match inst.op {
+                    Op::LtInt => IntCC::SignedLessThan,
+                    Op::GtInt => IntCC::SignedGreaterThan,
+                    Op::LeInt => IntCC::SignedLessThanOrEqual,
+                    Op::GeInt => IntCC::SignedGreaterThanOrEqual,
+                    _ => unreachable!(),
+                };
+                // Peephole: fuse with JumpIfFalse
+                if ip < code.len() && code[ip].op == Op::JumpIfFalse && !block_starts.contains(&ip)
+                {
+                    let target = code[ip].operand as usize;
+                    ip += 1;
+                    let target_block = bc_to_block[&target];
+                    let fallthrough_block = bc_to_block[&ip];
+                    let cmp = bcx.ins().icmp(cc, a, b);
+                    let args = vstack_fast_as_args(&vstack_fast);
+                    bcx.ins()
+                        .brif(cmp, fallthrough_block, &args, target_block, &args);
+                    in_dead_code = true;
+                    continue;
+                }
+                // Non-fused: produce 0/1
+                let cmp = bcx.ins().icmp(cc, a, b);
+                let result = bcx.ins().uextend(PTR_TY, cmp);
+                vstack_fast.push(result);
+            }
+            Op::Jump => {
+                let target = inst.operand as usize;
+                let target_block = bc_to_block[&target];
+                let args = vstack_fast_as_args(&vstack_fast);
+                bcx.ins().jump(target_block, &args);
+                in_dead_code = true;
+            }
+            Op::JumpIfFalse => {
+                let target = inst.operand as usize;
+                let cond = vstack_fast.pop().unwrap();
+                let target_block = bc_to_block[&target];
+                let fallthrough_block = bc_to_block[&ip];
+                // Value is 0 (false) or non-zero (true)
+                let args = vstack_fast_as_args(&vstack_fast);
+                bcx.ins()
+                    .brif(cond, fallthrough_block, &args, target_block, &args);
+                in_dead_code = true;
+            }
+            Op::Return => {
+                let result = vstack_fast.pop().unwrap();
+                bcx.ins().return_(&[result]);
+                in_dead_code = true;
+            }
+            Op::Call | Op::TailCall => {
+                let call_arity = inst.operand as usize;
+                let mut args: Vec<cranelift_codegen::ir::Value> = Vec::with_capacity(call_arity);
+                for _ in 0..call_arity {
+                    args.push(vstack_fast.pop().unwrap());
+                }
+                args.reverse();
+                vstack_fast.pop(); // pop callee (dummy nil from PushGlobal)
+
+                if inst.op == Op::TailCall
+                    && self_recursive_calls.contains(&(ip - 1))
+                    && let Some(lh) = loop_header
+                {
+                    // Tail-call: update locals and jump to loop header
+                    for (i, arg) in args.iter().enumerate() {
+                        fast_locals[i] = *arg;
+                    }
+                    bcx.ins().jump(lh, &[]);
+                } else {
+                    // Direct self-call with lean signature
+                    let call = bcx.ins().call(self_func_ref, &args);
+                    let result = bcx.inst_results(call)[0];
+                    if inst.op == Op::TailCall {
+                        bcx.ins().return_(&[result]);
+                    } else {
+                        vstack_fast.push(result);
+                        continue;
+                    }
+                }
+                in_dead_code = true;
+            }
+            Op::PushGlobal => {
+                // Self-reference: push dummy (will be discarded by Call)
+                let dummy = bcx.ins().iconst(PTR_TY, 0);
+                vstack_fast.push(dummy);
+            }
+            _ => unreachable!("unexpected op {:?} in integer-pure function", inst.op),
+        }
+    }
+
+    bcx.seal_all_blocks();
+    bcx.finalize();
+
+    TranslationResult { success: true }
+}
+
 /// Compute the stack effect of a single instruction.
 /// Returns (pops, pushes) — how many values are popped and pushed.
 fn stack_effect(inst: &Instruction) -> (usize, usize) {

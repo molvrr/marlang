@@ -83,6 +83,14 @@ impl JitEngine {
         if !translate::can_jit(proto) {
             return None;
         }
+
+        // Check if this is a pure integer recursive function — if so, compile a
+        // specialized "fast" inner function with lean calling convention (raw i64
+        // args/return, no tags, no bail checks, no vm/closure pointers).
+        if translate::is_integer_pure_recursive(proto) {
+            return self.compile_integer_pure(proto);
+        }
+
         let func_name = format!("marlang_jit_{}", self.func_counter);
         self.func_counter += 1;
 
@@ -128,6 +136,125 @@ impl JitEngine {
         self.module.finalize_definitions().ok()?;
         let code_ptr = self.module.get_finalized_function(func_id);
 
+        Some(unsafe { std::mem::transmute::<*const u8, JitFn>(code_ptr) })
+    }
+
+    /// Compile a pure integer recursive function with a specialized fast path.
+    /// Generates two functions:
+    ///   1. A "fast" inner function: `(arg0: I64, ...) -> I64` — lean self-recursion
+    ///   2. A wrapper with the standard JIT signature that loads args and calls the fast fn
+    fn compile_integer_pure(&mut self, proto: &FunctionPrototype) -> Option<JitFn> {
+        let arity = proto.arity as usize;
+        let local_count = proto.chunk.local_count as usize;
+
+        // --- Compile the fast inner function ---
+        let fast_name = format!("marlang_jit_fast_{}", self.func_counter);
+        self.func_counter += 1;
+
+        let mut fast_sig = self.module.make_signature();
+        for _ in 0..arity {
+            fast_sig.params.push(AbiParam::new(PTR_TY));
+        }
+        fast_sig.returns.push(AbiParam::new(PTR_TY));
+
+        let fast_func_id = self
+            .module
+            .declare_function(&fast_name, Linkage::Local, &fast_sig)
+            .ok()?;
+
+        let mut ctx = self.module.make_context();
+        let fast_self_ref = self
+            .module
+            .declare_func_in_func(fast_func_id, &mut ctx.func);
+
+        let result =
+            translate::translate_fast_function(proto, &mut self.func_ctx, &mut ctx, fast_self_ref);
+
+        if !result.success {
+            self.module.clear_context(&mut ctx);
+            return None;
+        }
+
+        if self.module.define_function(fast_func_id, &mut ctx).is_err() {
+            self.module.clear_context(&mut ctx);
+            return None;
+        }
+        self.module.clear_context(&mut ctx);
+
+        // --- Compile the wrapper function ---
+        let wrapper_name = format!("marlang_jit_wrap_{}", self.func_counter);
+        self.func_counter += 1;
+
+        let mut wrapper_sig = self.module.make_signature();
+        wrapper_sig.params.push(AbiParam::new(PTR_TY)); // vm
+        wrapper_sig.params.push(AbiParam::new(PTR_TY)); // closure
+        wrapper_sig.params.push(AbiParam::new(PTR_TY)); // locals_ptr
+        wrapper_sig.returns.push(AbiParam::new(types::I8)); // tag
+        wrapper_sig.returns.push(AbiParam::new(PTR_TY)); // payload
+
+        let wrapper_func_id = self
+            .module
+            .declare_function(&wrapper_name, Linkage::Local, &wrapper_sig)
+            .ok()?;
+
+        let mut ctx = self.module.make_context();
+        // Build wrapper body: load args from locals_ptr, call fast fn, return (TAG_INT, result)
+        {
+            use cranelift_codegen::ir::InstBuilder;
+            use cranelift_frontend::FunctionBuilder;
+
+            ctx.func.signature = wrapper_sig;
+            let mut bcx = FunctionBuilder::new(&mut ctx.func, &mut self.func_ctx);
+            let entry = bcx.create_block();
+            bcx.switch_to_block(entry);
+            bcx.append_block_params_for_function_params(entry);
+
+            let _vm_ptr = bcx.block_params(entry)[0];
+            let _closure_ptr = bcx.block_params(entry)[1];
+            let locals_ptr = bcx.block_params(entry)[2];
+
+            // Load arguments from locals_ptr (payload only, skip tag)
+            let fast_ref = self.module.declare_func_in_func(fast_func_id, bcx.func);
+            let mut args = Vec::with_capacity(arity);
+            for i in 0..arity {
+                let offset = (i * 16 + 8) as i32; // skip tag (8 bytes), load payload
+                let payload = bcx.ins().load(
+                    PTR_TY,
+                    cranelift_codegen::ir::MemFlags::trusted(),
+                    locals_ptr,
+                    offset,
+                );
+                args.push(payload);
+            }
+
+            let call = bcx.ins().call(fast_ref, &args);
+            let result = bcx.inst_results(call)[0];
+            let tag_int = bcx.ins().iconst(types::I8, 0); // TAG_INT
+            bcx.ins().return_(&[tag_int, result]);
+
+            bcx.seal_all_blocks();
+            bcx.finalize();
+        }
+
+        if self
+            .module
+            .define_function(wrapper_func_id, &mut ctx)
+            .is_err()
+        {
+            self.module.clear_context(&mut ctx);
+            return None;
+        }
+        self.module.clear_context(&mut ctx);
+
+        // Finalize both functions
+        self.module.finalize_definitions().ok()?;
+
+        // The wrapper uses locals_ptr offset 8 to load the payload. This matches
+        // Value's #[repr(C)] layout: tag at offset 0, payload at offset 8.
+        // local_count is used by the caller to allocate the locals array.
+        let _ = local_count;
+
+        let code_ptr = self.module.get_finalized_function(wrapper_func_id);
         Some(unsafe { std::mem::transmute::<*const u8, JitFn>(code_ptr) })
     }
 
