@@ -97,12 +97,21 @@ pub(crate) fn can_jit(proto: &FunctionPrototype) -> bool {
                 }
             }
 
+            // Call is supported for self-recursive calls — they use direct native
+            // recursion via emit_self_call, bypassing the VM stack entirely.
+            // Non-self Calls go through the runtime trampoline which can modify
+            // VM state; if a bail occurs, replaying from ip=0 would be incorrect.
+            Op::Call => {
+                if !self_recursive.contains(&ip) {
+                    return false;
+                }
+            }
+
             // Unsupported — bail out
-            // Call and Perform can trigger nested interpreter execution
+            // Perform can trigger nested interpreter execution
             // which may modify VM state. When the JIT bails and restarts
             // from ip=0, these side effects would be replayed incorrectly.
-            Op::Call
-            | Op::Perform
+            Op::Perform
             | Op::SetUpvalue // mutable upvalues
             | Op::PushHandler
             | Op::PopHandler
@@ -545,15 +554,26 @@ pub(crate) fn translate_function(
                     ConstantValue::String(s) => s.as_str(),
                     _ => panic!("PushGlobal expects string constant"),
                 };
-                let jv = emit_get_global(
-                    &mut bcx,
-                    vm_ptr,
-                    name,
-                    proto.module_id,
-                    ptr_type,
-                    runtime_funcs,
-                );
-                vstack.push(jv);
+                // Optimization: skip the runtime global lookup for self-references
+                // that will be consumed by self-recursive Call/TailCall instructions.
+                // The callee value is discarded by emit_self_call anyway, so we push
+                // a dummy nil value instead of making an expensive runtime call.
+                if name == proto.name && !self_recursive_calls.is_empty() {
+                    // Push a dummy value — it will be popped and ignored by the
+                    // self-recursive Call/TailCall handler.
+                    let jv = emit_constant(&mut bcx, &ConstantValue::Nil);
+                    vstack.push(jv);
+                } else {
+                    let jv = emit_get_global(
+                        &mut bcx,
+                        vm_ptr,
+                        name,
+                        proto.module_id,
+                        ptr_type,
+                        runtime_funcs,
+                    );
+                    vstack.push(jv);
+                }
             }
 
             Op::SetGlobal => {

@@ -1,1 +1,2 @@
 {"type":"config","name":"Optimize marlang fib(40) to match bun performance","metricName":"fib40_s","metricUnit":"s","bestDirection":"lower"}
+{"run":1,"commit":"c497a62","metric":37.582,"metrics":{"bun_s":0.386},"status":"keep","description":"Baseline: marlang 37.58s vs bun 0.39s (97x slower). JIT rejects Op::Call so fib runs in interpreter only.","timestamp":1773952011038,"segment":0,"confidence":null}
