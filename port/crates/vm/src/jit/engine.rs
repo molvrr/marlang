@@ -57,6 +57,12 @@ impl JitEngine {
         flag_builder
             .set("opt_level", "speed")
             .map_err(|e| e.to_string())?;
+        flag_builder
+            .set("preserve_frame_pointers", "false")
+            .map_err(|e| e.to_string())?;
+        flag_builder
+            .set("enable_probestack", "false")
+            .map_err(|e| e.to_string())?;
 
         let isa_builder = cranelift_native::builder().map_err(|e| e.to_string())?;
         let isa = isa_builder
