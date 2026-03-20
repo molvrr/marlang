@@ -1,0 +1,65 @@
+; WebSocket Echo Server
+;
+; Accepts WebSocket connections and echoes messages back.
+; Text messages are echoed as text, binary as binary.
+;
+; Run with:
+;   cargo run -p marlang-cli -- run examples/ws-echo-server.mar
+;
+; Then test with the Autobahn test suite:
+;   docker run -it --rm --net=host \
+;     -v "$PWD/autobahn:/config" -v "$PWD/autobahn/reports:/reports" \
+;     crossbario/autobahn-testsuite \
+;     wstest -m fuzzingclient -s /config/fuzzingclient.json
+
+(import "std:http" as http)
+(import "std:ws" as ws)
+(import "std:io" as io)
+
+; Echo loop: receive a message, send it back, repeat until closed.
+(define echo-loop (lambda (conn)
+  (match (ws/recv conn)
+    (None nil)
+    ((Some msg)
+      (begin
+        (match msg
+          ((WsText text)
+            (match (ws/send conn text)
+              ((Ok _) nil)
+              ((Err _) nil)))
+          ((WsBinary data)
+            (match (ws/send-bin conn data)
+              ((Ok _) nil)
+              ((Err _) nil))))
+        (echo-loop conn))))))
+
+; Handle a single connection: upgrade or reject.
+; Catches exceptions so one bad connection doesn't kill the server.
+(define handle-connection (lambda (method path headers body conn)
+  (if (ws/upgrade? headers)
+    (handle
+      (match (ws/upgrade conn)
+        ((Ok ws-conn)
+          (begin
+            (echo-loop ws-conn)
+            (ws/close ws-conn)))
+        ((Err msg)
+          (http/respond-text! conn 400 (list) msg)))
+      ((throw msg k) -> nil))
+    (http/respond-text! conn 200
+      (list (MkPair "content-type" "text/plain"))
+      "WebSocket echo server. Connect via ws://127.0.0.1:9001"))))
+
+; Accept loop
+(define accept-loop (lambda (server)
+  (match (http/accept server)
+    (None nil)
+    ((Some (HttpRequest method path headers body conn))
+      (begin
+        (handle-connection method path headers body conn)
+        (accept-loop server))))))
+
+; Start
+(let ((server (http/serve! 9001)))
+  (io/println "WebSocket echo server listening on ws://127.0.0.1:9001")
+  (accept-loop server))

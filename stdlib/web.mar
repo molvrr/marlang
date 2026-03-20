@@ -1,0 +1,333 @@
+; Web framework — server-side rendering with HTMX live updates
+;
+; Provides: HTML DSL, routing, request context effect, state cells
+; (actor-backed observable values), HTMX helpers, and a server runner.
+;
+; Usage:
+;   (import "std:web" as w)
+;
+;   (w/run! 3000
+;     (list
+;       (w/GET  "/"     handle-home)
+;       (w/POST "/inc"  handle-inc)))
+
+(import "std:http" as http)
+(import "std:io" as io)
+(import "std:concurrent" as conc)
+(import "std:actor" as actor)
+
+; =========================================================================
+; HTML DSL
+; =========================================================================
+
+(define escape-html (lambda (s)
+  (string-replace-all
+    (string-replace-all
+      (string-replace-all
+        (string-replace-all s "&" "&amp;")
+        "<" "&lt;")
+      ">" "&gt;")
+    "\"" "&quot;")))
+
+(define attrs->str (lambda (attrs)
+  (match attrs
+    (Nil "")
+    ((Cons (MkPair k v) rest)
+      (string-append " " k "=\"" (escape-html v) "\"" (attrs->str rest))))))
+
+; Normal element: <tag attrs>children</tag>
+(define el (lambda (tag attrs children)
+  (string-append "<" tag (attrs->str attrs) ">" children "</" tag ">")))
+
+; Void element: <tag attrs />
+(define void-el (lambda (tag attrs)
+  (string-append "<" tag (attrs->str attrs) " />")))
+
+; Escape text content
+(define text (lambda (s) (escape-html s)))
+
+; Raw HTML (trusted, no escaping)
+(define raw (lambda (s) s))
+
+; Join a list of HTML strings
+(define join (lambda (parts)
+  (match parts
+    (Nil "")
+    ((Cons h rest) (string-append h (join rest))))))
+
+; --- Named elements ---
+
+(define html    (lambda (a c) (string-append "<!DOCTYPE html>" (el "html" a c))))
+(define head    (lambda (c) (el "head" (list) c)))
+(define body    (lambda (a c) (el "body" a c)))
+(define title   (lambda (t) (el "title" (list) (escape-html t))))
+(define meta    (lambda (a) (void-el "meta" a)))
+(define link    (lambda (a) (void-el "link" a)))
+(define script  (lambda (a c) (el "script" a c)))
+(define style   (lambda (c) (el "style" (list) c)))
+
+(define h1      (lambda (a c) (el "h1" a c)))
+(define h2      (lambda (a c) (el "h2" a c)))
+(define h3      (lambda (a c) (el "h3" a c)))
+(define p       (lambda (a c) (el "p" a c)))
+(define div     (lambda (a c) (el "div" a c)))
+(define span    (lambda (a c) (el "span" a c)))
+(define a       (lambda (attrs c) (el "a" attrs c)))
+(define nav     (lambda (a c) (el "nav" a c)))
+(define main    (lambda (a c) (el "main" a c)))
+(define section (lambda (a c) (el "section" a c)))
+(define article (lambda (a c) (el "article" a c)))
+(define header  (lambda (a c) (el "header" a c)))
+(define footer  (lambda (a c) (el "footer" a c)))
+(define ul      (lambda (a c) (el "ul" a c)))
+(define ol      (lambda (a c) (el "ol" a c)))
+(define li      (lambda (a c) (el "li" a c)))
+(define form    (lambda (a c) (el "form" a c)))
+(define input   (lambda (a) (void-el "input" a)))
+(define button  (lambda (a c) (el "button" a c)))
+(define select  (lambda (a c) (el "select" a c)))
+(define option  (lambda (a c) (el "option" a c)))
+(define textarea (lambda (a c) (el "textarea" a c)))
+(define label   (lambda (a c) (el "label" a c)))
+(define strong  (lambda (c) (el "strong" (list) c)))
+(define em      (lambda (c) (el "em" (list) c)))
+(define small   (lambda (c) (el "small" (list) c)))
+(define img     (lambda (a) (void-el "img" a)))
+(define br      (lambda () (void-el "br" (list))))
+(define hr      (lambda () (void-el "hr" (list))))
+(define table   (lambda (a c) (el "table" a c)))
+(define tr      (lambda (a c) (el "tr" a c)))
+(define td      (lambda (a c) (el "td" a c)))
+(define th      (lambda (a c) (el "th" a c)))
+(define pre     (lambda (a c) (el "pre" a c)))
+(define code    (lambda (a c) (el "code" a c)))
+
+; =========================================================================
+; HTMX attribute helpers
+; =========================================================================
+
+(define hx-get     (lambda (url) (MkPair "hx-get" url)))
+(define hx-post    (lambda (url) (MkPair "hx-post" url)))
+(define hx-target  (lambda (sel) (MkPair "hx-target" sel)))
+(define hx-swap    (lambda (s)   (MkPair "hx-swap" s)))
+(define hx-trigger (lambda (t)   (MkPair "hx-trigger" t)))
+(define hx-vals    (lambda (j)   (MkPair "hx-vals" j)))
+
+; =========================================================================
+; URL / form parsing
+; =========================================================================
+
+; --- Utility functions (must be defined before callers) ---
+
+(define filter-map (lambda (f lst)
+  (match lst
+    (Nil (list))
+    ((Cons h rest)
+      (match (f h)
+        (None      (filter-map f rest))
+        ((Some v)  (Cons v (filter-map f rest))))))))
+
+(define filter-empty (lambda (lst)
+  (match lst
+    (Nil (list))
+    ((Cons h rest)
+      (if (string-is-empty h) (filter-empty rest)
+        (Cons h (filter-empty rest)))))))
+
+; Look up a key in a (List (Pair String String))
+(define lookup (lambda (key pairs)
+  (match pairs
+    (Nil None)
+    ((Cons (MkPair k v) rest)
+      (if (string= k key) (Some v) (lookup key rest))))))
+
+; Split a path into (path-without-query, query-string-or-empty)
+(define split-query (lambda (path)
+  (match (string-index-of path "?")
+    (None         (MkPair path ""))
+    ((Some idx)   (MkPair (string-substring path 0 idx)
+                          (string-substring path (+ idx 1) (string-length path)))))))
+
+(define parse-one-param (lambda (pair-str)
+  (match (string-index-of pair-str "=")
+    (None        None)
+    ((Some idx)  (Some (MkPair
+                   (string-substring pair-str 0 idx)
+                   (string-substring pair-str (+ idx 1) (string-length pair-str))))))))
+
+; Parse "a=1&b=2" into ((a . 1) (b . 2))
+(define parse-params (lambda (qs)
+  (if (string-is-empty qs) (list)
+    (let ((pairs (string-split qs "&")))
+      (filter-map parse-one-param pairs)))))
+
+; =========================================================================
+; Routing
+; =========================================================================
+
+; A route is a triple: (method, pattern, handler).
+; Stored as nested pairs to avoid ADT effect-row constraints.
+; Handler is a thunk that may perform Ctx effects and returns HTML.
+
+(define GET  (lambda (pattern handler) (MkPair "GET"  (MkPair pattern handler))))
+(define POST (lambda (pattern handler) (MkPair "POST" (MkPair pattern handler))))
+
+; Split "/a/b/c" into ("a" "b" "c"), dropping empty segments
+(define split-path (lambda (path)
+  (filter-empty (string-split path "/"))))
+
+; Match path segments, extracting :param values.
+(define segments-match (lambda (pats paths acc)
+  (match (MkPair pats paths)
+    ((MkPair Nil Nil) (Some acc))
+    ((MkPair (Cons pat prest) (Cons seg srest))
+      (if (string-starts-with pat ":")
+        ; Param segment — extract
+        (let ((name (string-substring pat 1 (string-length pat))))
+          (segments-match prest srest (append acc (list (MkPair name seg)))))
+        ; Literal segment — must match exactly
+        (if (string= pat seg)
+          (segments-match prest srest acc)
+          None)))
+    (_ None))))
+
+; Match a pattern against a path, extracting :param values.
+; Returns (Some params) or None.
+(define path-match (lambda (pattern path)
+  (let ((pat-segs  (split-path pattern))
+        (path-segs (split-path path)))
+    (segments-match pat-segs path-segs (list)))))
+
+; Find the first matching route. Returns (Some (handler, params)) or None.
+(define match-routes (lambda (method path routes)
+  (match routes
+    (Nil None)
+    ((Cons (MkPair rm (MkPair rp handler)) rest)
+      (if (string= rm method)
+        (match (path-match rp path)
+          ((Some params) (Some (MkPair handler params)))
+          (None          (match-routes method path rest)))
+        (match-routes method path rest))))))
+
+; =========================================================================
+; Request context effect
+; =========================================================================
+
+(effect Ctx
+  (ctx-param      (-> String (Option String)))
+  (ctx-query      (-> String (Option String)))
+  (ctx-form       (-> String (Option String)))
+  (ctx-header     (-> String (Option String)))
+  (ctx-method     (-> Unit String))
+  (ctx-path       (-> Unit String)))
+
+; Wrapper functions for the Ctx effect
+(define param      (lambda (key) (perform ctx-param key)))
+(define query      (lambda (key) (perform ctx-query key)))
+(define form-val   (lambda (key) (perform ctx-form key)))
+(define hdr        (lambda (key) (perform ctx-header key)))
+(define method     (lambda () (perform ctx-method)))
+(define path       (lambda () (perform ctx-path)))
+
+; Install the Ctx handler and run a handler thunk
+(define run-handler (lambda (method path params query-params form-params headers handler)
+  (handle (handler)
+    ((ctx-param  key k) -> (resume k (lookup key params)))
+    ((ctx-query  key k) -> (resume k (lookup key query-params)))
+    ((ctx-form   key k) -> (resume k (lookup key form-params)))
+    ((ctx-header key k) -> (resume k (lookup key headers)))
+    ((ctx-method k)     -> (resume k method))
+    ((ctx-path   k)     -> (resume k path)))))
+
+; =========================================================================
+; State cells — actor-backed observable values
+; =========================================================================
+
+(data CellMsg (CellGet Pid) (CellSet Pid))
+
+(define cell-loop (lambda (value)
+  (let ((msg (actor/receive)))
+    (match msg
+      ((CellGet sender)
+        (begin (actor/send sender value) (cell-loop value)))
+      ((CellSet sender)
+        (let ((new-val (actor/receive)))
+          (begin (actor/send sender new-val) (cell-loop new-val))))))))
+
+; Create a new cell with an initial value. Returns a Pid.
+(define cell-new (lambda (initial)
+  (conc/spawn (lambda () (cell-loop initial)))))
+
+; Read the current value of a cell.
+(define cell-get (lambda (cell)
+  (actor/send cell (CellGet (conc/self)))
+  (actor/receive)))
+
+; Set the value of a cell. Returns the new value.
+(define cell-set (lambda (cell val)
+  (actor/send cell (CellSet (conc/self)))
+  (actor/send cell val)
+  (actor/receive)))
+
+; Update a cell by applying a function. Returns the new value.
+(define cell-update (lambda (cell f)
+  (let ((old (cell-get cell)))
+    (cell-set cell (f old)))))
+
+; =========================================================================
+; Server
+; =========================================================================
+
+(define headers->pairs (lambda (headers)
+  (match headers
+    (Nil (list))
+    ((Cons (MkPair k v) rest)
+      (Cons (MkPair (string-to-lower k) v) (headers->pairs rest))))))
+
+; Dispatch a single request
+(define dispatch (lambda (method full-path headers body conn routes)
+  (let ((split   (split-query full-path))
+        (qstring ""))
+    (match split
+      ((MkPair clean-path qs)
+        (let ((query-params (parse-params qs))
+              (form-params  (if (string= method "POST")
+                             (match (bytes-to-string body)
+                               ((Ok s) (parse-params s))
+                               ((Err _) (list)))
+                             (list)))
+              (hdrs         (headers->pairs headers)))
+          (match (match-routes method clean-path routes)
+            ((Some (MkPair handler params))
+              (let ((html (run-handler method clean-path params query-params form-params hdrs handler)))
+                (http/respond-text! conn 200
+                  (list (MkPair "content-type" "text/html; charset=utf-8"))
+                  html)))
+            (None
+              (http/respond-text! conn 404
+                (list (MkPair "content-type" "text/plain"))
+                "404 Not Found")))))))))
+
+; Accept loop
+(define accept-loop (lambda (server routes)
+  (match (http/accept server)
+    (None nil)
+    ((Some (HttpRequest method path headers body conn))
+      (begin
+        (io/println (string-append method " " path))
+        (dispatch method path headers body conn routes)
+        (accept-loop server routes))))))
+
+; Re-export commonly needed http functions
+(define serve!        http/serve!)
+(define close-server  http/close-server)
+(define respond!      http/respond-text!)
+(define http-get      http/get)
+(define http-accept   http/accept)
+(define http-respond  http/respond-text!)
+
+; Start the server
+(define run! (lambda (port routes)
+  (let ((server (http/serve! port)))
+    (io/println (string-append "Listening on http://127.0.0.1:" (show port)))
+    (accept-loop server routes))))

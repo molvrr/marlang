@@ -66,7 +66,15 @@ pub fn expr_to_source(expr: &Expr, interner: &crate::intern::Interner) -> String
                 }
             }
         }
-        Expr::Atom(LispValue::String(s), _) => format!("\"{}\"", s),
+        Expr::Atom(LispValue::String(s), _) => {
+            // Escape special characters so the string round-trips through the parser
+            let escaped = s
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\t', "\\t");
+            format!("\"{}\"", escaped)
+        }
         Expr::Nil(_) => "()".to_string(),
         Expr::List { .. } => {
             let elems = list_to_array(expr);

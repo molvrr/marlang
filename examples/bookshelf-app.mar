@@ -1,0 +1,409 @@
+; =========================================================================
+; Bookshelf — a hypothetical fullstack web app in Marlang
+;
+; A multi-user reading list tracker. Users can browse books, add them
+; to shelves, write reviews, and see live updates when friends add books.
+;
+; This file is not runnable — it sketches the framework API across all
+; phases, showing how effects, actors, macros, and the dep system
+; compose into a real application.
+; =========================================================================
+
+(import "framework:app"    as app)
+(import "framework:html"   as h)
+(import "framework:route"  as route)
+(import "framework:db"     as db)
+(import "framework:htmx"   as hx)
+(import "framework:auth"   as auth)
+(import "framework:json"   as json)
+(import "std:io"           as io)
+(import "std:http"         as http)
+(import "std:actor"        as actor)
+(import "std:concurrent"   as conc)
+
+; =========================================================================
+; Domain types
+; =========================================================================
+
+(data Shelf (WantToRead) (Reading) (Finished))
+
+(data Visibility (Public) (Private))
+
+(define shelf->string (lambda (s)
+  (match s
+    (WantToRead "Want to Read")
+    (Reading    "Currently Reading")
+    (Finished   "Finished"))))
+
+; =========================================================================
+; Shared — pure functions compiled to both server and client JS
+; =========================================================================
+
+(define-shared pluralize (n singular plural)
+  (if (= n 1) (string-append (show n) " " singular)
+    (string-append (show n) " " plural)))
+
+(define-shared rating->stars (n)
+  (string-repeat "★" n))
+
+(define-shared truncate (s max-len)
+  (if (<= (string-length s) max-len) s
+    (string-append (string-substring s 0 max-len) "…")))
+
+; =========================================================================
+; Layout
+; =========================================================================
+
+(define layout (lambda (title-text body-html)
+  (h/html
+    (h/head
+      (h/title (string-append title-text " — Bookshelf"))
+      (h/meta  (list (MkPair "charset" "utf-8")))
+      (h/link  (list (MkPair "rel" "stylesheet") (MkPair "href" "/static/style.css")))
+      (h/script (list (MkPair "src" "https://unpkg.com/htmx.org@1.9.12")) ""))
+    (h/body
+      (string-append
+        (nav)
+        (h/main (list) body-html))))))
+
+(define nav (lambda ()
+  (h/nav (list (MkPair "class" "site-nav"))
+    (string-append
+      (h/a (list (MkPair "href" "/")) "Bookshelf")
+      (h/a (list (MkPair "href" "/shelves")) "My Shelves")
+      (h/a (list (MkPair "href" "/discover")) "Discover")
+      (match (perform auth/current-user)
+        ((Some user) (h/span (list) (string-append "Hi, " user)))
+        (None        (h/a (list (MkPair "href" "/login")) "Log in")))))))
+
+; =========================================================================
+; Pages — server-rendered with HTMX for interactivity
+; =========================================================================
+
+; --- Home page ---
+
+(define handle-home (lambda ()
+  (let ((user   (perform auth/current-user))
+        (recent (perform db/query
+                  "SELECT b.title, b.author, s.shelf, s.updated_at
+                   FROM shelf_entries s JOIN books b ON b.id = s.book_id
+                   WHERE s.user_id = $1 ORDER BY s.updated_at DESC LIMIT 10"
+                  (match user ((Some u) (list u)) (None (list))))))
+    (layout "Home"
+      (string-append
+        (h/h1 (list) "Your Recent Activity")
+        (if (nil? recent)
+          (h/p (list (MkPair "class" "empty"))
+            "Nothing yet. Start by discovering some books!")
+          (h/ul (list (MkPair "class" "activity-feed"))
+            (join-html (map render-activity-item recent)))))))))
+
+(define render-activity-item (lambda (row)
+  (match row
+    ((Cons title (Cons author (Cons shelf (Cons date Nil))))
+      (h/li (list)
+        (string-append
+          (h/strong (list) title)
+          " by " author
+          (h/span (list (MkPair "class" "shelf-badge")) shelf)
+          (h/time  (list) date)))))))
+
+; --- Book detail page ---
+
+(define handle-book (lambda ()
+  (let ((book-id (perform route/param "id")))
+    (match book-id
+      (None (perform route/not-found))
+      ((Some id)
+        (let ((book    (perform db/query
+                         "SELECT id, title, author, description, cover_url, avg_rating
+                          FROM books WHERE id = $1" (list id)))
+              (reviews (perform db/query
+                         "SELECT r.body, r.rating, u.name, r.created_at
+                          FROM reviews r JOIN users u ON u.id = r.user_id
+                          WHERE r.book_id = $1 ORDER BY r.created_at DESC"
+                         (list id))))
+          (match book
+            (Nil (perform route/not-found))
+            ((Cons row _)
+              (layout (car row)
+                (render-book-detail row reviews))))))))))
+
+(define render-book-detail (lambda (book reviews)
+  (match book
+    ((Cons id (Cons title (Cons author (Cons desc (Cons cover (Cons rating Nil))))))
+      (string-append
+        (h/article (list (MkPair "class" "book-detail"))
+          (string-append
+            (h/img (list (MkPair "src" cover) (MkPair "alt" title)))
+            (h/div (list (MkPair "class" "book-info"))
+              (string-append
+                (h/h1 (list) title)
+                (h/p  (list (MkPair "class" "author")) (string-append "by " author))
+                (h/p  (list (MkPair "class" "rating"))  (rating->stars (string->int rating)))
+                (h/p  (list) desc)
+                ; HTMX: add-to-shelf dropdown, posts to server
+                (shelf-picker id)))))
+        ; Reviews section with live updates
+        (h/section (list (MkPair "id" "reviews"))
+          (string-append
+            (h/h2 (list) (pluralize (length reviews) "Review" "Reviews"))
+            (review-form id)
+            (h/div (list (MkPair "id" "review-list"))
+              (join-html (map render-review reviews))))))))))
+
+; --- Shelf picker (HTMX) ---
+
+(define shelf-picker (lambda (book-id)
+  (h/form (list
+      (hx/post (string-append "/api/shelve/" book-id))
+      (hx/target "#shelf-status")
+      (hx/swap "innerHTML"))
+    (string-append
+      (h/select (list (MkPair "name" "shelf"))
+        (string-append
+          (h/option (list (MkPair "value" "want"))     "Want to Read")
+          (h/option (list (MkPair "value" "reading"))  "Currently Reading")
+          (h/option (list (MkPair "value" "finished")) "Finished")))
+      (h/button (list (MkPair "type" "submit")) "Add to Shelf")
+      (h/span   (list (MkPair "id" "shelf-status")) "")))))
+
+; --- Review form (HTMX) ---
+
+(define review-form (lambda (book-id)
+  (h/form (list
+      (hx/post (string-append "/api/review/" book-id))
+      (hx/target "#review-list")
+      (hx/swap "afterbegin"))
+    (string-append
+      (h/div (list (MkPair "class" "rating-input"))
+        (string-append
+          (h/label (list) "Rating: ")
+          (h/select (list (MkPair "name" "rating"))
+            (string-append
+              (h/option (list (MkPair "value" "5")) "★★★★★")
+              (h/option (list (MkPair "value" "4")) "★★★★")
+              (h/option (list (MkPair "value" "3")) "★★★")
+              (h/option (list (MkPair "value" "2")) "★★")
+              (h/option (list (MkPair "value" "1")) "★")))))
+      (h/textarea (list (MkPair "name" "body") (MkPair "placeholder" "Write a review…") (MkPair "rows" "4")) "")
+      (h/button (list (MkPair "type" "submit")) "Post Review")))))
+
+(define render-review (lambda (row)
+  (match row
+    ((Cons body (Cons rating (Cons author (Cons date Nil))))
+      (h/div (list (MkPair "class" "review"))
+        (string-append
+          (h/div (list (MkPair "class" "review-header"))
+            (string-append
+              (h/strong (list) author) " "
+              (h/span (list (MkPair "class" "stars")) (rating->stars (string->int rating))) " "
+              (h/time (list) date)))
+          (h/p (list) body)))))))
+
+; --- Discover page (search + browse) ---
+
+(define handle-discover (lambda ()
+  (layout "Discover"
+    (string-append
+      (h/h1 (list) "Discover Books")
+      (h/form (list
+          (hx/get "/api/search")
+          (hx/target "#results")
+          (hx/trigger "input changed delay:300ms"))
+        (h/input (list (MkPair "type" "search")
+                       (MkPair "name" "q")
+                       (MkPair "placeholder" "Search by title or author…"))))
+      (h/div (list (MkPair "id" "results"))
+        (render-trending))))))
+
+(define handle-search (lambda ()
+  (let ((q (perform route/param "q")))
+    (match q
+      (None (render-trending))
+      ((Some query)
+        (let ((results (perform db/query
+                "SELECT id, title, author, avg_rating FROM books
+                 WHERE title ILIKE $1 OR author ILIKE $1 LIMIT 20"
+                (list (string-append "%" query "%")))))
+          (render-book-grid results)))))))
+
+(define render-trending (lambda ()
+  (let ((books (perform db/query
+          "SELECT id, title, author, avg_rating FROM books
+           ORDER BY shelf_count DESC LIMIT 12" (list))))
+    (string-append
+      (h/h2 (list) "Trending")
+      (render-book-grid books)))))
+
+(define render-book-grid (lambda (books)
+  (h/div (list (MkPair "class" "book-grid"))
+    (join-html (map (lambda (row)
+      (match row
+        ((Cons id (Cons title (Cons author (Cons rating Nil))))
+          (h/a (list (MkPair "href" (string-append "/books/" id))
+                     (MkPair "class" "book-card"))
+            (string-append
+              (h/span (list (MkPair "class" "title"))  (truncate title 40))
+              (h/span (list (MkPair "class" "author")) author)
+              (h/span (list (MkPair "class" "rating")) (rating->stars (string->int rating))))))))
+      books)))))
+
+; =========================================================================
+; API endpoints — return fragments or JSON, not full pages
+; =========================================================================
+
+(define handle-shelve (lambda ()
+  (let ((user    (perform auth/require-user))
+        (book-id (perform route/param! "id"))
+        (shelf   (perform route/form-param! "shelf")))
+    (begin
+      (perform db/execute
+        "INSERT INTO shelf_entries (user_id, book_id, shelf)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_id, book_id) DO UPDATE SET shelf = $3, updated_at = now()"
+        (list user book-id shelf))
+      ; Return a fragment for HTMX to swap in
+      (h/span (list (MkPair "class" "success")) "✓ Added!")))))
+
+(define handle-post-review (lambda ()
+  (let ((user    (perform auth/require-user))
+        (book-id (perform route/param! "id"))
+        (body    (perform route/form-param! "body"))
+        (rating  (perform route/form-param! "rating")))
+    (begin
+      (perform db/execute
+        "INSERT INTO reviews (user_id, book_id, body, rating) VALUES ($1, $2, $3, $4)"
+        (list user book-id body rating))
+      (let ((name (perform db/query "SELECT name FROM users WHERE id = $1" (list user))))
+        (render-review (list body rating (car (car name)) "just now")))))))
+
+; =========================================================================
+; Client component (Phase 5) — rich interactive widget
+;
+; This compiles to JS via emit-js and runs in the browser.
+; The type checker enforces that only {Dom} effects are used — no DB, no IO.
+; =========================================================================
+
+(define-client reading-progress (book-id initial-page total-pages)
+  (let ((current-page (atom initial-page)))
+
+    (define pct (lambda (cur total)
+      (/ (* cur 100) total)))
+
+    (define render-bar (lambda ()
+      (let ((cur (deref current-page)))
+        (h/div (list (MkPair "class" "progress-widget"))
+          (string-append
+            (h/div (list (MkPair "class" "progress-bar")
+                         (MkPair "style" (string-append "width:" (show (pct cur total-pages)) "%")))
+              "")
+            (h/span (list)
+              (string-append (show cur) " / " (show total-pages) " pages"))
+            (h/div (list (MkPair "class" "controls"))
+              (string-append
+                (h/button (list (MkPair "data-action" "decrement")) "−")
+                (h/input  (list (MkPair "type" "number")
+                                (MkPair "value" (show cur))
+                                (MkPair "data-action" "set-page")))
+                (h/button (list (MkPair "data-action" "increment")) "+"))))))))
+
+    (define handle-action (lambda (action)
+      (match action
+        ("increment" (swap! current-page (lambda (p) (min (+ p 1) total-pages))))
+        ("decrement" (swap! current-page (lambda (p) (max (- p 1) 0))))
+        ("set-page"  (lambda (val) (reset! current-page (clamp val 0 total-pages))))
+        (_ nil))
+      ; Persist to server without blocking the UI
+      (server-fn (book-id page)
+        (perform db/execute
+          "UPDATE shelf_entries SET current_page = $2 WHERE book_id = $1"
+          (list book-id (show (deref current-page)))))))
+
+    ; Return render function — the framework calls it and wires up event delegation
+    render-bar))
+
+; =========================================================================
+; Live updates (Phase 3) — friends' activity via WebSocket
+; =========================================================================
+
+; A dep that subscribes to the activity stream for users you follow.
+; When a friend adds a book, the server pushes an HTML fragment patch.
+
+(define friend-activity-dep (lambda (user-id)
+  (combined
+    (friends  (db/query
+                "SELECT friend_id FROM follows WHERE user_id = $1" (list user-id)))
+    (activity (db/query
+                "SELECT b.title, u.name, s.shelf, s.updated_at
+                 FROM shelf_entries s
+                 JOIN books b ON b.id = s.book_id
+                 JOIN users u ON u.id = s.user_id
+                 WHERE s.user_id = ANY($1)
+                 ORDER BY s.updated_at DESC LIMIT 20"
+                (list (map car friends)))))))
+
+; In the home page, a live-updating section:
+(define live-activity-feed (lambda (user-id)
+  (depends-on ((items (friend-activity-dep user-id)))
+    (h/section (list (MkPair "id" "friend-activity"))
+      (string-append
+        (h/h2 (list) "Friends' Activity")
+        (if (nil? items)
+          (h/p (list (MkPair "class" "empty")) "Your friends haven't added anything yet.")
+          (h/ul (list (MkPair "class" "activity-feed"))
+            (join-html (map render-friend-activity items)))))))))
+
+(define render-friend-activity (lambda (row)
+  (match row
+    ((Cons title (Cons name (Cons shelf (Cons date Nil))))
+      (h/li (list)
+        (string-append
+          (h/strong (list) name) " added "
+          (h/em (list) title) " to "
+          (h/span (list (MkPair "class" "shelf-badge")) shelf)))))))
+
+; =========================================================================
+; Routes
+; =========================================================================
+
+(define routes (list
+  (route/get  "/"                handle-home)
+  (route/get  "/books/:id"       handle-book)
+  (route/get  "/discover"        handle-discover)
+  (route/get  "/shelves"         handle-shelves)
+  (route/get  "/api/search"      handle-search)
+  (route/post "/api/shelve/:id"  handle-shelve)
+  (route/post "/api/review/:id"  handle-post-review)))
+
+; =========================================================================
+; App entry point
+; =========================================================================
+
+(app/run!
+  (app/config
+    (MkPair "port" "3000")
+    (MkPair "db"   "postgres://localhost/bookshelf"))
+  routes)
+
+; =========================================================================
+; What the type checker sees
+; =========================================================================
+;
+; handle-home    : (-> Unit {Ctx, DB, Auth}   String)
+; handle-book    : (-> Unit {Ctx, DB, Route}  String)
+; handle-search  : (-> Unit {Ctx, DB, Route}  String)
+; handle-shelve  : (-> Unit {Ctx, DB, Auth, Route} String)
+; render-review  : (-> (List String) {} String)         — pure!
+; shelf->string  : (-> Shelf {} String)                  — pure!
+; truncate       : (-> String Int {} String)             — pure, shared to JS
+;
+; reading-progress : (-> String Int Int {Dom} Html)      — client only, no DB/IO
+;
+; If handle-home tried to write a file, the type checker would reject it:
+;   Type mismatch: cannot unify {Ctx, DB, Auth} with {Ctx, DB, Auth, IO}
+;
+; If reading-progress tried to query the DB, the type checker would reject it:
+;   Type mismatch: cannot unify {Dom} with {Dom, DB}
+;
+; The boundaries are not conventions — they are types.

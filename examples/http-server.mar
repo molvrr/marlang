@@ -1,0 +1,196 @@
+; HTTP Server Examples
+;
+; The HTTP server is effect-based, like all Marlang I/O.
+; No framework needed — serve, accept, respond.
+;
+; Run with: cargo run -p marlang-cli -- run examples/http-server.mar
+
+(import "std:http" as http)
+(import "std:io" as io)
+(import "std:concurrent" as conc)
+
+
+; === Example 1: Hello World Server ===
+;
+; Serves a single request, prints what it received, responds, and shuts down.
+
+(io/println "=== Example 1: Hello World ===")
+
+(let ((server (http/serve! 9100)))
+
+  ; Spawn a client that hits the server
+  (conc/spawn (lambda ()
+    (match (http/get "http://127.0.0.1:9100/hello")
+      ((Ok (HttpResponse status headers body))
+        (match (bytes-to-string body)
+          ((Ok text) (io/println (string-append "Client got: " text)))
+          ((Err msg) (io/println (string-append "Decode error: " msg)))))
+      ((Err msg) (io/println (string-append "Client error: " msg))))))
+
+  ; Handle one request
+  (match (http/accept server)
+    ((Some (HttpRequest method path headers body conn))
+      (begin
+        (io/println (string-append "Server got: " method " " path))
+        (http/respond-text! conn 200
+          (list (MkPair "content-type" "text/plain"))
+          "Hello from Marlang!")
+        (http/close-server server)))
+    (None (http/close-server server))))
+
+; Output:
+;   Server got: GET /hello
+;   Client got: Hello from Marlang!
+
+
+; === Example 2: Multi-Route Server ===
+;
+; Handles 3 requests, routing by path.
+
+(io/println "\n=== Example 2: Routing ===")
+
+; Route handler: dispatch by path
+(define route (lambda (req)
+  (match req
+    ((HttpRequest method path headers body conn)
+      (let ((response-body
+              (match path
+                ("/greet"  "Hi there!")
+                ("/count"  "42")
+                (_         "Not Found")))
+            (status
+              (match path
+                ("/greet"  200)
+                ("/count"  200)
+                (_         404))))
+        (http/respond-text! conn status
+          (list (MkPair "content-type" "text/plain"))
+          response-body))))))
+
+; Accept-respond loop
+(define serve-n (lambda (server handler n)
+  (if (= n 0)
+    nil
+    (match (http/accept server)
+      ((Some req)
+        (begin (handler req) (serve-n server handler (- n 1))))
+      (None nil)))))
+
+(let ((server (http/serve! 9101)))
+
+  ; Spawn clients
+  (conc/spawn (lambda ()
+    (match (http/get "http://127.0.0.1:9101/greet")
+      ((Ok (HttpResponse status headers body))
+        (match (bytes-to-string body)
+          ((Ok text) (io/println (string-append "/greet => " (show status) " " text)))
+          ((Err _) nil)))
+      ((Err msg) (io/println msg)))))
+
+  (conc/spawn (lambda ()
+    (match (http/get "http://127.0.0.1:9101/count")
+      ((Ok (HttpResponse status headers body))
+        (match (bytes-to-string body)
+          ((Ok text) (io/println (string-append "/count => " (show status) " " text)))
+          ((Err _) nil)))
+      ((Err msg) (io/println msg)))))
+
+  (conc/spawn (lambda ()
+    (match (http/get "http://127.0.0.1:9101/unknown")
+      ((Ok (HttpResponse status headers body))
+        (match (bytes-to-string body)
+          ((Ok text) (io/println (string-append "/unknown => " (show status) " " text)))
+          ((Err _) nil)))
+      ((Err msg) (io/println msg)))))
+
+  ; Serve 3 requests then shut down
+  (serve-n server route 3)
+  (http/close-server server))
+
+; Output (order may vary):
+;   /greet => 200 Hi there!
+;   /count => 200 42
+;   /unknown => 404 Not Found
+
+
+; === Example 3: Echo Server ===
+;
+; Echoes POST body back in the response.
+
+(io/println "\n=== Example 3: Echo ===")
+
+(let ((server (http/serve! 9102)))
+
+  ; Client sends a POST
+  (conc/spawn (lambda ()
+    (match (http/post-text "http://127.0.0.1:9102/echo"
+             (list (MkPair "content-type" "text/plain"))
+             "Ping!")
+      ((Ok (HttpResponse status headers body))
+        (match (bytes-to-string body)
+          ((Ok text) (io/println (string-append "Echo response: " text)))
+          ((Err _) nil)))
+      ((Err msg) (io/println (string-append "Error: " msg))))))
+
+  ; Server echoes body back
+  (match (http/accept server)
+    ((Some (HttpRequest method path headers body conn))
+      (begin
+        (io/println (string-append "Echo server got: " method " " path))
+        (http/respond! conn 200
+          (list (MkPair "content-type" "text/plain"))
+          body)
+        (http/close-server server)))
+    (None (http/close-server server))))
+
+; Output:
+;   Echo server got: POST /echo
+;   Echo response: Ping!
+
+
+; === Example 4: JSON API ===
+;
+; Returns JSON responses with custom headers.
+
+(io/println "\n=== Example 4: JSON API ===")
+
+(let ((server (http/serve! 9103)))
+
+  (conc/spawn (lambda ()
+    (match (http/get "http://127.0.0.1:9103/api/status")
+      ((Ok (HttpResponse status headers body))
+        (match (bytes-to-string body)
+          ((Ok text) (io/println (string-append "API: " (show status) " " text)))
+          ((Err _) nil)))
+      ((Err msg) (io/println (string-append "Error: " msg))))))
+
+  (match (http/accept server)
+    ((Some (HttpRequest method path headers body conn))
+      (begin
+        (http/respond-text! conn 200
+          (list (MkPair "content-type" "application/json")
+                (MkPair "x-powered-by" "marlang"))
+          "{\"status\": \"ok\", \"version\": 1}")
+        (http/close-server server)))
+    (None (http/close-server server))))
+
+; Output:
+;   API: 200 {"status": "ok", "version": 1}
+
+
+; === Example 5: Error Handling ===
+;
+; Bind failure handled gracefully with the safe API.
+
+(io/println "\n=== Example 5: Bind Error ===")
+
+(match (http/serve 1)
+  ((Ok server)
+    (begin
+      (io/println "Bound to port 1 (unexpected)")
+      (http/close-server server)))
+  ((Err msg)
+    (io/println (string-append "Expected error: " msg))))
+
+; Output:
+;   Expected error: http-serve: Permission denied (os error 13)
