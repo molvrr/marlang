@@ -1257,14 +1257,26 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                         VMObject::Builtin { func, .. } => {
                             let func = *func;
-                            let mut args = vec![Value::nil(); arity];
-                            for i in (0..arity).rev() {
-                                args[i] = vm.pop();
-                            }
-                            vm.pop(); // pop callee
-
-                            vm.frames[frame_idx].ip = ip;
-                            let result = func(vm, &args).map_err(|mut e| {
+                            // Avoid heap allocation for small arities (≤4 args).
+                            let result = if arity <= 4 {
+                                let mut buf =
+                                    [Value::nil(), Value::nil(), Value::nil(), Value::nil()];
+                                for i in (0..arity).rev() {
+                                    buf[i] = vm.pop();
+                                }
+                                vm.pop(); // pop callee
+                                vm.frames[frame_idx].ip = ip;
+                                func(vm, &buf[..arity])
+                            } else {
+                                let mut args = vec![Value::nil(); arity];
+                                for i in (0..arity).rev() {
+                                    args[i] = vm.pop();
+                                }
+                                vm.pop(); // pop callee
+                                vm.frames[frame_idx].ip = ip;
+                                func(vm, &args)
+                            };
+                            let result = result.map_err(|mut e| {
                                 // Enrich builtin errors with stack trace and source location
                                 if e.stack_trace.is_empty() {
                                     e.stack_trace = vm.capture_stack_trace(&vm.frames[frame_idx]);
@@ -1541,14 +1553,26 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                         VMObject::Builtin { func, .. } => {
                             let func = *func;
-                            let mut args = vec![Value::nil(); arity];
-                            for i in (0..arity).rev() {
-                                args[i] = vm.pop();
-                            }
-                            vm.pop(); // pop callee
-
-                            vm.frames[frame_idx].ip = ip;
-                            let result = func(vm, &args).map_err(|mut e| {
+                            // Avoid heap allocation for small arities (≤4 args).
+                            let result = if arity <= 4 {
+                                let mut buf =
+                                    [Value::nil(), Value::nil(), Value::nil(), Value::nil()];
+                                for i in (0..arity).rev() {
+                                    buf[i] = vm.pop();
+                                }
+                                vm.pop(); // pop callee
+                                vm.frames[frame_idx].ip = ip;
+                                func(vm, &buf[..arity])
+                            } else {
+                                let mut args = vec![Value::nil(); arity];
+                                for i in (0..arity).rev() {
+                                    args[i] = vm.pop();
+                                }
+                                vm.pop(); // pop callee
+                                vm.frames[frame_idx].ip = ip;
+                                func(vm, &args)
+                            };
+                            let result = result.map_err(|mut e| {
                                 if e.stack_trace.is_empty() {
                                     e.stack_trace = vm.capture_stack_trace(&vm.frames[frame_idx]);
                                     if e.line == 0 {
