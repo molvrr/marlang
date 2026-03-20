@@ -282,7 +282,7 @@ impl Default for VM {
 
 // --- Closure helpers ---
 
-fn create_closure_from_proto(frame: &mut CallFrame, proto: &FunctionPrototype) -> Closure {
+fn create_closure_from_proto(frame: &mut CallFrame, proto: &Arc<FunctionPrototype>) -> Closure {
     use crate::object::{Upvalue, UpvalueCell};
     let mut upvalues: Vec<Upvalue> = Vec::with_capacity(proto.upvalues.len());
     for desc in &proto.upvalues {
@@ -319,7 +319,7 @@ fn create_closure_from_proto(frame: &mut CallFrame, proto: &FunctionPrototype) -
     }
     let module_id = proto.module_id;
     Closure {
-        proto: Arc::new(proto.clone()),
+        proto: proto.clone(),
         upvalues,
         module_id,
     }

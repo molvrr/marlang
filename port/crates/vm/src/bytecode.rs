@@ -171,7 +171,7 @@ pub enum ConstantValue {
     String(String),
     Boolean(bool),
     Nil,
-    Prototype(FunctionPrototype),
+    Prototype(std::sync::Arc<FunctionPrototype>),
     /// FFI function signatures for ffi-open. Converted to nested list at runtime.
     FfiSigs(Vec<FfiSigEntry>),
     /// A bound FFI function reference: lib global name + function name.

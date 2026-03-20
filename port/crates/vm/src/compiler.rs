@@ -888,7 +888,7 @@ impl<'a> Compiler<'a> {
         };
 
         // Emit CLOSURE in this (enclosing) context
-        let proto_idx = self.add_constant(ConstantValue::Prototype(proto));
+        let proto_idx = self.add_constant(ConstantValue::Prototype(std::sync::Arc::new(proto)));
         self.emit_op(Op::Closure, line, proto_idx);
         Ok(())
     }
@@ -1451,7 +1451,8 @@ impl<'a> Compiler<'a> {
                     chunk: fn_compiler.chunk,
                     module_id: self.module_id,
                 };
-                return_proto_idx = Some(self.add_constant(ConstantValue::Prototype(proto)));
+                return_proto_idx =
+                    Some(self.add_constant(ConstantValue::Prototype(std::sync::Arc::new(proto))));
             } else {
                 // Effect handler
                 let mut params = Vec::new();
@@ -1544,14 +1545,19 @@ impl<'a> Compiler<'a> {
                             chunk: resume_compiler.chunk,
                             module_id: self.module_id,
                         };
-                        Some(self.add_constant(ConstantValue::Prototype(resume_proto)))
+                        Some(
+                            self.add_constant(ConstantValue::Prototype(std::sync::Arc::new(
+                                resume_proto,
+                            ))),
+                        )
                     } else {
                         None
                     };
 
                 let effect_name_idx = self.add_constant(ConstantValue::String(effect_name));
                 let op_name_idx = self.add_constant(ConstantValue::String(op_name));
-                let proto_idx = self.add_constant(ConstantValue::Prototype(proto));
+                let proto_idx =
+                    self.add_constant(ConstantValue::Prototype(std::sync::Arc::new(proto)));
                 // Check if handler body doesn't reference k — "aborting" handler.
                 // Aborting handlers discard the continuation, so Perform can skip
                 // the expensive continuation capture entirely.
@@ -1591,7 +1597,8 @@ impl<'a> Compiler<'a> {
             chunk: body_compiler.chunk,
             module_id: self.module_id,
         };
-        let body_proto_idx = self.add_constant(ConstantValue::Prototype(body_proto));
+        let body_proto_idx =
+            self.add_constant(ConstantValue::Prototype(std::sync::Arc::new(body_proto)));
 
         // Check if all handler clauses are tail-resumptive
         let all_tail_resumptive = !handler_infos.is_empty()
