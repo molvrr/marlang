@@ -1,0 +1,149 @@
+; HTTP Server with a persistent accept loop
+;
+; A small web app that keeps running, handles requests by route,
+; tracks a hit counter in a closure, and shuts itself down when
+; a client hits /shutdown.
+;
+; Run with:
+;   cargo run -p marlang-cli -- run examples/http-server-loop.mar
+;
+; While it's running you can also curl it from another terminal:
+;   curl http://127.0.0.1:9200/
+;   curl http://127.0.0.1:9200/greet?name=Ada
+;   curl -X POST -d '{"x":1}' http://127.0.0.1:9200/echo
+;   curl http://127.0.0.1:9200/shutdown
+
+(import "std:http" as http)
+(import "std:io" as io)
+(import "std:concurrent" as conc)
+(import "std:string" as str)
+
+; ---------------------------------------------------------------------------
+; Helpers
+; ---------------------------------------------------------------------------
+
+; Simple "find the value after ?key= in a query string" helper.
+; Returns the value or a fallback.
+(define query-param (lambda (path key fallback)
+  (let ((needle (string-append "?" key "=")))
+    (match (string-index-of path needle)
+      (None fallback)
+      ((Some idx)
+        (string-substring path (+ idx (string-length needle)) (string-length path)))))))
+
+; Respond with text, short-hand.
+(define text-response (lambda (conn status body)
+  (http/respond-text! conn status
+    (list (MkPair "content-type" "text/plain"))
+    body)))
+
+; Respond with JSON, short-hand.
+(define json-response (lambda (conn status body)
+  (http/respond-text! conn status
+    (list (MkPair "content-type" "application/json"))
+    body)))
+
+; ---------------------------------------------------------------------------
+; Routes
+; ---------------------------------------------------------------------------
+
+; Each route handler receives (method, path, body-string, conn, hits)
+; and returns #t to keep running, #f to shut down.
+
+(define handle-home (lambda (conn hits)
+  (begin
+    (text-response conn 200
+      (string-append "Welcome to Marlang! You are visitor #" (show hits) "."))
+    #t)))
+
+(define handle-greet (lambda (path conn)
+  (let ((name (query-param path "name" "stranger")))
+    (begin
+      (text-response conn 200 (string-append "Hello, " name "!"))
+      #t))))
+
+(define handle-echo (lambda (body-text conn)
+  (begin
+    (json-response conn 200
+      (string-append "{\"echo\": \"" body-text "\"}"))
+    #t)))
+
+(define handle-shutdown (lambda (conn)
+  (begin
+    (text-response conn 200 "Shutting down. Goodbye!")
+    #f)))
+
+(define handle-not-found (lambda (path conn)
+  (begin
+    (text-response conn 404 (string-append "Not Found: " path))
+    #t)))
+
+; Dispatch a request to the right handler.
+(define dispatch (lambda (method path body-text conn hits)
+  (if (string-starts-with path "/greet")
+    (handle-greet path conn)
+    (if (string= path "/echo")
+      (handle-echo body-text conn)
+      (if (string= path "/shutdown")
+        (handle-shutdown conn)
+        (if (string= path "/")
+          (handle-home conn hits)
+          (handle-not-found path conn)))))))
+
+; ---------------------------------------------------------------------------
+; Server loop
+; ---------------------------------------------------------------------------
+
+; Accept requests in a loop. `hits` counts total requests served.
+; Returns when a handler returns #f (shutdown) or the server closes.
+(define server-loop (lambda (server hits)
+  (match (http/accept server)
+    (None nil)
+    ((Some (HttpRequest method path headers body conn))
+      (let ((body-text (match (bytes-to-string body)
+                         ((Ok t) t)
+                         ((Err _) ""))))
+        (begin
+          (io/println (string-append "[" (show hits) "] " method " " path))
+          (let ((keep-going (dispatch method path body-text conn hits)))
+            (if keep-going
+              (server-loop server (+ hits 1))
+              nil))))))))
+
+; ---------------------------------------------------------------------------
+; Main — start the server and fire some test requests
+; ---------------------------------------------------------------------------
+
+(let ((server (http/serve! 9200)))
+  (io/println "Listening on http://127.0.0.1:9200")
+
+  ; Spawn a batch of client requests to exercise the server
+  ;(conc/spawn (lambda ()
+  ;  (define do-get (lambda (path)
+  ;    (match (http/get (string-append "http://127.0.0.1:9200" path))
+  ;      ((Ok (HttpResponse status headers body))
+  ;        (match (bytes-to-string body)
+  ;          ((Ok text) (io/println (string-append "  <- " (show status) " " text)))
+  ;          ((Err _) nil)))
+  ;      ((Err msg) (io/println (string-append "  <- ERR " msg))))))
+
+  ;  (do-get "/")
+  ;  (do-get "/greet?name=Ada")
+  ;  (do-get "/greet?name=Alan")
+  ;  (do-get "/nope")
+  ;  ; POST echo
+  ;  (match (http/post-text "http://127.0.0.1:9200/echo"
+  ;           (list (MkPair "content-type" "application/json"))
+  ;           "{\"x\": 42}")
+  ;    ((Ok (HttpResponse status headers body))
+  ;      (match (bytes-to-string body)
+  ;        ((Ok text) (io/println (string-append "  <- " (show status) " " text)))
+  ;        ((Err _) nil)))
+  ;    ((Err msg) (io/println (string-append "  <- ERR " msg))))
+  ;  ; Shut it down
+  ;  (do-get "/shutdown")))
+
+  ; Run the server loop (blocks until shutdown)
+  (server-loop server 1)
+  (http/close-server server)
+  (io/println "Server stopped."))

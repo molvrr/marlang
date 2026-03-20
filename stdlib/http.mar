@@ -1,7 +1,9 @@
-; HTTP module - HTTP client using the effect system
+; HTTP module - HTTP client and server using the effect system
 ;
 ; All HTTP operations are effects handled by the always-on scheduler.
 ; They work at the top level — no wrapper needed.
+;
+; === Client ===
 ;
 ; The client API uses a type-safe HttpMethod ADT and returns HttpResponse values
 ; with status code, headers, and a Bytes body. Convenience wrappers handle
@@ -36,8 +38,23 @@
 ; certificates (no bundled certificate store). TLS errors are returned as
 ; (Err msg) just like connection errors.
 ;
+; === Server ===
+;
+; The server API starts an HTTP server on a port and accepts requests as
+; first-class values. Each request includes an opaque HttpConnection handle
+; used to send the response.
+;
+; Example usage:
+;   (import "std:http" as http)
+;
+;   (let ((server (http/serve! 8080)))
+;     (match (http/accept server)
+;       ((Some (HttpRequest method path headers body conn))
+;         (http/respond! conn 200 (list) (bytes-from-string "hello world"))
+;         (http/close-server server))
+;       (None (http/close-server server))))
+;
 ; Future work:
-;   - HTTP server effects (http-serve, http-accept, http-respond)
 ;   - Streaming request/response bodies
 ;   - Pure Marlang HTTP parser on TCP + codec (alternative implementation)
 
@@ -134,3 +151,78 @@
 ; Make a POST request with a string body. Throws on failure.
 (define post-text! (lambda (url headers body)
   (post! url headers (bytes-from-string body))))
+
+
+; =========================================================================
+; === HTTP Server =========================================================
+; =========================================================================
+
+; === Server Data Types ===
+
+; An incoming HTTP request (server-side).
+; method: HTTP method as string (e.g. "GET", "POST")
+; path: Request path with query string (e.g. "/api/users?page=1")
+; headers: Request headers as key-value pairs
+; body: Request body as raw bytes
+; connection: Opaque handle for sending the response (pass to respond/respond!)
+(data HttpRequest (HttpRequest String String (List (Pair String String)) Bytes HttpConnection))
+
+; === HTTP Server Effect ===
+
+(effect HttpServer
+  (http-serve (-> Int (Result String HttpServerHandle)))
+  (http-accept (-> HttpServerHandle (Option HttpRequest)))
+  (http-respond (-> HttpConnection Int (List (Pair String String)) Bytes
+                    (Result String Unit)))
+  (http-close-server (-> HttpServerHandle Unit)))
+
+; === Safe server wrappers (return Result) ===
+
+; serve : (-> Int {HttpServer} (Result String HttpServerHandle))
+; Start an HTTP server on port. Returns (Ok handle) or (Err msg).
+(define serve (lambda (port)
+  (perform http-serve port)))
+
+; accept : (-> HttpServerHandle {HttpServer} (Option HttpRequest))
+; Accept the next incoming HTTP request (blocks until one arrives).
+; Returns None if the server has been closed.
+(define accept (lambda (server)
+  (perform http-accept server)))
+
+; respond : (-> HttpConnection Int (List (Pair String String)) Bytes
+;               {HttpServer} (Result String Unit))
+; Send an HTTP response. Returns (Ok ()) or (Err msg).
+(define respond (lambda (conn status headers body)
+  (perform http-respond conn status headers body)))
+
+; close-server : (-> HttpServerHandle {HttpServer} Unit)
+; Shut down an HTTP server.
+(define close-server (lambda (server)
+  (perform http-close-server server)))
+
+; === Throwing server wrappers ===
+
+; serve! : (-> Int {HttpServer, Exception} HttpServerHandle)
+; Start an HTTP server on port. Throws on failure.
+(define serve! (lambda (port)
+  (unwrap-or-throw (serve port) "http-serve")))
+
+; respond! : (-> HttpConnection Int (List (Pair String String)) Bytes
+;                {HttpServer, Exception} Unit)
+; Send an HTTP response. Throws on failure.
+(define respond! (lambda (conn status headers body)
+  (unwrap-or-throw (respond conn status headers body) "http-respond")))
+
+; === String convenience server wrappers ===
+
+; respond-text : (-> HttpConnection Int (List (Pair String String)) String
+;                    {HttpServer} (Result String Unit))
+; Send an HTTP response with a string body (UTF-8 encoded).
+(define respond-text (lambda (conn status headers body)
+  (respond conn status headers (bytes-from-string body))))
+
+; respond-text! : (-> HttpConnection Int (List (Pair String String)) String
+;                     {HttpServer, Exception} Unit)
+; Send an HTTP response with a string body. Throws on failure.
+(define respond-text! (lambda (conn status headers body)
+  (respond! conn status headers (bytes-from-string body))))

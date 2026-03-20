@@ -5349,3 +5349,352 @@ fn http_unsupported_scheme() {
     );
     assert_eq!(output.trim(), "got error");
 }
+
+// ===== HTTP Server Tests =================================================
+// =========================================================================
+
+#[test]
+fn http_server_basic_get() {
+    // Start an HTTP server in Marlang, send a GET request from Rust, check the response.
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener); // Free the port for Marlang
+
+    let code = format!(
+        r#"
+(import "std:http" as http)
+
+(let ((server (http/serve! {port})))
+  (match (http/accept server)
+    ((Some (HttpRequest method path headers body conn))
+      (begin
+        (perform println (string-append "method=" method))
+        (perform println (string-append "path=" path))
+        (http/respond-text! conn 200 (list (MkPair "x-custom" "test-value")) "hello from marlang")
+        (http/close-server server)))
+    (None
+      (begin
+        (perform println "unexpected None")
+        (http/close-server server)))))
+"#,
+    );
+
+    // Run Marlang code in a thread (it blocks on http-accept)
+    let code_clone = code.clone();
+    let handle = std::thread::spawn(move || eval_modules_with_output(&code_clone, "dummy.mar"));
+
+    // Give the server time to start
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Send a GET request from Rust
+    let client_handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use http_body_util::BodyExt;
+
+            let stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+                .await
+                .expect("connect failed");
+            let io = hyper_util::rt::TokioIo::new(stream);
+            let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+                .await
+                .expect("handshake failed");
+            tokio::spawn(async move {
+                conn.await.ok();
+            });
+
+            let req = hyper::Request::builder()
+                .method("GET")
+                .uri("/hello?name=world")
+                .header("Host", format!("127.0.0.1:{}", port))
+                .body(http_body_util::Full::new(bytes::Bytes::new()))
+                .unwrap();
+
+            let resp = sender.send_request(req).await.expect("request failed");
+            let status = resp.status().as_u16();
+            let custom_header = resp
+                .headers()
+                .get("x-custom")
+                .map(|v| v.to_str().unwrap().to_string());
+            let body = resp
+                .into_body()
+                .collect()
+                .await
+                .expect("body read failed")
+                .to_bytes();
+            let body_str = String::from_utf8_lossy(&body).to_string();
+
+            (status, custom_header, body_str)
+        })
+    });
+
+    let (status, custom_header, body_str) = client_handle.join().expect("client thread panicked");
+    assert_eq!(status, 200, "response status should be 200");
+    assert_eq!(
+        custom_header.as_deref(),
+        Some("test-value"),
+        "custom header mismatch"
+    );
+    assert_eq!(body_str, "hello from marlang", "response body mismatch");
+
+    let (result, output) = handle.join().expect("server thread panicked");
+    assert!(result.is_ok(), "http server failed: {:?}", result);
+    let lines: Vec<&str> = output.trim().lines().collect();
+    assert_eq!(lines[0], "method=GET");
+    assert_eq!(lines[1], "path=/hello?name=world");
+}
+
+#[test]
+fn http_server_post_with_body() {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let code = format!(
+        r#"
+(import "std:http" as http)
+
+(let ((server (http/serve! {port})))
+  (match (http/accept server)
+    ((Some (HttpRequest method path headers body conn))
+      (begin
+        (perform println (string-append "method=" method))
+        (match (bytes-to-string body)
+          ((Ok text) (perform println (string-append "body=" text)))
+          ((Err msg) (perform println (string-append "body-err=" msg))))
+        (http/respond-text! conn 201 (list) "created")
+        (http/close-server server)))
+    (None
+      (begin
+        (perform println "unexpected None")
+        (http/close-server server)))))
+"#,
+    );
+
+    let code_clone = code.clone();
+    let handle = std::thread::spawn(move || eval_modules_with_output(&code_clone, "dummy.mar"));
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let client_handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use http_body_util::BodyExt;
+
+            let stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+                .await
+                .expect("connect failed");
+            let io = hyper_util::rt::TokioIo::new(stream);
+            let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+                .await
+                .expect("handshake failed");
+            tokio::spawn(async move {
+                conn.await.ok();
+            });
+
+            let req = hyper::Request::builder()
+                .method("POST")
+                .uri("/api/data")
+                .header("Host", format!("127.0.0.1:{}", port))
+                .header("Content-Type", "text/plain")
+                .body(http_body_util::Full::new(bytes::Bytes::from(
+                    "request body here",
+                )))
+                .unwrap();
+
+            let resp = sender.send_request(req).await.expect("request failed");
+            let status = resp.status().as_u16();
+            let body = resp
+                .into_body()
+                .collect()
+                .await
+                .expect("body read failed")
+                .to_bytes();
+            let body_str = String::from_utf8_lossy(&body).to_string();
+
+            (status, body_str)
+        })
+    });
+
+    let (status, body_str) = client_handle.join().expect("client thread panicked");
+    assert_eq!(status, 201, "response status should be 201");
+    assert_eq!(body_str, "created", "response body mismatch");
+
+    let (result, output) = handle.join().expect("server thread panicked");
+    assert!(result.is_ok(), "http server POST failed: {:?}", result);
+    let lines: Vec<&str> = output.trim().lines().collect();
+    assert_eq!(lines[0], "method=POST");
+    assert_eq!(lines[1], "body=request body here");
+}
+
+#[test]
+fn http_server_multiple_requests() {
+    // Accept 2 requests from Marlang HTTP client fibers, then shut down.
+    // This tests the full client-server roundtrip within a single Marlang program.
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let code = format!(
+        r#"
+(import "std:http" as http)
+(import "std:concurrent" as conc)
+
+(define handle-requests (lambda (server n)
+  (if (= n 0)
+    (http/close-server server)
+    (match (http/accept server)
+      ((Some (HttpRequest method path headers body conn))
+        (begin
+          (perform println (string-append "server: " path))
+          (http/respond-text! conn 200 (list) (string-append "ok-" (show n)))
+          (handle-requests server (- n 1))))
+      (None (http/close-server server))))))
+
+(define send-request (lambda (path)
+  (match (http/get (string-append "http://127.0.0.1:{port}" path))
+    ((Ok (HttpResponse status headers body))
+      (match (bytes-to-string body)
+        ((Ok text) (perform println (string-append "client: " text)))
+        ((Err msg) (perform println (string-append "client decode error: " msg)))))
+    ((Err msg) (perform println (string-append "client error: " msg))))))
+
+(let ((server (http/serve! {port})))
+  ; Spawn client fibers
+  (conc/spawn (lambda () (send-request "/page/1")))
+  (conc/spawn (lambda () (send-request "/page/2")))
+  ; Handle 2 requests on the server
+  (handle-requests server 2))
+"#,
+    );
+
+    let (result, output) = eval_modules_with_output(&code, "dummy.mar");
+    assert!(
+        result.is_ok(),
+        "http server multi-request failed: {:?}",
+        result
+    );
+    let lines: Vec<&str> = output.trim().lines().collect();
+    // Both server and client lines should be present (order may vary)
+    assert_eq!(lines.len(), 4, "expected 4 output lines: {:?}", lines);
+    let server_lines: Vec<&&str> = lines.iter().filter(|l| l.starts_with("server:")).collect();
+    let client_lines: Vec<&&str> = lines.iter().filter(|l| l.starts_with("client:")).collect();
+    assert_eq!(
+        server_lines.len(),
+        2,
+        "expected 2 server lines: {:?}",
+        lines
+    );
+    assert_eq!(
+        client_lines.len(),
+        2,
+        "expected 2 client lines: {:?}",
+        lines
+    );
+}
+
+#[test]
+fn http_server_bind_failure() {
+    // Bind to a privileged port (should fail on most systems)
+    let (result, output) = eval_modules_with_output(
+        r#"
+(import "std:http" as http)
+
+(match (http/serve 1)
+  ((Ok server) (begin (perform println "unexpected success") (http/close-server server)))
+  ((Err msg) (perform println "got error")))
+"#,
+        "dummy.mar",
+    );
+    assert!(result.is_ok(), "bind failure test failed: {:?}", result);
+    assert_eq!(output.trim(), "got error");
+}
+
+#[test]
+fn http_server_close_wakes_accept() {
+    // Close a server from the same fiber, then check accept returns None.
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let code = format!(
+        r#"
+(import "std:http" as http)
+
+(let ((server (http/serve! {port})))
+  (http/close-server server)
+  (match (http/accept server)
+    ((Some _) (perform println "unexpected request"))
+    (None (perform println "accept returned None"))))
+"#,
+    );
+
+    let (result, output) = eval_modules_with_output(&code, "dummy.mar");
+    assert!(
+        result.is_ok(),
+        "close-wakes-accept test failed: {:?}",
+        result
+    );
+    assert_eq!(output.trim(), "accept returned None");
+}
+
+#[test]
+fn http_server_client_roundtrip() {
+    // Use Marlang HTTP client to talk to Marlang HTTP server
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let code = format!(
+        r#"
+(import "std:http" as http)
+(import "std:concurrent" as conc)
+
+(let ((server (http/serve! {port})))
+  ; Spawn a client fiber
+  (conc/spawn (lambda ()
+    (match (http/get "http://127.0.0.1:{port}/test")
+      ((Ok (HttpResponse status headers body))
+        (match (bytes-to-string body)
+          ((Ok text) (perform println (string-append "client got: " text)))
+          ((Err msg) (perform println (string-append "decode error: " msg)))))
+      ((Err msg) (perform println (string-append "client error: " msg))))))
+
+  ; Handle one request on the server
+  (match (http/accept server)
+    ((Some (HttpRequest method path headers body conn))
+      (begin
+        (perform println (string-append "server got: " method " " path))
+        (http/respond-text! conn 200 (list) "server says hi")
+        (http/close-server server)))
+    (None
+      (begin
+        (perform println "unexpected None")
+        (http/close-server server)))))
+"#,
+    );
+
+    let (result, output) = eval_modules_with_output(&code, "dummy.mar");
+    assert!(
+        result.is_ok(),
+        "client-server roundtrip failed: {:?}",
+        result
+    );
+    let lines: Vec<&str> = output.trim().lines().collect();
+    // Order might vary due to concurrency, so check both are present
+    assert!(
+        lines.contains(&"server got: GET /test"),
+        "missing server line: {:?}",
+        lines
+    );
+    assert!(
+        lines.contains(&"client got: server says hi"),
+        "missing client line: {:?}",
+        lines
+    );
+}

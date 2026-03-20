@@ -82,6 +82,11 @@ enum SchedulerMessage {
         fiber_pid: FiberId,
         result: Result<Value, String>,
     },
+    // HTTP server messages
+    HttpAccepted {
+        server_id: u64,
+        request: Value, // HttpRequest ADT
+    },
     Shutdown,
 }
 
@@ -131,6 +136,22 @@ struct TcpListenerState {
     accept_queue: VecDeque<u64>, // socket IDs of accepted connections
     waiting_accept: Option<(FiberId, Value)>, // (pid, continuation)
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+// ---------------------------------------------------------------------------
+// HTTP Server State (per-scheduler, no locking)
+// ---------------------------------------------------------------------------
+
+struct HttpServerState {
+    request_queue: VecDeque<Value>,           // HttpRequest ADT values
+    waiting_accept: Option<(FiberId, Value)>, // (pid, continuation)
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+struct HttpResponseData {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
 }
 
 /// Cross-scheduler TCP operation request.
@@ -201,6 +222,11 @@ struct SharedState {
     tcp_listener_owners: Mutex<HashMap<u64, usize>>,
     next_tcp_id: AtomicU64,
     active_listeners: AtomicUsize,
+
+    // HTTP server state
+    http_server_owners: Mutex<HashMap<u64, usize>>,
+    http_connections: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<HttpResponseData>>>>,
+    active_http_servers: AtomicUsize,
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +250,8 @@ struct PerScheduler {
     // TCP state (owned by this scheduler)
     tcp_sockets: HashMap<u64, TcpSocketState>,
     tcp_listeners: HashMap<u64, TcpListenerState>,
+    // HTTP server state (owned by this scheduler)
+    http_servers: HashMap<u64, HttpServerState>,
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +326,10 @@ const HANDLED_EFFECTS: &[&str] = &[
     "tcp-close-listener",
     // Layer 5: HTTP
     "http-request",
+    "http-serve",
+    "http-accept",
+    "http-respond",
+    "http-close-server",
     // "throw" is NOT here — with CPS dispatch, user handlers catch throw inline.
     // Unhandled throw uses try_default_handler → "Uncaught exception: ..." error.
 ];
@@ -1505,6 +1537,236 @@ fn handle_effect(
             });
         }
 
+        // --- Layer 6: HTTP Server ---
+        "http-serve" => {
+            let port = args
+                .first()
+                .and_then(|v| v.as_int())
+                .ok_or_else(|| VMError::runtime("http-serve: port must be a number"))?
+                as u16;
+
+            let server_id = shared.next_tcp_id.fetch_add(1, Ordering::Relaxed);
+
+            let listener = match shared.tokio_handle.block_on(async {
+                tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await
+            }) {
+                Ok(l) => l,
+                Err(e) => {
+                    sched.ready_queue.push_back(Fiber::Suspended {
+                        continuation: cont,
+                        resume_value: make_err(&format!("http-serve: {}", e)),
+                        pid: sched.current_pid,
+                    });
+                    return Ok(());
+                }
+            };
+
+            let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+            // Register ownership
+            {
+                let mut owners = shared.http_server_owners.lock().unwrap();
+                owners.insert(server_id, sched.id);
+            }
+            shared.active_http_servers.fetch_add(1, Ordering::AcqRel);
+
+            // Pre-allocate a batch of connection IDs
+            let conn_id_counter = Arc::new(AtomicU64::new(
+                shared.next_tcp_id.fetch_add(1000, Ordering::Relaxed),
+            ));
+
+            let sender = shared.scheduler_senders[sched.id].clone();
+            let http_conns = shared.http_connections.clone();
+
+            // Spawn background accept loop
+            shared.tokio_handle.spawn(async move {
+                loop {
+                    tokio::select! {
+                        result = listener.accept() => {
+                            match result {
+                                Ok((stream, _)) => {
+                                    let sender = sender.clone();
+                                    let http_conns = http_conns.clone();
+                                    let conn_id_counter = conn_id_counter.clone();
+                                    tokio::spawn(async move {
+                                        let io = hyper_util::rt::TokioIo::new(stream);
+                                        let sender = sender.clone();
+                                        let http_conns = http_conns.clone();
+                                        let conn_id_counter = conn_id_counter.clone();
+                                        let _ = hyper::server::conn::http1::Builder::new()
+                                            .serve_connection(
+                                                io,
+                                                hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                                                    let sender = sender.clone();
+                                                    let http_conns = http_conns.clone();
+                                                    let conn_id_counter = conn_id_counter.clone();
+                                                    async move {
+                                                        http_handle_incoming_request(
+                                                            req, server_id, &sender, &http_conns, &conn_id_counter,
+                                                        ).await
+                                                    }
+                                                }),
+                                            )
+                                            .await;
+                                    });
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        _ = &mut shutdown_rx => {
+                            break;
+                        }
+                    }
+                }
+            });
+
+            // Create server state
+            sched.http_servers.insert(
+                server_id,
+                HttpServerState {
+                    request_queue: VecDeque::new(),
+                    waiting_accept: None,
+                    shutdown_tx: Some(shutdown_tx),
+                },
+            );
+
+            // Resume fiber immediately with the server handle
+            sched.ready_queue.push_back(Fiber::Suspended {
+                continuation: cont,
+                resume_value: make_ok(Value::object(VMObject::Port(server_id))),
+                pid: sched.current_pid,
+            });
+        }
+
+        "http-accept" => {
+            let server_id = args
+                .first()
+                .and_then(|v| match v.as_object() {
+                    Some(VMObject::Port(id)) => Some(*id),
+                    _ => None,
+                })
+                .ok_or_else(|| VMError::runtime("http-accept: argument must be a server handle"))?;
+
+            if let Some(server_state) = sched.http_servers.get_mut(&server_id) {
+                if let Some(request) = server_state.request_queue.pop_front() {
+                    // Request already waiting — wrap in Some
+                    sched.ready_queue.push_back(Fiber::Suspended {
+                        continuation: cont,
+                        resume_value: make_some(request),
+                        pid: sched.current_pid,
+                    });
+                } else if server_state.shutdown_tx.is_none() {
+                    // Server is closed — return None
+                    sched.ready_queue.push_back(Fiber::Suspended {
+                        continuation: cont,
+                        resume_value: make_none(),
+                        pid: sched.current_pid,
+                    });
+                } else {
+                    // Park until a request arrives
+                    server_state.waiting_accept = Some((sched.current_pid, cont));
+                }
+            } else {
+                // Server state gone — treat as closed
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: make_none(),
+                    pid: sched.current_pid,
+                });
+            }
+        }
+
+        "http-respond" => {
+            let connection_id = args
+                .first()
+                .and_then(|v| match v.as_object() {
+                    Some(VMObject::Port(id)) => Some(*id),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    VMError::runtime("http-respond: first argument must be a connection handle")
+                })?;
+
+            let status = args
+                .get(1)
+                .and_then(|v| v.as_int())
+                .ok_or_else(|| VMError::runtime("http-respond: status must be a number"))?
+                as u16;
+
+            let headers_val = args
+                .get(2)
+                .ok_or_else(|| VMError::runtime("http-respond: missing headers argument"))?;
+            let header_pairs = http_collect_pair_list(headers_val, "http-respond headers")?;
+
+            let body_bytes = args
+                .get(3)
+                .and_then(|v| v.as_bytes())
+                .ok_or_else(|| VMError::runtime("http-respond: body must be Bytes"))?
+                .to_vec();
+
+            // Look up the oneshot sender and send the response
+            let resp_tx = {
+                let mut conns = shared.http_connections.lock().unwrap();
+                conns.remove(&connection_id)
+            };
+
+            let resume_value = match resp_tx {
+                Some(tx) => match tx.send(HttpResponseData {
+                    status,
+                    headers: header_pairs,
+                    body: body_bytes,
+                }) {
+                    Ok(()) => make_ok(Value::nil()),
+                    Err(_) => make_err("http-respond: connection closed"),
+                },
+                None => make_err("http-respond: unknown connection"),
+            };
+
+            sched.ready_queue.push_back(Fiber::Suspended {
+                continuation: cont,
+                resume_value,
+                pid: sched.current_pid,
+            });
+        }
+
+        "http-close-server" => {
+            let server_id = args
+                .first()
+                .and_then(|v| match v.as_object() {
+                    Some(VMObject::Port(id)) => Some(*id),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    VMError::runtime("http-close-server: argument must be a server handle")
+                })?;
+
+            if let Some(mut server_state) = sched.http_servers.remove(&server_id) {
+                // Signal the accept loop to stop
+                if let Some(tx) = server_state.shutdown_tx.take() {
+                    let _ = tx.send(());
+                }
+                shared.active_http_servers.fetch_sub(1, Ordering::AcqRel);
+                {
+                    let mut owners = shared.http_server_owners.lock().unwrap();
+                    owners.remove(&server_id);
+                }
+                // Wake any waiting accept with None
+                if let Some((wait_pid, wait_cont)) = server_state.waiting_accept.take() {
+                    sched.ready_queue.push_back(Fiber::Suspended {
+                        continuation: wait_cont,
+                        resume_value: make_none(),
+                        pid: wait_pid,
+                    });
+                }
+            }
+
+            sched.ready_queue.push_back(Fiber::Suspended {
+                continuation: cont,
+                resume_value: Value::nil(),
+                pid: sched.current_pid,
+            });
+        }
+
         // --- Exception effect (default handler: crash the fiber) ---
         "throw" => {
             let msg = args
@@ -1528,6 +1790,89 @@ fn handle_effect(
 // ---------------------------------------------------------------------------
 // HTTP helpers
 // ---------------------------------------------------------------------------
+
+/// Handle an incoming HTTP request in the server's hyper service function.
+/// Parses the request, creates a oneshot channel for the response, queues
+/// the request for the Marlang fiber, and awaits the response.
+async fn http_handle_incoming_request(
+    req: hyper::Request<hyper::body::Incoming>,
+    server_id: u64,
+    sender: &Sender<SchedulerMessage>,
+    http_conns: &Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<HttpResponseData>>>>,
+    conn_id_counter: &AtomicU64,
+) -> Result<hyper::Response<http_body_util::Full<bytes::Bytes>>, hyper::Error> {
+    use http_body_util::{BodyExt, Full};
+
+    // Extract request info
+    let method = req.method().to_string();
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    let headers: Vec<(String, String)> = req
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+
+    // Read full body
+    let body_bytes = match req.into_body().collect().await {
+        Ok(collected) => collected.to_bytes().to_vec(),
+        Err(_) => {
+            return Ok(hyper::Response::builder()
+                .status(500)
+                .body(Full::new(bytes::Bytes::from("failed to read request body")))
+                .unwrap());
+        }
+    };
+
+    // Allocate connection ID and create oneshot for response
+    let connection_id = conn_id_counter.fetch_add(1, Ordering::Relaxed);
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<HttpResponseData>();
+
+    // Store sender in shared map
+    {
+        let mut conns = http_conns.lock().unwrap();
+        conns.insert(connection_id, resp_tx);
+    }
+
+    // Build HttpRequest value
+    let headers_list = http_build_pair_list(headers);
+    let request = Value::object(VMObject::AdtValue {
+        tag: "HttpRequest".to_string(),
+        fields: vec![
+            Value::string(&*method),
+            Value::string(&*path),
+            headers_list,
+            Value::bytes(body_bytes),
+            Value::object(VMObject::Port(connection_id)),
+        ],
+    });
+
+    // Send to scheduler
+    let _ = sender.send(SchedulerMessage::HttpAccepted { server_id, request });
+
+    // Wait for response from Marlang code
+    match resp_rx.await {
+        Ok(resp_data) => {
+            let mut builder = hyper::Response::builder().status(resp_data.status);
+            for (key, value) in &resp_data.headers {
+                builder = builder.header(key.as_str(), value.as_str());
+            }
+            Ok(builder
+                .body(Full::new(bytes::Bytes::from(resp_data.body)))
+                .unwrap())
+        }
+        Err(_) => {
+            // Oneshot sender was dropped (connection abandoned by Marlang code)
+            Ok(hyper::Response::builder()
+                .status(500)
+                .body(Full::new(bytes::Bytes::from("request handler dropped")))
+                .unwrap())
+        }
+    }
+}
 
 /// Lazily-initialized TLS client configuration using native OS certificates.
 static TLS_CLIENT_CONFIG: std::sync::LazyLock<Arc<tokio_rustls::rustls::ClientConfig>> =
@@ -2250,6 +2595,30 @@ fn tcp_handle_op(sched: &mut PerScheduler, shared: &SharedState, op: TcpOp) {
 // Spawn distribution
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// HTTP Server message handling
+// ---------------------------------------------------------------------------
+
+/// Handle a new HTTP request arriving at a server.
+fn http_handle_accepted(sched: &mut PerScheduler, server_id: u64, request: Value) {
+    if let Some(server_state) = sched.http_servers.get_mut(&server_id) {
+        if let Some((wait_pid, wait_cont)) = server_state.waiting_accept.take() {
+            // A fiber is waiting for http-accept — deliver immediately
+            sched.ready_queue.push_back(Fiber::Suspended {
+                continuation: wait_cont,
+                resume_value: make_some(request),
+                pid: wait_pid,
+            });
+        } else {
+            // No fiber waiting — queue the request
+            server_state.request_queue.push_back(request);
+        }
+    }
+    // If server_state is gone (server closed), the request is dropped.
+    // The oneshot sender in http_connections will also be dropped eventually,
+    // causing the hyper service to receive an error and close the connection.
+}
+
 fn pick_scheduler(sched: &mut PerScheduler, shared: &SharedState) -> usize {
     // Local bias: keep fiber local if queue is small
     if sched.ready_queue.len() < 4 {
@@ -2394,6 +2763,9 @@ fn process_single_message(
                 }
             }
         }
+        SchedulerMessage::HttpAccepted { server_id, request } => {
+            http_handle_accepted(sched, server_id, request);
+        }
         SchedulerMessage::Shutdown => {
             return true;
         }
@@ -2440,11 +2812,14 @@ fn check_termination(shared: &SharedState) -> bool {
         return true;
     }
 
-    // Don't shut down while IO is pending or listeners are active
+    // Don't shut down while IO is pending, listeners are active, or HTTP servers are running
     if shared.pending_io.load(Ordering::Acquire) > 0 {
         return false;
     }
     if shared.active_listeners.load(Ordering::Acquire) > 0 {
+        return false;
+    }
+    if shared.active_http_servers.load(Ordering::Acquire) > 0 {
         return false;
     }
 
@@ -2566,6 +2941,9 @@ impl Scheduler {
             tcp_listener_owners: Mutex::new(HashMap::new()),
             next_tcp_id: AtomicU64::new(0),
             active_listeners: AtomicUsize::new(0),
+            http_server_owners: Mutex::new(HashMap::new()),
+            http_connections: Arc::new(Mutex::new(HashMap::new())),
+            active_http_servers: AtomicUsize::new(0),
         });
 
         // Scheduler 0's local state
@@ -2590,6 +2968,7 @@ impl Scheduler {
             io_parked: HashMap::new(),
             tcp_sockets: HashMap::new(),
             tcp_listeners: HashMap::new(),
+            http_servers: HashMap::new(),
         };
 
         // Register the persistent main PID (0)

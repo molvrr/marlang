@@ -837,7 +837,12 @@ pub fn register_builtins(vm: &mut VM) {
             return Err(VMError::runtime("symbol->string expects 1 argument"));
         }
         match args[0].as_object() {
-            Some(VMObject::Symbol(s)) => Ok(Value::string(s.as_str())),
+            Some(VMObject::Symbol(s)) => {
+                // Strip hygiene marks so macro authors see clean names.
+                // Marks are internal bookkeeping for the expander, not user-visible.
+                let clean = marlang_core::ast::strip_marks(s);
+                Ok(Value::string(clean))
+            }
             _ => Err(VMError::runtime("symbol->string expects a symbol")),
         }
     });
