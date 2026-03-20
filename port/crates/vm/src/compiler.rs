@@ -907,16 +907,30 @@ impl<'a> Compiler<'a> {
         let jump_to_else = self.emit_jump(Op::JumpIfFalse, line);
 
         self.compile_expr(elements[2], is_tail)?; // then branch
-        let jump_to_end = self.emit_jump(Op::Jump, line);
 
-        self.patch_jump(jump_to_else);
-        if elements.len() == 4 {
-            self.compile_expr(elements[3], is_tail)?; // else branch
+        if is_tail {
+            // Tail position: emit RETURN directly after then branch instead of
+            // JUMP to end. This eliminates a jump and enables the JIT to
+            // generate separate return paths (better for shrink-wrapping).
+            // The else branch falls through to the caller's RETURN.
+            self.emit(Op::Return, line);
+            self.patch_jump(jump_to_else);
+            if elements.len() == 4 {
+                self.compile_expr(elements[3], is_tail)?; // else branch
+            } else {
+                self.emit_constant(ConstantValue::Nil, line); // no else → nil
+            }
+            // No jump_to_end — else result falls through to caller's RETURN
         } else {
-            self.emit_constant(ConstantValue::Nil, line); // no else → nil
+            let jump_to_end = self.emit_jump(Op::Jump, line);
+            self.patch_jump(jump_to_else);
+            if elements.len() == 4 {
+                self.compile_expr(elements[3], is_tail)?; // else branch
+            } else {
+                self.emit_constant(ConstantValue::Nil, line); // no else → nil
+            }
+            self.patch_jump(jump_to_end);
         }
-
-        self.patch_jump(jump_to_end);
         Ok(())
     }
 
