@@ -386,17 +386,22 @@
 ; ============================================================
 
 ; with-output : (-> Unit Unit) -> String
-; Runs a printer, accumulating emitted output into a string.
-; Uses deep handler semantics — resume continues in the same handler.
+; Runs a printer, accumulating emitted output into a mutable box.
+; Uses tail-resumptive handler — no continuation capture, O(n) string building.
 (define with-output (lambda (thunk)
-  (handle
-    (begin (thunk) "")
-    ((emit s k) ->
-      (let ((rest (resume k nil)))
-        (string-append s rest)))
-    ((emit-char c k) ->
-      (let ((rest (resume k nil)))
-        (string-append (char->string c) rest))))))
+  (let ((buf (box-new "")))
+    (handle
+      (begin (thunk) (box-get buf))
+      ((emit s k) ->
+        (resume k
+          (begin
+            (box-set! buf (string-append (box-get buf) s))
+            nil)))
+      ((emit-char c k) ->
+        (resume k
+          (begin
+            (box-set! buf (string-append (box-get buf) (char->string c)))
+            nil)))))))
 
 ; try-print : (-> Unit Unit) -> (Option String)
 ; Run a printer in a fresh scope. Returns Some output on success, None on failure.
