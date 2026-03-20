@@ -89,6 +89,10 @@ pub struct VM {
     /// Current fiber PID when running under the scheduler (for fast-path fiber-self).
     pub(crate) current_pid: Option<u64>,
 
+    /// Cache for parsed handler descriptors, keyed by constant pool string pointer.
+    /// Avoids re-parsing the JSON descriptor string on every PushHandler.
+    pub(crate) handler_descriptor_cache: FxHashMap<usize, HandlerDescriptor>,
+
     // --- JIT ---
     /// JIT compilation engine (lazily initialized on first hot function).
     #[cfg(feature = "jit")]
@@ -120,6 +124,7 @@ impl VM {
             captured_output: None,
             dirty_globals: None,
             current_pid: None,
+            handler_descriptor_cache: FxHashMap::default(),
             #[cfg(feature = "jit")]
             jit_engine: None,
             #[cfg(feature = "jit")]
@@ -537,6 +542,7 @@ pub fn interpret(vm: &mut VM, chunk: &Chunk) -> Result<Value, VMError> {
 
 // --- JSON parsing for handler descriptors ---
 
+#[derive(Clone)]
 struct HandlerDescriptor {
     body_proto_idx: u32,
     handlers: Vec<HandlerClauseDescriptor>,
@@ -545,6 +551,7 @@ struct HandlerDescriptor {
     tail_resumptive: bool,
 }
 
+#[derive(Clone)]
 struct HandlerClauseDescriptor {
     effect_name_idx: u32,
     op_name_idx: u32,
@@ -1799,16 +1806,26 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                     }
                 };
 
-                let json = &descriptor_str["\0handler:".len()..];
-                let descriptor = match parse_handler_descriptor(json) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(vm.vm_error(
-                            format!("Failed to parse handler descriptor: {}", e),
-                            &vm.frames[frame_idx],
-                        )));
-                    }
+                // Cache the parsed descriptor to avoid re-parsing JSON on every PushHandler.
+                // Use the constant pool address + operand index as a stable key.
+                let cache_key = (constants as usize) + inst.operand as usize;
+                let descriptor = if let Some(cached) = vm.handler_descriptor_cache.get(&cache_key) {
+                    cached.clone()
+                } else {
+                    let json = &descriptor_str["\0handler:".len()..];
+                    let parsed = match parse_handler_descriptor(json) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            vm.frames[frame_idx].ip = ip;
+                            return Err(VMSignal::Error(vm.vm_error(
+                                format!("Failed to parse handler descriptor: {}", e),
+                                &vm.frames[frame_idx],
+                            )));
+                        }
+                    };
+                    vm.handler_descriptor_cache
+                        .insert(cache_key, parsed.clone());
+                    parsed
                 };
 
                 // Create body closure from prototype
