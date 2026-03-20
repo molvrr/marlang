@@ -2068,6 +2068,22 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                             .tail_resume_closure
                             .clone()
                     {
+                        // ── Ultra-fast path: trivial tail-resume ──
+                        // If the closure is [PushConst X, Return] with no upvalues
+                        // and no args, push the constant directly — skip all frame overhead.
+                        if arity == 0
+                            && resume_closure.upvalues.is_empty()
+                            && resume_closure.proto.chunk.code.len() == 2
+                            && resume_closure.proto.chunk.code[0].op == Op::PushConst
+                            && resume_closure.proto.chunk.code[1].op == Op::Return
+                        {
+                            let val = resume_closure.proto.chunk.constants
+                                [resume_closure.proto.chunk.code[0].operand as usize]
+                                .as_value();
+                            vm.push(val);
+                            continue;
+                        }
+
                         // Save current frame before calling the resume-value closure
                         vm.frames[frame_idx].ip = ip;
 
