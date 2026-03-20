@@ -431,6 +431,28 @@ impl<'a> Compiler<'a> {
         None
     }
 
+    /// Pre-resolve free variables in an expression by walking it and calling
+    /// resolve_upvalue for each symbol. This forces upvalue capture in the
+    /// current scope WITHOUT emitting bytecode. Used before snapshot_scope()
+    /// so that child compilers (handle body/clause closures) can access
+    /// variables from grandparent scopes.
+    fn pre_resolve_free_vars(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Atom(LispValue::Symbol(s), _) => {
+                let name = *s;
+                // Only trigger upvalue resolution if it's not a local
+                if self.resolve_local(name).is_none() {
+                    let _ = self.resolve_upvalue(name);
+                }
+            }
+            Expr::Atom(_, _) | Expr::Nil(_) => {}
+            Expr::List { head, tail, .. } => {
+                self.pre_resolve_free_vars(head);
+                self.pre_resolve_free_vars(tail);
+            }
+        }
+    }
+
     fn emit_variable(&mut self, name: Symbol, line: u32) {
         if let Some(slot) = self.resolve_local(name) {
             self.emit_op(Op::PushLocal, line, slot);
@@ -1571,6 +1593,19 @@ impl<'a> Compiler<'a> {
                     tail_resume_proto_idx,
                     is_aborting,
                 });
+            }
+        }
+
+        // Pre-resolve free variables in body and handler bodies.
+        // This forces the current scope to capture upvalues BEFORE snapshot,
+        // ensuring the body closure can access grandparent variables.
+        self.pre_resolve_free_vars(body_expr);
+        for &clause in handler_clauses.iter() {
+            let clause_elems = ast::list_to_array(clause);
+            if let Some(&handler_body) = clause_elems.last()
+                && clause_elems.len() >= 2
+            {
+                self.pre_resolve_free_vars(handler_body);
             }
         }
 
