@@ -168,6 +168,7 @@
 (declare box-set! (-> (Box a) a Unit))
 (declare box-string-push! (-> (Box String) String Unit))
 (declare box-string-push-char! (-> (Box String) Char Unit))
+(declare string-peek-char (-> (Box Int) String Int (Option Char)))
 (declare string-consume-char! (-> (Box Int) String Int (Option Char)))
 
 ; Macro/quote builtins

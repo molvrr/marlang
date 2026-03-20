@@ -340,11 +340,7 @@
       (handle
         (thunk)
         ((peek k) ->
-          (resume k
-            (let ((p (box-get pos)))
-              (if (>= p len)
-                None
-                (string-char-at input p)))))
+          (resume k (string-peek-char pos input len)))
         ((consume k) ->
           (resume k
             (match (string-consume-char! pos input len)

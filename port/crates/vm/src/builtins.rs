@@ -1190,6 +1190,43 @@ pub fn register_builtins(vm: &mut VM) {
         }
     });
 
+    // string-peek-char : Box Int -> String -> Int -> (Option Char)
+    // Read char at current position without bumping. Returns None if at end.
+    builtin(vm, "string-peek-char", |_vm, args| {
+        if args.len() < 3 {
+            return Err(VMError::runtime(
+                "string-peek-char expects 3 arguments (pos-box, input, len)",
+            ));
+        }
+        let pos_cell = match args[0].as_object() {
+            Some(VMObject::MutableBox(cell)) => cell,
+            _ => {
+                return Err(VMError::runtime(
+                    "string-peek-char: first arg must be a box",
+                ));
+            }
+        };
+        let input = args[1]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-peek-char: second arg must be string"))?;
+        let len = args[2].get_int() as usize;
+
+        let pos = pos_cell.lock().unwrap().get_int() as usize;
+
+        if pos >= len {
+            Ok(crate::object::make_none())
+        } else if input.is_ascii() {
+            Ok(crate::object::make_some(Value::char(
+                input.as_bytes()[pos] as char,
+            )))
+        } else {
+            match input.chars().nth(pos) {
+                Some(c) => Ok(crate::object::make_some(Value::char(c))),
+                None => Ok(crate::object::make_none()),
+            }
+        }
+    });
+
     // string-consume-char! : Box Int -> String -> Int -> (Option Char)
     // Combined read + bump for parser state. Reads char at position from string,
     // increments the position box. Returns None if at end. Replaces the pattern:
