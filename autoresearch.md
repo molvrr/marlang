@@ -56,7 +56,14 @@ Handler clauses of the form `((op args k) -> ... (resume k <expr>))` where `k` i
 - effects: ~33ms, json: ~259ms, fib: ~20ms, pattern: ~30ms
 - JSON dominates at 88% of total_ms (~292ms)
 
-### WIP (commit f41a978)
-- Generalized tail-resumptive analysis (allows if/let/begin/match before resume)
-- Replaced VM-level ParseState builtins with pure Marlang `handle` block
-- **BUG**: JSON benchmark hangs — likely tail-resumptive detection or handler dispatch issue
+### Current best (total=230ms, -29% from baseline)
+- Tail-resumptive with strict (resume k expr) form, mutable box for ParseState
+- Eliminated String allocations in Perform (use &str refs)
+- Combined handler+entry search, avoid Vec alloc for tail-resume args
+- Aborting handler fast path (skip continuation capture when k not used)
+- Rewrite with-output to use mutable box + tail-resumptive handler (-10.5%)
+- Cache parsed handler descriptors (avoid JSON re-parsing per PushHandler) (-11.7%)
+- Wrap FunctionPrototype in Arc (closure creation = refcount bump) (-5.5%)
+- Avoid Vec heap alloc for builtin args (≤4 args)
+- string-char-at O(1) ASCII fast path
+- Optimize json-string-char: peek first to avoid try-parse for non-escaped chars (-7.5%)
