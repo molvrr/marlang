@@ -1955,11 +1955,6 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 };
                 let arity = inst.operand2 as usize;
 
-                let mut args = vec![Value::nil(); arity];
-                for i in (0..arity).rev() {
-                    args[i] = vm.pop();
-                }
-
                 // Parse the performed operation name (could be "effectName/opName" or just "opName")
                 // Use rsplit_once to handle effect names with slashes (e.g., "io/IO")
                 // Use borrowed &str to avoid String allocation on every Perform.
@@ -1970,83 +1965,81 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         ("", op_name_ref)
                     };
 
-                // Walk handler stack to find a matching handler
-                let mut found = None;
-                for i in (0..vm.handler_stack.len()).rev() {
-                    if vm.handler_stack[i].handlers.iter().any(|e| {
-                        // If handler has no effect name (unqualified), match any effect's op
-                        // If handler has effect name (qualified), match both effect and op
-                        if e.effect_name.is_empty() {
+                // Walk handler stack to find a matching handler AND the entry index.
+                // Combined search avoids scanning entries twice (once for handler, once for entry).
+                let mut found: Option<(usize, usize)> = None; // (handler_idx, entry_idx)
+                'handler_search: for i in (0..vm.handler_stack.len()).rev() {
+                    for (j, e) in vm.handler_stack[i].handlers.iter().enumerate() {
+                        let matches = if e.effect_name.is_empty() {
                             e.op_name == performed_op
                         } else {
                             e.effect_name == performed_effect && e.op_name == performed_op
+                        };
+                        if matches {
+                            found = Some((i, j));
+                            break 'handler_search;
                         }
-                    }) {
-                        found = Some(i);
-                        break;
                     }
                 }
 
-                if let Some(handler_idx) = found {
+                if let Some((handler_idx, entry_idx)) = found {
                     let is_scheduler = vm.handler_stack[handler_idx].is_scheduler;
 
+                    // ── Tail-resumptive fast path ──
+                    // When the handler is tail-resumptive, the handler clause is of the
+                    // form `((op args k) -> (resume k <expr>))`. Skip continuation capture
+                    // entirely: call the resume-value closure inline, push the result.
+                    // The handler stays installed (deep handler semantics).
+                    if !is_scheduler
+                        && vm.handler_stack[handler_idx].is_tail_resumptive
+                        && let Some(resume_closure) = vm.handler_stack[handler_idx].handlers
+                            [entry_idx]
+                            .tail_resume_closure
+                            .clone()
+                    {
+                        // Save current frame before calling the resume-value closure
+                        vm.frames[frame_idx].ip = ip;
+
+                        // Set up locals for the tail-resume closure (effect args only, no k)
+                        let local_count = resume_closure.proto.chunk.local_count as usize;
+                        let mut resume_locals = vm.take_locals(local_count);
+                        // Pop args from stack directly into locals (no intermediate Vec)
+                        let copy_count = arity.min(local_count);
+                        for k in (0..copy_count).rev() {
+                            resume_locals[k] = vm.pop();
+                        }
+                        // Pop remaining args if arity > local_count
+                        for _ in 0..(arity.saturating_sub(local_count)) {
+                            vm.pop();
+                        }
+
+                        // Call the resume-value closure inline
+                        let new_frame = CallFrame {
+                            closure: resume_closure,
+                            ip: 0,
+                            open_upvalues: Vec::new(),
+                            locals: resume_locals,
+                        };
+                        vm.push_frame(new_frame);
+                        frame_idx = vm.frame_count - 1;
+                        ip = 0;
+                        cache_frame!();
+                        continue;
+                    }
+
+                    // Pop args into a Vec for the non-fast-path cases.
+                    // (The tail-resumptive fast path above already handled args directly.)
+                    let mut args = vec![Value::nil(); arity];
+                    for i in (0..arity).rev() {
+                        args[i] = vm.pop();
+                    }
+
                     // Fast-path: synchronous effects under the scheduler.
-                    // These can be executed inline without continuation capture,
-                    // avoiding the expensive capture → unwind → signal → resume cycle.
-                    // Only effects that don't depend on scheduler-level shared state
-                    // (like shared captured_output) are handled here.
                     if is_scheduler
                         && let Some(result) = try_fast_path_handler(vm, op_name_ref, &args)
                     {
                         vm.push(result);
                         continue;
-                    }
-
-                    // ── Tail-resumptive fast path ──
-                    // When the handler is tail-resumptive, the handler clause is of the
-                    // form `((op args k) -> (k <expr>))`. Instead of capturing the
-                    // continuation (expensive: clones frames, stack, handlers), unwinding,
-                    // calling the clause, and resuming, we short-circuit: evaluate <expr>
-                    // with the effect args and push the result directly. The handler stays
-                    // installed (deep handler semantics) and execution continues at the
-                    // perform site — no stack manipulation at all.
-                    if !is_scheduler && vm.handler_stack[handler_idx].is_tail_resumptive {
-                        // Find the matching entry with a tail-resume closure
-                        let tail_closure = vm.handler_stack[handler_idx]
-                            .handlers
-                            .iter()
-                            .find(|e| {
-                                if e.effect_name.is_empty() {
-                                    e.op_name == performed_op
-                                } else {
-                                    e.effect_name == performed_effect && e.op_name == performed_op
-                                }
-                            })
-                            .and_then(|e| e.tail_resume_closure.clone());
-
-                        if let Some(resume_closure) = tail_closure {
-                            // Save current frame before calling the resume-value closure
-                            vm.frames[frame_idx].ip = ip;
-
-                            // Set up locals for the tail-resume closure (effect args only, no k)
-                            let local_count = resume_closure.proto.chunk.local_count as usize;
-                            let mut resume_locals = vm.take_locals(local_count);
-                            let copy_count = args.len().min(local_count);
-                            resume_locals[..copy_count].clone_from_slice(&args[..copy_count]);
-
-                            // Call the resume-value closure inline
-                            let new_frame = CallFrame {
-                                closure: resume_closure,
-                                ip: 0,
-                                open_upvalues: Vec::new(),
-                                locals: resume_locals,
-                            };
-                            vm.push_frame(new_frame);
-                            frame_idx = vm.frame_count - 1;
-                            ip = 0;
-                            cache_frame!();
-                            continue;
-                        }
                     }
 
                     let handler_id = vm.handler_stack[handler_idx].id;
@@ -2228,9 +2221,15 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 }
 
                 // No handler found at all — error
+                // Pop remaining args from stack
+                let mut err_args = Vec::new();
+                for _ in 0..arity {
+                    err_args.push(vm.pop());
+                }
+                err_args.reverse();
                 if op_name_ref == "throw" || performed_op == "throw" {
                     // Better error message for unhandled throw
-                    let msg = args
+                    let msg = err_args
                         .first()
                         .map(format_value)
                         .unwrap_or_else(|| "(no message)".to_string());
