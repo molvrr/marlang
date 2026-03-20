@@ -444,16 +444,23 @@ pub extern "C" fn marlang_jit_get_field(
     out_payload: *mut u64,
 ) -> u32 {
     unsafe {
-        let value = Value::from_raw_clone(value_tag, value_payload);
-        if let Some(VMObject::AdtValue { fields, .. }) = value.as_object()
+        // Fast path: avoid refcount increment/decrement. The caller still holds
+        // the value on its vstack, so the Arc reference is guaranteed alive.
+        if value_tag != 6 {
+            return 1; // not an object
+        }
+        let ptr = value_payload as *const VMObject;
+        let obj = &*ptr;
+        if let VMObject::AdtValue { fields, .. } = obj
             && (field_idx as usize) < fields.len()
         {
-            let field = fields[field_idx as usize].clone();
-            let t = field.tag();
-            let p = field.payload();
-            std::mem::forget(field);
-            *out_tag = t;
-            *out_payload = p;
+            let field = &fields[field_idx as usize];
+            *out_tag = field.tag();
+            *out_payload = field.payload();
+            // Increment refcount for the returned field value if it's an object
+            if field.tag() == 6 {
+                Arc::increment_strong_count(field.payload() as *const VMObject);
+            }
             return 0;
         }
         1
@@ -470,21 +477,24 @@ pub extern "C" fn marlang_jit_match_tag(
     tag_len: u64,
 ) -> u32 {
     unsafe {
-        let value = Value::from_raw_clone(value_tag, value_payload);
         let tag_name =
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(tag_ptr, tag_len as usize));
 
-        let matches = if value.is_nil() {
-            tag_name == "Nil"
-        } else if value.is_int() || value.is_float() {
-            false
-        } else if let Some(VMObject::AdtValue { tag, .. }) = value.as_object() {
-            tag == tag_name
+        // Fast path: avoid refcount manipulation. The caller holds the value.
+        if value_tag == 2 {
+            // TAG_NIL
+            return if tag_name == "Nil" { 1 } else { 0 };
+        }
+        if value_tag != 6 {
+            return 0; // not an object → no ADT match
+        }
+        let ptr = value_payload as *const VMObject;
+        let obj = &*ptr;
+        if let VMObject::AdtValue { tag, .. } = obj {
+            if tag == tag_name { 1 } else { 0 }
         } else {
-            false
-        };
-
-        if matches { 1 } else { 0 }
+            0
+        }
     }
 }
 
