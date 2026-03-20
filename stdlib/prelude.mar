@@ -150,6 +150,9 @@
 (declare struct-get (-> FFIStruct String a))
 (declare struct-set (-> FFIStruct String a Unit))
 (declare struct-bytes (-> FFIStruct Bytes))
+(declare md5 (-> Bytes Bytes))
+(declare sha256 (-> Bytes Bytes))
+(declare hmac-sha256 (-> Bytes Bytes Bytes))
 
 ; Bytes
 (declare bytes-new (-> Int Bytes))

@@ -1505,6 +1505,49 @@ fn register_ffi_builtins(vm: &mut VM, builtin: RegisterFn) {
         Ok(Value::object(VMObject::FfiStruct(Box::new(s))))
     });
 
+    // --- Crypto builtins (portable, no FFI) ---
+
+    // md5: (md5 data) → Bytes (16-byte digest)
+    builtin(vm, "md5", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("md5 expects one argument"));
+        }
+        let data = args[0]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("md5: argument must be Bytes"))?;
+        use md5::{Digest, Md5};
+        let result = Md5::digest(data);
+        Ok(Value::bytes(result.to_vec()))
+    });
+
+    // sha256: (sha256 data) → Bytes (32-byte digest)
+    builtin(vm, "sha256", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("sha256 expects one argument"));
+        }
+        let data = args[0]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("sha256: argument must be Bytes"))?;
+        let digest = ring::digest::digest(&ring::digest::SHA256, data);
+        Ok(Value::bytes(digest.as_ref().to_vec()))
+    });
+
+    // hmac-sha256: (hmac-sha256 key data) → Bytes (32-byte tag)
+    builtin(vm, "hmac-sha256", |_vm, args| {
+        if args.len() != 2 {
+            return Err(VMError::runtime("hmac-sha256 expects two arguments"));
+        }
+        let key = args[0]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("hmac-sha256: first argument must be Bytes"))?;
+        let data = args[1]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("hmac-sha256: second argument must be Bytes"))?;
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key);
+        let tag = ring::hmac::sign(&key, data);
+        Ok(Value::bytes(tag.as_ref().to_vec()))
+    });
+
     // struct-bytes: (struct-bytes s) → Bytes
     // Returns the raw buffer of an FFI struct as an immutable Bytes value.
     builtin(vm, "struct-bytes", |_vm, args| {

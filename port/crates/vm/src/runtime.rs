@@ -151,6 +151,7 @@ struct TcpSocketState {
     write_handle: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
     recv_queue: VecDeque<Vec<u8>>,
     waiting_recv: Option<(FiberId, Value)>, // (pid, continuation)
+    waiting_recv_bytes: bool,               // true if waiting recv wants Bytes, false for String
     closed: bool,
 }
 
@@ -380,7 +381,9 @@ const HANDLED_EFFECTS: &[&str] = &[
     "tcp-listen",
     "tcp-accept",
     "tcp-send",
+    "tcp-send-bytes",
     "tcp-recv",
+    "tcp-recv-bytes",
     "tcp-close",
     "tcp-close-listener",
     // Layer 5: HTTP
@@ -1434,6 +1437,124 @@ fn handle_effect(
                 ));
             } else {
                 // Socket not in any ownership map — treat as closed
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: make_none(),
+                    pid: sched.current_pid,
+                });
+            }
+        }
+
+        "tcp-send-bytes" => {
+            let socket_id = args
+                .first()
+                .and_then(|v| match v.as_object() {
+                    Some(VMObject::Port(id)) => Some(*id),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    VMError::runtime("tcp-send-bytes: first argument must be a socket")
+                })?;
+            let data = args
+                .get(1)
+                .and_then(|v| v.as_bytes())
+                .ok_or_else(|| VMError::runtime("tcp-send-bytes: second argument must be Bytes"))?
+                .to_vec();
+
+            let owner = {
+                let owners = shared.tcp_socket_owners.lock().unwrap();
+                owners.get(&socket_id).copied()
+            };
+
+            if owner == Some(sched.id) {
+                if let Some(socket_state) = sched.tcp_sockets.get(&socket_id) {
+                    if socket_state.closed {
+                        sched.ready_queue.push_back(Fiber::Suspended {
+                            continuation: cont,
+                            resume_value: make_err("tcp-send-bytes: socket is closed"),
+                            pid: sched.current_pid,
+                        });
+                        return Ok(());
+                    }
+                    let write_handle = socket_state.write_handle.clone();
+                    let sender = shared.scheduler_senders[sched.id].clone();
+                    let pid = sched.current_pid;
+                    sched.io_parked.insert(pid, cont);
+                    shared.pending_io.fetch_add(1, Ordering::AcqRel);
+                    shared.tokio_handle.spawn(async move {
+                        let mut wh = write_handle.lock().await;
+                        let result = match wh.write_all(&data).await {
+                            Ok(_) => Ok(make_ok(Value::nil())),
+                            Err(e) => Ok(make_err(&format!("tcp-send-bytes: {}", e))),
+                        };
+                        let _ = sender.send(SchedulerMessage::IoComplete { pid, result });
+                    });
+                } else {
+                    sched.ready_queue.push_back(Fiber::Suspended {
+                        continuation: cont,
+                        resume_value: make_err("tcp-send-bytes: unknown socket"),
+                        pid: sched.current_pid,
+                    });
+                }
+            } else {
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: make_err("tcp-send-bytes: socket not local"),
+                    pid: sched.current_pid,
+                });
+            }
+        }
+
+        "tcp-recv-bytes" => {
+            let socket_id = args
+                .first()
+                .and_then(|v| match v.as_object() {
+                    Some(VMObject::Port(id)) => Some(*id),
+                    _ => None,
+                })
+                .ok_or_else(|| VMError::runtime("tcp-recv-bytes: argument must be a socket"))?;
+
+            let owner = {
+                let owners = shared.tcp_socket_owners.lock().unwrap();
+                owners.get(&socket_id).copied()
+            };
+
+            if owner == Some(sched.id) {
+                if let Some(socket_state) = sched.tcp_sockets.get_mut(&socket_id) {
+                    if let Some(data) = socket_state.recv_queue.pop_front() {
+                        sched.ready_queue.push_back(Fiber::Suspended {
+                            continuation: cont,
+                            resume_value: make_some(Value::bytes(data)),
+                            pid: sched.current_pid,
+                        });
+                    } else if socket_state.closed {
+                        sched.ready_queue.push_back(Fiber::Suspended {
+                            continuation: cont,
+                            resume_value: make_none(),
+                            pid: sched.current_pid,
+                        });
+                    } else {
+                        socket_state.waiting_recv_bytes = true;
+                        socket_state.waiting_recv = Some((sched.current_pid, cont));
+                    }
+                } else {
+                    sched.ready_queue.push_back(Fiber::Suspended {
+                        continuation: cont,
+                        resume_value: make_none(),
+                        pid: sched.current_pid,
+                    });
+                }
+            } else if let Some(target_sched) = owner {
+                sched.io_parked.insert(sched.current_pid, cont);
+                let _ = shared.scheduler_senders[target_sched].send(SchedulerMessage::TcpOp(
+                    TcpOp::Recv {
+                        socket_id,
+                        fiber_pid: sched.current_pid,
+                        reply_scheduler: sched.id,
+                        continuation: Value::nil(),
+                    },
+                ));
+            } else {
                 sched.ready_queue.push_back(Fiber::Suspended {
                     continuation: cont,
                     resume_value: make_none(),
@@ -2944,10 +3065,17 @@ fn tcp_handle_data(sched: &mut PerScheduler, socket_id: u64, data: Vec<u8>) {
     if let Some(socket_state) = sched.tcp_sockets.get_mut(&socket_id) {
         if let Some((wait_pid, wait_cont)) = socket_state.waiting_recv.take() {
             // Fiber is waiting — deliver immediately, wrapped in Some
-            let s = String::from_utf8_lossy(&data).into_owned();
+            let want_bytes = socket_state.waiting_recv_bytes;
+            socket_state.waiting_recv_bytes = false;
+            let resume_value = if want_bytes {
+                make_some(Value::bytes(data))
+            } else {
+                let s = String::from_utf8_lossy(&data).into_owned();
+                make_some(Value::string(&*s))
+            };
             sched.ready_queue.push_back(Fiber::Suspended {
                 continuation: wait_cont,
-                resume_value: make_some(Value::string(&*s)),
+                resume_value,
                 pid: wait_pid,
             });
         } else {
@@ -2994,6 +3122,7 @@ fn tcp_handle_accepted(
             write_handle,
             recv_queue: VecDeque::new(),
             waiting_recv: None,
+            waiting_recv_bytes: false,
             closed: false,
         },
     );

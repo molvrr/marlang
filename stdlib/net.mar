@@ -50,7 +50,9 @@
   (tcp-listen  (-> Int (Result String TcpListener)))
   (tcp-accept  (-> TcpListener (Option TcpSocket)))
   (tcp-send    (-> TcpSocket String (Result String Unit)))
+  (tcp-send-bytes (-> TcpSocket Bytes (Result String Unit)))
   (tcp-recv    (-> TcpSocket (Option String)))
+  (tcp-recv-bytes (-> TcpSocket (Option Bytes)))
   (tcp-close   (-> TcpSocket Unit))
   (tcp-close-listener (-> TcpListener Unit)))
 
@@ -111,6 +113,18 @@
 ; Receive data from a TCP socket (blocks until data arrives).
 ; Returns None on EOF or remote close.
 (define recv (lambda (sock) (perform tcp-recv sock)))
+
+; send-bytes : (-> TcpSocket Bytes {Tcp} (Result String Unit))
+; Send raw bytes over a TCP socket.
+(define send-bytes (lambda (sock data) (perform tcp-send-bytes sock data)))
+
+; send-bytes! : throwing variant.
+(define send-bytes! (lambda (sock data)
+  (unwrap-or-throw (send-bytes sock data) "tcp-send-bytes")))
+
+; recv-bytes : (-> TcpSocket {Tcp} (Option Bytes))
+; Receive raw bytes from a TCP socket.
+(define recv-bytes (lambda (sock) (perform tcp-recv-bytes sock)))
 
 ; close : (-> TcpSocket {Tcp} Unit)
 ; Close a TCP socket.

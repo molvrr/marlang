@@ -446,8 +446,11 @@
 ; =========================================================================
 ; Live Updates — WebSocket + morphdom
 ;
-; Live sources are reactive cells that auto-push HTML fragments to all
-; connected WebSocket clients when their value changes.
+; Architecture:
+;   SourceActor  — one per live source (value + render + subscribers)
+;   RouterActor  — global registry of sources + connection lifecycle
+;   ConnectionActor — one per WebSocket client (live pushes + navigation)
+;   WS Reader    — fiber per client, forwards WebSocket messages to actor
 ;
 ; Usage:
 ;   (define counter (w/live "counter-val" 0 (lambda (n) (show n))))
@@ -455,12 +458,24 @@
 ;   (w/run-live! 3000 routes)
 ; =========================================================================
 
-; --- ConnectionActor messages ---
+; --- Message types ---
 
 (data ConnMsg
-  (ConnUpdate String String)    ; target-id, html-fragment
-  (ConnWsText String)           ; text message from WebSocket client
-  (ConnWsClosed))               ; WebSocket closed
+  (ConnUpdate String String)    ; target-id, html-fragment (from SourceActor)
+  (ConnWsText String)           ; text from WebSocket client (from ws-reader)
+  (ConnWsClosed))               ; WebSocket closed (from ws-reader)
+
+(data SourceMsg
+  SourceNotify                  ; re-render current value and broadcast to subscribers
+  (SourceSubscribe Pid)         ; subscribe a ConnectionActor (gets HTML updates)
+  (SourceUnsubscribe Pid)       ; unsubscribe a ConnectionActor
+  (SourceWatch Pid)             ; subscribe a watcher (gets raw change pings)
+  (SourceUnwatch Pid))          ; unsubscribe a watcher
+
+(data RouterMsg
+  (RouterRegister Pid)          ; register a new SourceActor
+  (RouterConnect Pid)           ; new ConnectionActor joined
+  (RouterDisconnect Pid))       ; ConnectionActor left
 
 ; --- Helpers ---
 
@@ -472,51 +487,108 @@
         (remove-sub target rest)
         (Cons s (remove-sub target rest)))))))
 
-(define broadcast-live (lambda (pids target-id frag-html)
-  (match pids
+(define notify-subscribers (lambda (subscribers target-id frag-html)
+  (match subscribers
+    (Nil nil)
+    ((Cons conn-pid rest)
+      (begin
+        (actor/send conn-pid (ConnUpdate target-id frag-html))
+        (notify-subscribers rest target-id frag-html))))))
+
+(define subscribe-to-sources (lambda (sources conn-pid)
+  (match sources
+    (Nil nil)
+    ((Cons source-pid rest)
+      (begin
+        (actor/send source-pid (SourceSubscribe conn-pid))
+        (subscribe-to-sources rest conn-pid))))))
+
+(define unsubscribe-from-sources (lambda (sources conn-pid)
+  (match sources
+    (Nil nil)
+    ((Cons source-pid rest)
+      (begin
+        (actor/send source-pid (SourceUnsubscribe conn-pid))
+        (unsubscribe-from-sources rest conn-pid))))))
+
+; --- SourceActor ---
+; One per live source. Manages subscribers and watchers. The value itself
+; lives in a separate cell actor — this avoids mailbox interference when
+; live-update is called from inside a ConnectionActor.
+
+(define notify-watchers (lambda (watchers)
+  (match watchers
     (Nil nil)
     ((Cons pid rest)
       (begin
-        (actor/send pid (ConnUpdate target-id frag-html))
-        (broadcast-live rest target-id frag-html))))))
+        (actor/send pid nil)
+        (notify-watchers rest))))))
 
-; --- Global registry of live sources (type-erased via closures) ---
-; Each entry is (Pair subscribe-fn unsubscribe-fn) where both take a Pid.
+(define source-loop (lambda (val-cell render-fn target-id subscribers watchers)
+  (let ((msg (actor/receive)))
+    (match msg
+      (SourceNotify
+        (let ((current (cell-get val-cell)))
+          (begin
+            (notify-subscribers subscribers target-id (render-fn current))
+            (notify-watchers watchers)
+            (source-loop val-cell render-fn target-id subscribers watchers))))
+      ((SourceSubscribe conn-pid)
+        (let ((current (cell-get val-cell)))
+          (begin
+            (actor/send conn-pid (ConnUpdate target-id (render-fn current)))
+            (source-loop val-cell render-fn target-id (Cons conn-pid subscribers) watchers))))
+      ((SourceUnsubscribe conn-pid)
+        (source-loop val-cell render-fn target-id (remove-sub conn-pid subscribers) watchers))
+      ((SourceWatch watcher-pid)
+        (source-loop val-cell render-fn target-id subscribers (Cons watcher-pid watchers)))
+      ((SourceUnwatch watcher-pid)
+        (source-loop val-cell render-fn target-id subscribers (remove-sub watcher-pid watchers)))))))
 
-(define __live-sources (cell-new (list)))
+; --- RouterActor ---
+; Global singleton. Manages source registry and connection lifecycle.
+
+(define router-loop (lambda (sources)
+  (let ((msg (actor/receive)))
+    (match msg
+      ((RouterRegister source-pid)
+        (router-loop (Cons source-pid sources)))
+      ((RouterConnect conn-pid)
+        (begin
+          (subscribe-to-sources sources conn-pid)
+          (router-loop sources)))
+      ((RouterDisconnect conn-pid)
+        (begin
+          (unsubscribe-from-sources sources conn-pid)
+          (router-loop sources)))))))
+
+(define __router (conc/spawn (lambda () (router-loop (list)))))
+
+; --- Auto-generated IDs ---
+
+(define __live-id-counter (cell-new 0))
+(define __gen-live-id (lambda ()
+  (let ((n (cell-update __live-id-counter (lambda (n) (+ n 1)))))
+    (string-append "__live_" (show n)))))
 
 ; --- LiveHandle: typed handle returned to the user ---
 
 (data (LiveHandle a)
   (MkLiveHandle Pid Pid String (-> a String)))
-; Fields: value-cell, subs-cell, target-id, render-fn
+; Fields: val-cell, source-pid, target-id, render-fn
 
 ; --- Public API ---
 
-; live : create a live source and register it globally.
-; target-id is the DOM element id to patch. render-fn converts the value to HTML.
-; Returns a typed LiveHandle for use with live-get / live-update / live-set.
-(define live (lambda (target-id initial render-fn)
-  (let ((val-cell (cell-new initial))
-        (subs-cell (cell-new (list))))
-    (let ((sub-fn
-            (lambda (conn-pid)
-              (begin
-                ; Add to subscribers first (ensures we catch concurrent updates)
-                (cell-update subs-cell (lambda (pids) (Cons conn-pid pids)))
-                ; Send current rendered state to new subscriber
-                (let ((current (cell-get val-cell)))
-                  (let ((frag-html (render-fn current)))
-                    (begin (actor/send conn-pid (ConnUpdate target-id frag-html)) nil))))))
-          (unsub-fn
-            (lambda (conn-pid)
-              (begin
-                (cell-update subs-cell (lambda (pids) (remove-sub conn-pid pids)))
-                nil))))
-      (begin
-        (cell-update __live-sources (lambda (sources)
-          (Cons (MkPair sub-fn unsub-fn) sources)))
-        (MkLiveHandle val-cell subs-cell target-id render-fn))))))
+; live : create a live source and register it with the router.
+; render-fn converts the value to an HTML fragment string.
+; Returns a typed LiveHandle for use with live-get / live-update / live-set / live-el.
+(define live (lambda (initial render-fn)
+  (let ((target-id (__gen-live-id))
+        (val-cell (cell-new initial))
+        (source-pid (conc/spawn (lambda () (source-loop val-cell render-fn target-id (list) (list))))))
+    (begin
+      (actor/send __router (RouterRegister source-pid))
+      (MkLiveHandle val-cell source-pid target-id render-fn)))))
 
 ; live-get : read the current value of a live source.
 (define live-get (lambda (handle)
@@ -528,18 +600,83 @@
 ; Returns the new value.
 (define live-update (lambda (handle fn)
   (match handle
-    ((MkLiveHandle val-cell subs-cell target-id render-fn)
+    ((MkLiveHandle val-cell source-pid _ _)
       (let ((new-val (cell-update val-cell fn)))
-        (let ((frag-html (render-fn new-val)))
-          (let ((pids (cell-get subs-cell)))
-            (begin
-              (broadcast-live pids target-id frag-html)
-              new-val))))))))
+        (begin
+          (actor/send source-pid SourceNotify)
+          new-val))))))
 
 ; live-set : set the value directly and push to all subscribers.
 ; Returns the new value.
 (define live-set (lambda (handle val)
   (live-update handle (lambda (_) val))))
+
+; live-el : render a live source as an HTML element.
+; The element gets an auto-generated id so the framework can patch it via WebSocket.
+;   (w/live-el "div" counter (list (MkPair "class" "big")))
+;   (w/live-el "span" doubled (list))
+(define live-el (lambda (tag handle attrs)
+  (match handle
+    ((MkLiveHandle val-cell _ target-id render-fn)
+      (let ((current (cell-get val-cell)))
+        (el tag (Cons (MkPair "id" target-id) attrs) (render-fn current)))))))
+
+; --- Derived live sources (dep protocol) ---
+
+; Extract the source actor PID from a LiveHandle.
+(define __source-pid (lambda (handle)
+  (match handle
+    ((MkLiveHandle _ source-pid _ _) source-pid))))
+
+; Generic dep watcher: waits for pings, recomputes via thunk, updates derived.
+(define __dep-watcher (lambda (compute-fn derived)
+  (begin
+    (actor/receive)
+    (live-set derived (compute-fn))
+    (__dep-watcher compute-fn derived))))
+
+; dep-watcher-1 : watcher fiber for a single-upstream derived source.
+(define dep-watcher-1 (lambda (upstream map-fn derived)
+  (begin
+    (actor/receive)
+    (live-set derived (map-fn (live-get upstream)))
+    (dep-watcher-1 upstream map-fn derived))))
+
+; dep-watcher-2 : watcher fiber for a two-upstream derived source.
+(define dep-watcher-2 (lambda (up1 up2 map-fn derived)
+  (begin
+    (actor/receive)
+    (live-set derived (map-fn (live-get up1) (live-get up2)))
+    (dep-watcher-2 up1 up2 map-fn derived))))
+
+; live-map : create a derived live source from one upstream.
+; When upstream changes, map-fn is applied to its new value and the
+; result is pushed to all subscribers.
+(define live-map (lambda (upstream map-fn render-fn)
+  (let ((derived (live (map-fn (live-get upstream)) render-fn)))
+    (begin
+      (match upstream
+        ((MkLiveHandle _ source-pid _ _)
+          (let ((watcher-pid (conc/spawn (lambda ()
+                  (dep-watcher-1 upstream map-fn derived)))))
+            (actor/send source-pid (SourceWatch watcher-pid)))))
+      derived))))
+
+; live-map2 : create a derived live source from two upstreams.
+; When either upstream changes, map-fn is applied to both current values.
+(define live-map2 (lambda (up1 up2 map-fn render-fn)
+  (let ((derived (live (map-fn (live-get up1) (live-get up2)) render-fn)))
+    (begin
+      (match up1
+        ((MkLiveHandle _ src1 _ _)
+          (match up2
+            ((MkLiveHandle _ src2 _ _)
+              (let ((watcher-pid (conc/spawn (lambda ()
+                      (dep-watcher-2 up1 up2 map-fn derived)))))
+                (begin
+                  (actor/send src1 (SourceWatch watcher-pid))
+                  (actor/send src2 (SourceWatch watcher-pid))))))))
+      derived))))
 
 ; --- Client JS: morphdom + WebSocket + navigation ---
 
@@ -605,7 +742,7 @@
     (script (list) live-client-js))))
 
 ; --- ConnectionActor ---
-; One per WebSocket client. Receives live updates from sources and
+; One per WebSocket client. Receives live updates from SourceActors and
 ; WebSocket messages from the reader fiber. Handles navigation.
 
 (define split-first-line (lambda (s)
@@ -654,11 +791,9 @@
                     (handle
                       (let ((response (run-handler "POST" clean-path params query-params form-params hdrs handler)))
                         (match response
-                          ; Non-empty HTML → navigate to it
                           ((HtmlResponse content)
                             (if (string-is-empty content) nil
                               (send-nav ws-conn post-path content)))
-                          ; Redirect → navigate to the target
                           ((RedirectResponse url) (handle-ws-nav ws-conn url routes))
                           ((TextResponse _ _ _) nil)))
                       ((throw err-msg k) ->
@@ -666,6 +801,8 @@
                   (None nil)))))))))))
 
 ; The ConnectionActor main loop.
+; POST/navigation handlers are spawned in separate fibers so their
+; cell operations (actor/receive) don't conflict with ConnUpdate messages.
 (define conn-loop (lambda (ws-conn routes)
   (let ((msg (actor/receive)))
     (match msg
@@ -675,17 +812,19 @@
           (conn-loop ws-conn routes)))
       ((ConnWsText ws-text)
         (begin
-          (if (string-starts-with ws-text "POST ")
-            (handle-ws-post ws-conn (string-substring ws-text 5 (string-length ws-text)) routes)
-            (if (string-starts-with ws-text "/")
-              (handle-ws-nav ws-conn ws-text routes)
-              nil))
+          (conc/spawn (lambda ()
+            (handle
+              (if (string-starts-with ws-text "POST ")
+                (handle-ws-post ws-conn (string-substring ws-text 5 (string-length ws-text)) routes)
+                (if (string-starts-with ws-text "/")
+                  (handle-ws-nav ws-conn ws-text routes)
+                  nil))
+              ((throw msg k) -> nil))))
           (conn-loop ws-conn routes)))
       ((ConnWsClosed)
         nil)))))
 
 ; --- WebSocket reader fiber ---
-; Reads from WebSocket and forwards messages to the ConnectionActor.
 
 (define ws-reader (lambda (ws-conn conn-pid)
   (match (ws/recv ws-conn)
@@ -697,42 +836,18 @@
     ((Some (WsBinary _))
       (ws-reader ws-conn conn-pid)))))
 
-; --- Subscription management ---
-
-(define subscribe-each (lambda (sources conn-pid)
-  (match sources
-    (Nil nil)
-    ((Cons (MkPair sub-fn _) rest)
-      (begin (sub-fn conn-pid) (subscribe-each rest conn-pid))))))
-
-(define unsubscribe-each (lambda (sources conn-pid)
-  (match sources
-    (Nil nil)
-    ((Cons (MkPair _ unsub-fn) rest)
-      (begin (unsub-fn conn-pid) (unsubscribe-each rest conn-pid))))))
-
-(define subscribe-all-live (lambda (conn-pid)
-  (let ((sources (cell-get __live-sources)))
-    (subscribe-each sources conn-pid))))
-
-(define unsubscribe-all-live (lambda (conn-pid)
-  (let ((sources (cell-get __live-sources)))
-    (unsubscribe-each sources conn-pid))))
-
 ; --- Per-client lifecycle ---
 
 (define handle-live-client (lambda (ws-conn routes)
   (let ((conn-pid (conc/spawn (lambda () (conn-loop ws-conn routes)))))
     (begin
-      (subscribe-all-live conn-pid)
+      (actor/send __router (RouterConnect conn-pid))
       (ws-reader ws-conn conn-pid)
       ; WebSocket closed — ws-reader sent ConnWsClosed to actor.
-      ; Clean up subscriptions.
-      (unsubscribe-all-live conn-pid)))))
+      (actor/send __router (RouterDisconnect conn-pid))))))
 
 ; --- Server with live update support ---
 
-; Accept loop with WebSocket upgrade + navigation.
 (define accept-loop-live (lambda (server routes)
   (match (http/accept server)
     (None nil)
@@ -754,8 +869,6 @@
         (accept-loop-live server routes))))))
 
 ; run-live! : start server with WebSocket live updates and navigation.
-; WebSocket clients get a ConnectionActor that handles live pushes,
-; GET navigation, and POST form submissions — all over WebSocket.
 (define run-live! (lambda (port routes)
   (let ((server (serve! port)))
     (begin

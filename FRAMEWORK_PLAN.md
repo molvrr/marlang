@@ -18,12 +18,13 @@ These are runtime capabilities the framework needs that must be built first:
 
 | Gap | Needed for | Difficulty |
 |-----|-----------|------------|
-| **Database driver** | Persistent state, dep system | Hard — FFI to libpq or pure-Marlang postgres wire protocol |
 | **File watching** | Live reload | Medium — FFI to notify/kqueue |
 | **JavaScript target** | Client-side components | Medium — `emit-js` macro compiles Marlang S-expressions to JS strings at expansion time (no Rust backend needed, proven working) |
 
 **Resolved:**
-- ~~Crypto (HMAC-SHA256)~~ — `stdlib/crypto.mar` via FFI to CommonCrypto (macOS)
+- ~~Database driver~~ — `stdlib/pg.mar`, pure Marlang PostgreSQL wire protocol over TCP
+- ~~Crypto~~ — `md5`, `sha256`, `hmac-sha256` builtins (ring + md-5 crates), `stdlib/crypto.mar` for hex encoding
+- ~~Binary TCP~~ — `tcp-send-bytes` / `tcp-recv-bytes` for binary protocol support
 
 The framework is designed in phases. Phase 1 works with what exists today. Later phases add capabilities as runtime gaps are filled.
 
@@ -242,17 +243,9 @@ The `combined` form composes deps sequentially:
 
 ---
 
-## Phase 3: Database Integration
+## Phase 3: Database Integration ✅
 
-**Requires: Database driver (FFI or wire protocol)**
-
-### Approach A: FFI to libpq
-
-Use Marlang's existing FFI system to call libpq.
-
-### Approach B: Pure Marlang postgres wire protocol
-
-Implement the Postgres wire protocol over TCP. More work, but no FFI dependency.
+Implemented as a pure Marlang PostgreSQL client (`stdlib/pg.mar`) using the wire protocol over TCP. No Rust dependencies — just TCP + crypto builtins.
 
 ### DB effect
 
@@ -416,16 +409,25 @@ AppActor
 - [x] Navigation over WebSocket — link clicks intercepted by event delegation, rendered server-side, morphdom patches entire body, pushState for history
 - [x] POST over WebSocket — forms/actions sent over WS, redirect responses trigger navigation
 - [x] `ConnMsg` ADT — `ConnUpdate`, `ConnWsText`, `ConnWsClosed` message protocol
-- [ ] SourceActor — subscription fan-out with ref counting
-- [ ] RouterActor — source registry, connection lifecycle
-- [ ] Dep protocol — fetch, subscribe, combined
-- [ ] Batching — defer flush to end of actor turn
+- [x] SourceActor — one per live source, holds value + render + subscribers, atomic update + notify
+- [x] RouterActor — global singleton, manages source registry + connection lifecycle (subscribe/unsubscribe all sources on connect/disconnect)
+- [x] Batching — natural message queueing: ConnUpdate messages queue in actor mailbox during handler execution, processed sequentially after
+- [x] Dep protocol — `live-map` (derive from one upstream), `live-map2` (derive from two), watcher fibers with `SourceWatch`/`SourceUnwatch`
 
-### Phase 3 — Database (requires new runtime: DB driver)
-- [ ] DB effect — query, execute
+### Phase 3 — Database ✅
+- [x] PostgreSQL wire protocol client — pure Marlang over TCP, `stdlib/pg.mar`
+- [x] Parameterized queries — `$1`, `$2`, etc. via extended query protocol
+- [x] Buffered binary TCP reads — `tcp-send-bytes` / `tcp-recv-bytes` runtime support
+- [x] Authentication — trust, cleartext password, MD5
+- [x] Typed param serializers — `pg/text`, `pg/int`, `pg/float`, `pg/bool`
+- [x] Typed row deserializers — `col`/`col!`, `col-int`/`as-int`, `col-float`/`as-float`, `col-bool`/`as-bool`
+- [x] Convenience helpers — `each`, `map-rows`, `scalar`, `scalar!`
+- [x] Crypto builtins — `md5`, `sha256`, `hmac-sha256` (ring + md-5 crates, portable)
+- [x] VM global cache fix — replaced dangling pointer keys with string keys
 - [ ] Connection pooling
-- [ ] DB-backed deps — `db-row`, `db-table`, `db-query`
+- [ ] DB-backed live deps — `db-row`, `db-table` as live sources
 - [ ] LISTEN/NOTIFY integration for live dep updates
+- [ ] SCRAM-SHA-256 authentication
 
 ### Phase 4 — Client Components (extends `emit-js` macro)
 - [x] `emit-js` macro — compiles Marlang to JS strings at expansion time (literals, lambda, let, if, begin, define, match, ADTs, operators)
@@ -446,13 +448,13 @@ AppActor
 
 1. **Macro hygiene and types** — Should common type names (`Int`, `String`, `Bool`, `Unit`, `List`, etc.) and `__effect_row` be added to the hygiene immune set? This is a one-line compiler change that would let macros generate type annotations freely. Without it, macros must receive type expressions from the call site.
 
-2. **Database driver strategy** — FFI to libpq is fast to build. A pure Marlang postgres wire protocol over TCP is more portable and educational. Start with FFI?
+2. ~~Database driver strategy~~ — Resolved: pure Marlang wire protocol over TCP (`stdlib/pg.mar`).
 
 3. **State management** — Actors work but are verbose. Should there be a simpler `(define-state name initial-value)` macro that generates get/set message handlers?
 
 4. **Template escaping** — The HTML DSL must escape user content to prevent XSS. Where is the boundary? All `text` calls auto-escape; `raw` for trusted HTML. ✅ Implemented.
 
-5. **Session handling** — Cookie-based sessions are simplest. Need a signed cookie (HMAC) to prevent forgery. This requires the crypto capability from Phase 3+.
+5. **Session handling** — Cookie-based sessions are simplest. Need a signed cookie (HMAC) to prevent forgery. Crypto builtins (`hmac-sha256`) are now available.
 
 6. **CSS** — Out of scope for the framework. Serve static CSS files. Consider Tailwind-like utility classes as a convention.
 

@@ -1,0 +1,557 @@
+; Database module — PostgreSQL client via wire protocol over TCP
+;
+; Pure Marlang implementation of the PostgreSQL v3 wire protocol.
+; No Rust dependencies — just TCP + crypto.
+;
+; Usage:
+;   (import "std:db" as db)
+;
+;   (let ((conn (db/connect! "127.0.0.1" 5432 "mydb" "myuser" "mypass")))
+;     (let ((rows (db/query! conn "SELECT id, name FROM users WHERE age > $1" (list "18"))))
+;       (begin
+;         (db/each rows (lambda (row)
+;           (io/println (string-append (db/col! row "name") " (id=" (db/col! row "id") ")"))))
+;         (db/close conn))))
+
+(import "std:net" as net)
+(import "std:io" as io)
+(import "std:crypto" as crypto)
+(import "std:concurrent" as conc)
+(import "std:actor" as actor)
+
+; md5, sha256, hmac-sha256 are builtins (declared in prelude).
+; crypto module provides hex encoding.
+
+; --- Minimal buffer cell (avoids depending on std:web) ---
+
+(data BufMsg (BufGet Pid) (BufSet Pid))
+
+(define __buf-loop (lambda (value)
+  (let ((msg (actor/receive)))
+    (match msg
+      ((BufGet sender) (begin (actor/send sender value) (__buf-loop value)))
+      ((BufSet sender)
+        (let ((new-val (actor/receive)))
+          (begin (actor/send sender new-val) (__buf-loop new-val))))))))
+
+(define buf-new (lambda (initial)
+  (conc/spawn (lambda () (__buf-loop initial)))))
+
+(define buf-get (lambda (buf)
+  (actor/send buf (BufGet (conc/self)))
+  (actor/receive)))
+
+(define buf-set (lambda (buf val)
+  (actor/send buf (BufSet (conc/self)))
+  (actor/send buf val)
+  (actor/receive)))
+
+; =========================================================================
+; Byte buffer helpers — big-endian encoding for the Postgres wire protocol
+; =========================================================================
+
+; Build a Bytes from a list of individual bytes.
+(define buf-from (lambda (byte-list) (bytes-from-list byte-list)))
+
+; Encode a 32-bit big-endian integer as 4 bytes.
+(define int32-be (lambda (n)
+  (list (rem (/ n 16777216) 256)
+        (rem (/ n 65536) 256)
+        (rem (/ n 256) 256)
+        (rem n 256))))
+
+; Encode a 16-bit big-endian integer as 2 bytes.
+(define int16-be (lambda (n)
+  (list (rem (/ n 256) 256) (rem n 256))))
+
+; Encode a string as bytes with a null terminator.
+(define cstring (lambda (s)
+  (append (bytes-to-list (bytes-from-string s)) (list 0))))
+
+; Read a 32-bit big-endian integer from bytes at offset.
+(define read-int32 (lambda (data offset)
+  (+ (* (bytes-get data offset) 16777216)
+     (+ (* (bytes-get data (+ offset 1)) 65536)
+        (+ (* (bytes-get data (+ offset 2)) 256)
+           (bytes-get data (+ offset 3)))))))
+
+; Read a 16-bit big-endian integer from bytes at offset.
+(define read-int16 (lambda (data offset)
+  (+ (* (bytes-get data offset) 256)
+     (bytes-get data (+ offset 1)))))
+
+; Read a null-terminated string from bytes at offset.
+; Returns (MkPair string next-offset).
+(define read-cstring (lambda (data offset)
+  (define loop (lambda (i acc)
+    (let ((b (bytes-get data i)))
+      (if (= b 0)
+        (MkPair (match (bytes-to-string (bytes-from-list acc))
+                  ((Ok s) s) ((Err _) "")) (+ i 1))
+        (loop (+ i 1) (append acc (list b)))))))
+  (loop offset (list))))
+
+; Length of a list.
+(define list-length (lambda (lst)
+  (match lst (Nil 0) ((Cons _ rest) (+ 1 (list-length rest))))))
+
+; =========================================================================
+; Protocol message builders
+; =========================================================================
+
+; Startup message (no type byte): length(4) + protocol(4) + params + \0
+(define build-startup (lambda (database user)
+  (let ((params (append
+          (cstring "user") (append (cstring user)
+          (append (cstring "database") (append (cstring database)
+          (list 0)))))))
+    (let ((len (+ 4 4 (list-length params))))
+      (bytes-from-list (append (int32-be len) (append (int32-be 196608) params)))))))
+
+; Query message: 'Q'(1) + length(4) + query-cstring
+(define build-query (lambda (sql)
+  (let ((q (cstring sql)))
+    (let ((len (+ 4 (list-length q))))
+      (bytes-from-list (append (list 81) (append (int32-be len) q)))))))
+
+; Password message: 'p'(1) + length(4) + password-cstring
+(define build-password (lambda (password)
+  (let ((p (cstring password)))
+    (let ((len (+ 4 (list-length p))))
+      (bytes-from-list (append (list 112) (append (int32-be len) p)))))))
+
+; MD5 password message: md5(md5(password + user) + salt)
+(define build-md5-password (lambda (user password salt)
+  (let ((inner (crypto/hex (md5
+          (bytes-from-string (string-append password user))))))
+    (let ((outer (string-append "md5" (crypto/hex (md5
+            (bytes-concat (bytes-from-string inner) salt))))))
+      (build-password outer)))))
+
+(define build-zero-oids (lambda (n)
+  (if (= n 0) (list)
+    (append (int32-be 0) (build-zero-oids (- n 1))))))
+
+; Parse message: 'P'(1) + length(4) + stmt-name-cstring + query-cstring + int16(nparams) + param-oids
+(define build-parse (lambda (sql n-params)
+  (let ((stmt (cstring ""))
+        (q (cstring sql))
+        (params (append (int16-be n-params) (build-zero-oids n-params))))
+    (let ((body (append stmt (append q params))))
+      (let ((len (+ 4 (list-length body))))
+        (bytes-from-list (append (list 80) (append (int32-be len) body))))))))
+
+(define build-param-bytes (lambda (params)
+  (match params
+    (Nil (list))
+    ((Cons p rest)
+      (let ((pb (bytes-from-string p)))
+        (append (int32-be (bytes-length pb))
+                (append (bytes-to-list pb) (build-param-bytes rest))))))))
+
+; Bind message: 'B'(1) + length + portal + stmt + format-codes + params + result-formats
+(define build-bind (lambda (param-values)
+  (let ((portal (cstring ""))
+        (stmt (cstring ""))
+        (n-formats (int16-be 0))
+        (n-params (int16-be (list-length param-values)))
+        (param-bytes (build-param-bytes param-values))
+        (n-result-formats (int16-be 0)))
+    (let ((body (append portal (append stmt (append n-formats
+                  (append n-params (append param-bytes n-result-formats)))))))
+      (let ((len (+ 4 (list-length body))))
+        (bytes-from-list (append (list 66) (append (int32-be len) body))))))))
+
+; Describe message: 'D'(1) + length(4) + 'P' + portal-cstring
+(define build-describe (lambda ()
+  (let ((body (append (list 80) (cstring ""))))
+    (let ((len (+ 4 (list-length body))))
+      (bytes-from-list (append (list 68) (append (int32-be len) body)))))))
+
+; Execute message: 'E'(1) + length(4) + portal-cstring + max-rows(4)
+(define build-execute (lambda ()
+  (let ((body (append (cstring "") (int32-be 0))))
+    (let ((len (+ 4 (list-length body))))
+      (bytes-from-list (append (list 69) (append (int32-be len) body)))))))
+
+; Sync message: 'S'(1) + length(4)
+(define build-sync (lambda ()
+  (bytes-from-list (append (list 83) (int32-be 4)))))
+
+; Terminate message: 'X'(1) + length(4)
+(define build-terminate (lambda ()
+  (bytes-from-list (append (list 88) (int32-be 4)))))
+
+; =========================================================================
+; TCP send/receive helpers
+; =========================================================================
+
+; A PgConn wraps a TCP socket + read buffer cell for exact-byte reads.
+; (MkPair tcp-socket buffer-cell)
+
+(define pg-send (lambda (pg-conn data)
+  (match pg-conn
+    ((MkPair tcp _) (net/send-bytes! tcp data)))))
+
+; Fill the buffer until we have at least n bytes, then split.
+(define pg-recv-fill (lambda (tcp buf-cell buf n)
+  (if (>= (bytes-length buf) n)
+    (begin
+      (buf-set buf-cell (bytes-slice buf n (bytes-length buf)))
+      (bytes-slice buf 0 n))
+    (match (net/recv-bytes tcp)
+      (None (raise "pg: connection closed unexpectedly"))
+      ((Some chunk)
+        (pg-recv-fill tcp buf-cell (bytes-concat buf chunk) n))))))
+
+; Read exactly n bytes from a PgConn (buffered).
+(define pg-recv-exact (lambda (pg-conn n)
+  (match pg-conn
+    ((MkPair tcp buf-cell)
+      (let ((buf (buf-get buf-cell)))
+        (pg-recv-fill tcp buf-cell buf n))))))
+
+; Read one protocol message: type(1) + length(4) + payload.
+; Returns (MkPair type-byte payload-bytes).
+(define recv-message (lambda (pg-conn)
+  (let ((header (pg-recv-exact pg-conn 5)))
+    (let ((msg-type (bytes-get header 0))
+          (msg-len (read-int32 header 1)))
+      (let ((payload (if (> msg-len 4) (pg-recv-exact pg-conn (- msg-len 4)) (bytes-new 0))))
+        (MkPair msg-type payload))))))
+
+; =========================================================================
+; Response parsing
+; =========================================================================
+
+; Parse ErrorResponse ('E') or NoticeResponse ('N') payload.
+; Returns the message string.
+(define parse-error-fields (lambda (data offset)
+  (if (>= offset (bytes-length data)) ""
+    (let ((field-type (bytes-get data offset)))
+      (if (= field-type 0) ""
+        (let ((pair (read-cstring data (+ offset 1))))
+          (match pair
+            ((MkPair value next)
+              ; 'M' = message field
+              (if (= field-type 77) value
+                (parse-error-fields data next))))))))))
+
+; Parse RowDescription ('T') payload.
+; Returns a list of column name strings.
+(define parse-columns (lambda (data offset remaining)
+  (if (= remaining 0) (list)
+    (let ((pair (read-cstring data offset)))
+      (match pair
+        ((MkPair col-name next)
+          ; Skip: table-oid(4) + col-attr(2) + type-oid(4) + type-size(2) + type-mod(4) + format(2) = 18 bytes
+          (Cons col-name (parse-columns data (+ next 18) (- remaining 1)))))))))
+
+(define parse-row-description (lambda (data)
+  (let ((n-fields (read-int16 data 0)))
+    (parse-columns data 2 n-fields))))
+
+; Parse DataRow ('D') payload.
+; Returns a list of (Option String) — one per column.
+(define parse-fields (lambda (data offset remaining)
+  (if (= remaining 0) (list)
+    (let ((field-len (read-int32 data offset)))
+      (if (= field-len (- 0 1))
+        ; NULL value (length = -1, encoded as 0xFFFFFFFF)
+        (Cons None (parse-fields data (+ offset 4) (- remaining 1)))
+        (let ((value-bytes (bytes-slice data (+ offset 4) (+ offset 4 field-len))))
+          (Cons (match (bytes-to-string value-bytes) ((Ok s) (Some s)) ((Err _) None))
+                (parse-fields data (+ offset 4 field-len) (- remaining 1)))))))))
+
+(define parse-data-row (lambda (data)
+  (let ((n-fields (read-int16 data 0)))
+    (parse-fields data 2 n-fields))))
+
+; Parse CommandComplete ('C') tag to extract affected row count.
+; Tags look like "INSERT 0 5", "UPDATE 3", "DELETE 1", "SELECT 10".
+(define parse-last-int (lambda (parts)
+  (match parts
+    (Nil 0)
+    ((Cons s Nil) (match (__try-string->int s) ((Some n) n) (None 0)))
+    ((Cons _ rest) (parse-last-int rest)))))
+
+(define parse-command-tag (lambda (data)
+  (match (read-cstring data 0)
+    ((MkPair tag _)
+      (let ((parts (string-split tag " ")))
+        (parse-last-int parts))))))
+
+; =========================================================================
+; Row type — list of (Pair String (Option String))
+; =========================================================================
+
+; Zip column names with field values to make a row.
+(define make-row (lambda (columns values)
+  (match (MkPair columns values)
+    ((MkPair Nil _) (list))
+    ((MkPair _ Nil) (list))
+    ((MkPair (Cons col cols) (Cons val vals))
+      (Cons (MkPair col val) (make-row cols vals))))))
+
+; =========================================================================
+; Connection + query execution
+; =========================================================================
+
+; Process authentication messages after startup.
+(define handle-auth (lambda (pg-conn user password)
+  (let ((msg (recv-message pg-conn)))
+    (match msg
+      ; 'R' = Authentication
+      ((MkPair 82 payload)
+        (let ((auth-type (read-int32 payload 0)))
+          (if (= auth-type 0)
+            ; AuthenticationOk — keep reading until ReadyForQuery
+            (handle-auth pg-conn user password)
+          (if (= auth-type 3)
+            ; AuthenticationCleartextPassword
+            (begin
+              (pg-send pg-conn (build-password password))
+              (handle-auth pg-conn user password))
+          (if (= auth-type 5)
+            ; AuthenticationMD5Password — salt is 4 bytes after auth-type
+            (let ((salt (bytes-slice payload 4 8)))
+              (begin
+                (pg-send pg-conn (build-md5-password user password salt))
+                (handle-auth pg-conn user password)))
+            (raise (string-append "db: unsupported auth type: " (show auth-type))))))))
+      ; 'E' = ErrorResponse
+      ((MkPair 69 payload)
+        (raise (string-append "db: auth error: " (parse-error-fields payload 0))))
+      ; Other messages during startup (ParameterStatus, BackendKeyData, ReadyForQuery)
+      ((MkPair 90 _) nil)  ; ReadyForQuery — done
+      (_ (handle-auth pg-conn user password))))))
+
+; connect : (-> String Int String String String (Result String TcpConn))
+; Connect to a PostgreSQL database. Returns a TCP connection handle.
+(define connect (lambda (host port database user password)
+  (match (net/connect host port)
+    ((Err msg) (Err (string-append "pg: connect failed: " msg)))
+    ((Ok tcp)
+      (let ((pg-conn (MkPair tcp (buf-new (bytes-new 0)))))
+        (begin
+          (pg-send pg-conn (build-startup database user))
+          (handle (begin (handle-auth pg-conn user password) (Ok pg-conn))
+            ((throw msg k) -> (Err msg)))))))))
+
+; connect! : throwing variant
+(define connect! (lambda (host port database user password)
+  (match (connect host port database user password)
+    ((Ok conn) conn)
+    ((Err msg) (raise msg)))))
+
+; Read messages until ReadyForQuery, collecting rows.
+(define collect-results (lambda (pg-conn columns rows)
+  (let ((msg (recv-message pg-conn)))
+    (match msg
+      ; 'T' = RowDescription
+      ((MkPair 84 payload)
+        (collect-results pg-conn (parse-row-description payload) rows))
+      ; 'D' = DataRow
+      ((MkPair 68 payload)
+        (let ((values (parse-data-row payload)))
+          (collect-results pg-conn columns (append rows (list (make-row columns values))))))
+      ; 'C' = CommandComplete
+      ((MkPair 67 payload)
+        (collect-results pg-conn columns rows))
+      ; 'Z' = ReadyForQuery — done
+      ((MkPair 90 _) rows)
+      ; 'E' = ErrorResponse
+      ((MkPair 69 payload)
+        (raise (string-append "db: query error: " (parse-error-fields payload 0))))
+      ; 'I' = EmptyQueryResponse
+      ((MkPair 73 _) (collect-results pg-conn columns rows))
+      ; Skip other messages (NoticeResponse, etc.)
+      (_ (collect-results pg-conn columns rows))))))
+
+; Read messages until ReadyForQuery, returning affected row count.
+(define collect-execute-result (lambda (pg-conn count)
+  (let ((msg (recv-message pg-conn)))
+    (match msg
+      ; 'C' = CommandComplete
+      ((MkPair 67 payload)
+        (collect-execute-result pg-conn (parse-command-tag payload)))
+      ; 'Z' = ReadyForQuery — done
+      ((MkPair 90 _) count)
+      ; 'E' = ErrorResponse
+      ((MkPair 69 payload)
+        (raise (string-append "db: execute error: " (parse-error-fields payload 0))))
+      ; Skip other messages
+      (_ (collect-execute-result pg-conn count))))))
+
+; Skip ParseComplete and BindComplete, then collect results.
+(define collect-query-results (lambda (conn)
+  (let ((msg (recv-message conn)))
+    (match msg
+      ; '1' = ParseComplete, '2' = BindComplete — skip
+      ((MkPair 49 _) (collect-query-results conn))
+      ((MkPair 50 _) (collect-query-results conn))
+      ; 'T' = RowDescription — start collecting
+      ((MkPair 84 payload)
+        (collect-results conn (parse-row-description payload) (list)))
+      ; 'n' = NoData — query returned no rows (e.g., INSERT)
+      ((MkPair 110 _) (collect-results conn (list) (list)))
+      ; 'E' = ErrorResponse
+      ((MkPair 69 payload)
+        (raise (string-append "pg: query error: " (parse-error-fields payload 0))))
+      ; Other — keep reading
+      (_ (collect-query-results conn))))))
+
+; query : (-> TcpConn String (List String) (Result String (List Row)))
+; Execute a parameterized query. Parameters use $1, $2, etc.
+; Returns rows as (List (List (Pair String (Option String)))).
+(define query (lambda (conn sql params)
+  (handle
+    (if (nil? params)
+      ; Simple query — no parameters
+      (begin
+        (pg-send conn (build-query sql))
+        (Ok (collect-results conn (list) (list))))
+      ; Extended query — parameterized
+      (let ((msg (bytes-concat (build-parse sql (list-length params))
+              (bytes-concat (build-bind params)
+              (bytes-concat (build-describe)
+              (bytes-concat (build-execute)
+                            (build-sync)))))))
+        (begin
+          (pg-send conn msg)
+          ; Skip ParseComplete ('1') and BindComplete ('2')
+          (Ok (collect-query-results conn)))))
+    ((throw msg k) -> (Err msg)))))
+
+; query! : throwing variant
+(define query! (lambda (conn sql params)
+  (match (query conn sql params)
+    ((Ok rows) rows)
+    ((Err msg) (raise msg)))))
+
+; execute : (-> TcpConn String (List String) (Result String Int))
+; Execute a statement (INSERT, UPDATE, DELETE). Returns affected row count.
+(define execute (lambda (conn sql params)
+  (handle
+    (if (nil? params)
+      (begin
+        (pg-send conn (build-query sql))
+        (Ok (collect-execute-result conn 0)))
+      (let ((msg (bytes-concat (build-parse sql (list-length params))
+              (bytes-concat (build-bind params)
+              (bytes-concat (build-execute)
+                            (build-sync))))))
+        (begin
+          (pg-send conn msg)
+          (Ok (collect-execute-result conn 0)))))
+    ((throw msg k) -> (Err msg)))))
+
+; execute! : throwing variant
+(define execute! (lambda (conn sql params)
+  (match (execute conn sql params)
+    ((Ok n) n)
+    ((Err msg) (raise msg)))))
+
+; close : send Terminate message
+(define close (lambda (conn)
+  (begin
+    (pg-send conn (build-terminate))
+    (match conn
+      ((MkPair tcp _) (net/close tcp))))))
+
+; =========================================================================
+; Parameter serializers — convert Marlang values to PG text params
+; =========================================================================
+
+; All return String, so they compose in a (List String).
+;   (list (pg/text "Alice") (pg/int 30) (pg/float 9.5) (pg/bool #t))
+
+(define text (lambda (s) s))
+(define int (lambda (n) (show n)))
+(define float (lambda (f) (number->string f)))
+(define bool (lambda (b) (if b "true" "false")))
+
+; =========================================================================
+; Row accessors — typed column access
+; =========================================================================
+
+; Look up a column value by name. Returns (Option String).
+(define col (lambda (row col-name)
+  (match row
+    (Nil None)
+    ((Cons (MkPair name val) rest)
+      (if (string= name col-name) val
+        (col rest col-name))))))
+
+; col! : throwing variant — raises if column is missing or NULL.
+(define col! (lambda (row col-name)
+  (match (col row col-name)
+    ((Some v) v)
+    (None (raise (string-append "pg: column not found or NULL: " col-name))))))
+
+; --- Typed column accessors (return Option) ---
+
+(define col-int (lambda (row col-name)
+  (match (col row col-name)
+    (None None)
+    ((Some s) (__try-string->int s)))))
+
+(define col-float (lambda (row col-name)
+  (match (col row col-name)
+    (None None)
+    ((Some s) (__try-string->float s)))))
+
+(define col-bool (lambda (row col-name)
+  (match (col row col-name)
+    (None None)
+    ((Some s) (Some (if (string= s "t") #t (string= s "true")))))))
+
+; --- Throwing typed accessors (raise on missing/NULL/parse failure) ---
+
+(define as-text (lambda (row col-name) (col! row col-name)))
+
+(define as-int (lambda (row col-name)
+  (match (col-int row col-name)
+    ((Some n) n)
+    (None (raise (string-append "pg: expected int column: " col-name))))))
+
+(define as-float (lambda (row col-name)
+  (match (col-float row col-name)
+    ((Some f) f)
+    (None (raise (string-append "pg: expected float column: " col-name))))))
+
+(define as-bool (lambda (row col-name)
+  (match (col-bool row col-name)
+    ((Some b) b)
+    (None (raise (string-append "pg: expected bool column: " col-name))))))
+
+; =========================================================================
+; Convenience helpers
+; =========================================================================
+
+; each : iterate over query results with a callback.
+(define each (lambda (rows fn)
+  (match rows
+    (Nil nil)
+    ((Cons row rest) (begin (fn row) (each rest fn))))))
+
+; map-rows : map a function over query results.
+(define map-rows (lambda (rows fn)
+  (match rows
+    (Nil (list))
+    ((Cons row rest) (Cons (fn row) (map-rows rest fn))))))
+
+; scalar : get the first column of the first row.
+(define scalar (lambda (rows)
+  (match rows
+    (Nil None)
+    ((Cons row _)
+      (match row
+        (Nil None)
+        ((Cons (MkPair _ val) _) val))))))
+
+; scalar! : throwing variant.
+(define scalar! (lambda (rows)
+  (match (scalar rows)
+    ((Some v) v)
+    (None (raise "db: no rows returned")))))

@@ -39,10 +39,14 @@
 ; Live sources — auto-push to all WebSocket clients on change
 ; =========================================================================
 
-(define counter (w/live "counter-val" 0
+(define counter (w/live 0
   (lambda (n) (show n))))
 
-(define messages (w/live "msg-list" (list)
+(define doubled (w/live-map counter
+  (lambda (n) (* n 2))
+  (lambda (n) (show n))))
+
+(define messages (w/live (list)
   render-messages))
 
 ; =========================================================================
@@ -103,9 +107,10 @@
         (w/div (list (MkPair "class" "card"))
           (string-append
             (w/h2 (list) "Shared Counter")
-            (w/div (list (MkPair "class" "counter-display")
-                         (MkPair "id" "counter-val"))
-              (show (w/live-get counter)))
+            (w/live-el "div" counter (list (MkPair "class" "counter-display")))
+            (w/p (list (MkPair "style" "text-align:center;color:#666;font-size:0.9rem"))
+              (string-append "doubled: "
+                (w/live-el "span" doubled (list))))
             (w/div (list (MkPair "class" "counter-buttons"))
               (string-append
                 (w/button (list (MkPair "onclick" "post('/api/decrement')")) "-")
@@ -128,8 +133,7 @@
                                (MkPair "placeholder" "Message...")
                                (MkPair "required" "true")))
                 (w/button (list (MkPair "type" "submit")) "Send")))
-            (w/div (list (MkPair "id" "msg-list"))
-              (render-messages (w/live-get messages)))))
+            (w/live-el "div" messages (list))))
 
         ; Status indicator
         (w/p (list (MkPair "class" "status"))
@@ -143,9 +147,9 @@
       (w/div (list (MkPair "class" "card"))
         (string-append
           (w/h1 (list) "About")
-          (w/p (list) "Live Dashboard — a real-time collaborative app powered by Marlang.")
+          (w/p (list) "Live Dashboard &mdash; a real-time collaborative app powered by Marlang.")
           (w/p (list (MkPair "style" "margin-top:0.75rem;color:#666"))
-            "State is shared across all connected clients via WebSocket. Navigation happens over WebSocket too — no full page reloads.")))))))
+            "State is shared across all connected clients via WebSocket. Navigation happens over WebSocket too &mdash; no full page reloads.")))))))
 
 ; --- API endpoints ---
 

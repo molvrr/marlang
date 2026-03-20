@@ -96,7 +96,7 @@ pub struct VM {
     /// Global resolution cache: maps constant string pointer → resolved Value.
     /// Avoids repeated HashMap lookups in PushGlobal for stable globals (builtins etc.).
     /// Cleared on every SetGlobal to handle redefinitions.
-    pub(crate) global_cache: FxHashMap<*const ConstantValue, Value>,
+    pub(crate) global_cache: FxHashMap<String, Value>,
 
     // --- JIT ---
     /// JIT compilation engine (lazily initialized on first hot function).
@@ -802,12 +802,12 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let cval_ptr = unsafe { constants.add(inst.operand as usize) };
                 let cval = unsafe { &*cval_ptr };
 
-                // Fast path: check global resolution cache (stable for builtins)
-                if let Some(cached) = vm.global_cache.get(&(cval_ptr)) {
-                    vm.push(cached.clone());
-                } else {
-                    match cval {
-                        ConstantValue::String(s) => {
+                match cval {
+                    ConstantValue::String(s) => {
+                        // Fast path: check global resolution cache by name
+                        if let Some(cached) = vm.global_cache.get(s.as_str()) {
+                            vm.push(cached.clone());
+                        } else {
                             let closure_module = vm.frames[frame_idx].closure.module_id;
                             let resolved = vm
                                 .resolve_global(s.as_str(), closure_module)
@@ -822,7 +822,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 });
                             match resolved {
                                 Some(v) => {
-                                    vm.global_cache.insert(cval_ptr, v.clone());
+                                    vm.global_cache.insert(s.to_string(), v.clone());
                                     vm.push(v);
                                 }
                                 None => {
@@ -840,12 +840,12 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 }
                             }
                         }
-                        _ => {
-                            vm.frames[frame_idx].ip = ip;
-                            return Err(VMSignal::Error(
-                                vm.vm_error("Global name must be string", &vm.frames[frame_idx]),
-                            ));
-                        }
+                    }
+                    _ => {
+                        vm.frames[frame_idx].ip = ip;
+                        return Err(VMSignal::Error(
+                            vm.vm_error("Global name must be string", &vm.frames[frame_idx]),
+                        ));
                     }
                 }
             }

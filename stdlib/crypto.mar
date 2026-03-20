@@ -1,7 +1,6 @@
-; Crypto module — SHA-256 and HMAC-SHA256 via FFI
+; Crypto module — MD5, SHA-256, and HMAC-SHA256
 ;
-; Uses CommonCrypto on macOS (/usr/lib/system/libcommonCrypto.dylib).
-; On Linux, swap the library path to libcrypto.so and use OpenSSL function names.
+; Backed by Rust builtins (ring + md-5 crates). Portable, no FFI.
 ;
 ; Usage:
 ;   (import "std:crypto" as crypto)
@@ -14,48 +13,13 @@
 ;
 ;   (crypto/hex (crypto/sha256 (bytes-from-string "hello")))
 ;   ; => "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-
-; =========================================================================
-; FFI — CommonCrypto (macOS)
-; =========================================================================
-
-; 32-byte output buffer for SHA-256 / HMAC-SHA256 digests.
-(define Digest256 (ffi-struct "Digest256" (list
-  (list "b0" "u64") (list "b1" "u64") (list "b2" "u64") (list "b3" "u64"))))
-
-; CC_SHA256(data, len, md) → ptr
-; CCHmac(algorithm, key, keyLen, data, dataLen, macOut) → void
-(foreign-lib cc "/usr/lib/system/libcommonCrypto.dylib"
-  (CC_SHA256 (-> Ptr U32 Ptr Ptr))
-  (CCHmac    (-> U32 Ptr U64 Ptr U64 Ptr Void)))
-
-; =========================================================================
-; Public API
-; =========================================================================
-
-; sha256 : (-> Bytes Bytes)
-; Compute the SHA-256 digest of the given data.
-(define sha256 (lambda (data)
-  (let ((out (struct-new Digest256 0 0 0 0)))
-    (begin
-      (cc/CC_SHA256 data (bytes-length data) out)
-      (struct-bytes out)))))
-
-; hmac-sha256 : (-> Bytes Bytes Bytes)
-; Compute HMAC-SHA256. key and message are both Bytes.
-; Returns a 32-byte digest.
-(define hmac-sha256 (lambda (key message)
-  (let ((out (struct-new Digest256 0 0 0 0)))
-    (begin
-      ; kCCHmacAlgSHA256 = 2
-      (cc/CCHmac 2 key (bytes-length key) message (bytes-length message) out)
-      (struct-bytes out)))))
+;
+;   (crypto/md5 (bytes-from-string "hello"))
+;   ; => Bytes (16 bytes)
 
 ; =========================================================================
 ; Hex encoding
 ; =========================================================================
-
-(define __hex-chars "0123456789abcdef")
 
 (define __nibble (lambda (n)
   (char->string (char-from-code (+ (if (< n 10) 48 87) n)))))
