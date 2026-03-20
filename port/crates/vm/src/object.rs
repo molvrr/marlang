@@ -30,23 +30,39 @@ pub fn make_some(value: Value) -> Value {
     })
 }
 
-/// Construct a `None` ADT value.
-pub fn make_none() -> Value {
+/// Static singleton for the `None` ADT value.
+/// Avoids heap allocation on every make_none() call.
+static NONE_SINGLETON: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
     Value::object(VMObject::AdtValue {
         tag: "None".to_string(),
         fields: vec![],
     })
+});
+
+/// Construct a `None` ADT value. Returns a clone of the static singleton.
+pub fn make_none() -> Value {
+    NONE_SINGLETON.clone()
 }
 
 /// Build a Cons/Nil chain from a `Vec<Value>`.
 ///
 /// Converts `[a, b, c]` into `Cons(a, Cons(b, Cons(c, Nil)))` using `AdtValue`.
 /// This is the canonical way to construct list values at runtime.
-pub fn vec_to_cons_list(items: Vec<Value>) -> Value {
-    let mut result = Value::object(VMObject::AdtValue {
+/// Static singleton for the `Nil` ADT value.
+static NIL_SINGLETON: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    Value::object(VMObject::AdtValue {
         tag: "Nil".to_string(),
         fields: vec![],
-    });
+    })
+});
+
+/// Construct a `Nil` ADT value. Returns a clone of the static singleton.
+pub fn make_nil() -> Value {
+    NIL_SINGLETON.clone()
+}
+
+pub fn vec_to_cons_list(items: Vec<Value>) -> Value {
+    let mut result = make_nil();
     for item in items.into_iter().rev() {
         result = Value::object(VMObject::AdtValue {
             tag: "Cons".to_string(),
