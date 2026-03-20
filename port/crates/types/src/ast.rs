@@ -264,6 +264,10 @@ pub fn t_bytes() -> Type {
     type_const("Bytes")
 }
 
+pub fn t_box(inner: Type) -> Type {
+    type_app(type_const("Box"), vec![inner])
+}
+
 // ===== Type Scheme Helpers =====
 
 pub fn monotype(t: Type) -> TypeScheme {

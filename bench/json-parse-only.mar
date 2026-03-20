@@ -1,0 +1,15 @@
+; JSON parse-only benchmark - no encoding
+(import "std:json" as json)
+
+(define test-json "{\"name\":\"Alice\",\"age\":30,\"scores\":[95,87,92,78,88],\"active\":true,\"address\":{\"city\":\"Springfield\",\"zip\":\"62704\"},\"tags\":[\"admin\",\"user\"],\"meta\":null}")
+
+(define bench (lambda (n)
+  (if (= n 0)
+    nil
+    (begin
+      (match (json/decode test-json)
+        ((Ok val) nil)
+        ((Err msg) (error msg)))
+      (bench (- n 1))))))
+
+(bench 100)

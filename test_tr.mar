@@ -1,0 +1,6 @@
+(import "std:io" as io)
+(import "std:codec" as c)
+
+; Test just consuming chars directly
+(io/println (show (c/parse c/any-char "X")))
+(io/println (show (c/parse (c/many c/any-char) "AB")))

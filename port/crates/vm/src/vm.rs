@@ -10,14 +10,6 @@ use std::sync::Arc;
 
 // --- Parse state ---
 
-/// Mutable parse state for fast-path ParseState effect handling.
-/// Stores the full character buffer and current read position, so `consume`
-/// is O(1) (just bumps `pos`) instead of O(n) (`Vec::remove(0)`).
-pub(crate) struct ParseState {
-    pub chars: Vec<Value>,
-    pub pos: usize,
-}
-
 // --- VMSignal: unified error/effect propagation ---
 
 pub(crate) enum VMSignal {
@@ -97,12 +89,6 @@ pub struct VM {
     /// Current fiber PID when running under the scheduler (for fast-path fiber-self).
     pub(crate) current_pid: Option<u64>,
 
-    // --- Parse state ---
-    /// Stack of mutable parse states for fast-path ParseState effect handling.
-    /// Pushed by `__parse-push-input`, popped by `__parse-pop-input`.
-    /// When non-empty, Perform intercepts peek/consume/get-pos/set-pos inline.
-    pub(crate) parse_state_stack: Vec<ParseState>,
-
     // --- JIT ---
     /// JIT compilation engine (lazily initialized on first hot function).
     #[cfg(feature = "jit")]
@@ -134,7 +120,6 @@ impl VM {
             captured_output: None,
             dirty_globals: None,
             current_pid: None,
-            parse_state_stack: Vec::new(),
             #[cfg(feature = "jit")]
             jit_engine: None,
             #[cfg(feature = "jit")]
@@ -1959,8 +1944,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 // Borrow effect name from the constant pool — avoids a String clone per perform.
                 // Only allocate an owned String when building EffectSignal (scheduler path) or
                 // error messages.
-                let mut op_name_ref: &str = match unsafe { &*constants.add(inst.operand as usize) }
-                {
+                let op_name_ref: &str = match unsafe { &*constants.add(inst.operand as usize) } {
                     ConstantValue::String(s) => s.as_str(),
                     _ => {
                         vm.frames[frame_idx].ip = ip;
@@ -1974,56 +1958,6 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let mut args = vec![Value::nil(); arity];
                 for i in (0..arity).rev() {
                     args[i] = vm.pop();
-                }
-
-                // ── Fast-path: VM-managed parse state ──
-                // When a parse state is active (pushed by __parse-push-input),
-                // handle ParseState operations inline — O(1) per operation,
-                // no continuation capture, no handler stack walk.
-                if let Some(ParseState { chars, pos }) = vm.parse_state_stack.last_mut() {
-                    // Extract the bare op name (strip any effect qualifier)
-                    let bare_op = op_name_ref
-                        .rsplit_once('/')
-                        .map_or(op_name_ref, |(_, op)| op);
-                    match bare_op {
-                        "peek" => {
-                            let result = if *pos >= chars.len() {
-                                crate::object::make_none()
-                            } else {
-                                crate::object::make_some(chars[*pos].clone())
-                            };
-                            vm.push(result);
-                            continue;
-                        }
-                        "consume" => {
-                            if *pos >= chars.len() {
-                                // Replicate the original with-input behavior:
-                                // (perform throw "unexpected end of input")
-                                // Redirect to the Exception handler by replacing
-                                // the op name and args, then falling through.
-                                op_name_ref = "throw";
-                                args = vec![Value::string("unexpected end of input")];
-                            } else {
-                                let ch = chars[*pos].clone();
-                                *pos += 1;
-                                vm.push(ch);
-                                continue;
-                            }
-                        }
-                        "get-pos" => {
-                            let pos_val = *pos as i64;
-                            vm.push(Value::int(pos_val));
-                            continue;
-                        }
-                        "set-pos" => {
-                            if let Some(n) = args[0].as_int() {
-                                *pos = n as usize;
-                            }
-                            vm.push(Value::nil());
-                            continue;
-                        }
-                        _ => {} // Not a ParseState op — fall through
-                    }
                 }
 
                 // Parse the performed operation name (could be "effectName/opName" or just "opName")

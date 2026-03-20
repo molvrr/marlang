@@ -1084,27 +1084,42 @@ pub fn register_builtins(vm: &mut VM) {
         Ok(crate::object::vec_to_cons_list(items))
     });
 
-    // --- Parse state builtins ---
+    // --- Mutable box builtins ---
 
-    // __parse-push-input: String -> Unit
-    // Push a string as mutable parse state. ParseState effects (peek, consume,
-    // get-pos, set-pos) are then handled inline by the VM — no continuation
-    // capture, no handler recursion.
-    builtin(vm, "__parse-push-input", |vm, args| {
-        debug_assert!(args.len() == 1, "__parse-push-input expects one argument");
-        let s = args[0].as_string().unwrap_or("");
-        let chars: Vec<Value> = s.chars().map(Value::char).collect();
-        vm.parse_state_stack
-            .push(crate::vm::ParseState { chars, pos: 0 });
-        Ok(Value::nil())
+    // box-new : a -> Box a
+    // Create a mutable reference cell containing the given value.
+    builtin(vm, "box-new", |_vm, args| {
+        if args.is_empty() {
+            return Err(VMError::runtime("box-new expects 1 argument"));
+        }
+        let cell = std::sync::Arc::new(std::sync::Mutex::new(args[0].clone()));
+        Ok(Value::object(VMObject::MutableBox(cell)))
     });
 
-    // __parse-pop-input: Unit -> Unit
-    // Pop the current parse state.
-    builtin(vm, "__parse-pop-input", |vm, _args| {
-        match vm.parse_state_stack.pop() {
-            Some(_) => Ok(Value::nil()),
-            None => Err(VMError::runtime("__parse-pop-input: no active parse state")),
+    // box-get : Box a -> a
+    // Read the current value from a mutable box.
+    builtin(vm, "box-get", |_vm, args| {
+        if args.is_empty() {
+            return Err(VMError::runtime("box-get expects 1 argument"));
+        }
+        match args[0].as_object() {
+            Some(VMObject::MutableBox(cell)) => Ok(cell.lock().unwrap().clone()),
+            _ => Err(VMError::runtime("box-get: argument must be a box")),
+        }
+    });
+
+    // box-set! : Box a -> a -> Unit
+    // Update the value in a mutable box.
+    builtin(vm, "box-set!", |_vm, args| {
+        if args.len() < 2 {
+            return Err(VMError::runtime("box-set! expects 2 arguments"));
+        }
+        match args[0].as_object() {
+            Some(VMObject::MutableBox(cell)) => {
+                *cell.lock().unwrap() = args[1].clone();
+                Ok(Value::nil())
+            }
+            _ => Err(VMError::runtime("box-set!: first argument must be a box")),
         }
     });
 

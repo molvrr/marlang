@@ -201,6 +201,9 @@ struct Compiler<'a> {
     /// instead of `"<lambda>"`. Set by `compile_define` and `compile_let` when
     /// the value expression is a lambda, so stack traces show meaningful names.
     pending_lambda_name: Option<String>,
+    /// When set, `(resume <this_symbol> <expr>)` is compiled as just `<expr>`.
+    /// Used to compile tail-resume closures for generalized tail-resumptive handlers.
+    tail_resume_cont_param: Option<Symbol>,
 }
 
 impl<'a> Compiler<'a> {
@@ -228,6 +231,7 @@ impl<'a> Compiler<'a> {
             module_id,
             did_prescan: false,
             pending_lambda_name: None,
+            tail_resume_cont_param: None,
         }
     }
 
@@ -1501,16 +1505,16 @@ impl<'a> Compiler<'a> {
                     module_id: self.module_id,
                 };
 
-                // Check if this clause is tail-resumptive: body is (resume k <expr>)
-                // where <expr> does not reference k and is a simple expression.
+                // Check if this clause is tail-resumptive (generalized):
+                // every code path either ends with (resume k <expr>) in tail position
+                // or doesn't use k at all (e.g. performs throw to an outer handler).
+                // The tail-resume closure runs inline without continuation capture,
+                // with the full handler stack intact.
                 let tail_resume_proto_idx =
                     if Self::is_tail_resumptive_body(handler_body, cont_param, self.interner) {
-                        // Extract the resume-value expression (third element of (resume k <expr>))
-                        let body_elements = ast::list_to_array(handler_body);
-                        let resume_value_expr = body_elements[2];
-
                         // Compile a separate closure that takes just the effect args
-                        // (not k) and returns the resume value.
+                        // (not k) and executes the handler body with (resume k <expr>)
+                        // replaced by just <expr>.
                         let resume_name = format!("<tail-resume:{}>", full_name);
                         let mut resume_compiler = Compiler::new(
                             &resume_name,
@@ -1525,7 +1529,10 @@ impl<'a> Compiler<'a> {
                         for &p in &params {
                             resume_compiler.add_local(p);
                         }
-                        resume_compiler.compile_expr(resume_value_expr, true)?;
+                        // Set the rewrite flag: (resume k expr) → expr
+                        resume_compiler.tail_resume_cont_param = Some(cont_param);
+                        resume_compiler.compile_expr(handler_body, true)?;
+                        resume_compiler.tail_resume_cont_param = None;
                         resume_compiler.emit(Op::Return, line);
                         resume_compiler.chunk.local_count = resume_compiler.local_count;
 
@@ -1621,6 +1628,17 @@ impl<'a> Compiler<'a> {
         if elements.len() != 3 {
             return Err(CompileError::new("resume expects 2 arguments", line));
         }
+
+        // Generalized tail-resumptive rewriting: when compiling a tail-resume
+        // closure, (resume k <expr>) is compiled as just <expr>.
+        if let Some(cont_param) = self.tail_resume_cont_param
+            && let Some(sym) = Self::get_symbol(elements[1])
+            && sym == cont_param
+        {
+            self.compile_expr(elements[2], true)?;
+            return Ok(());
+        }
+
         self.compile_expr(elements[1], false)?; // continuation
         self.compile_expr(elements[2], false)?; // value
         self.emit(Op::Resume, line);
@@ -1629,43 +1647,129 @@ impl<'a> Compiler<'a> {
 
     // --- Tail-resumptive handler analysis ---
 
-    /// Conservative check: is this handler body of the form `(resume k <expr>)` where:
-    /// - `resume` is the resume keyword
-    /// - `k` is the continuation parameter
-    /// - `<expr>` is a single expression that does not reference `k`
-    /// - `<expr>` does not contain `perform`, `handle`, or `lambda` (conservative)
+    /// Check if a handler body is "tail-resumptive": every code path either ends
+    /// with `(resume k <expr>)` or doesn't use k at all (e.g. performs throw).
+    /// Allows arbitrary code before the resume (let, begin, if, etc.)
+    /// as long as k is only used in tail-position `(resume k expr)` calls.
+    /// When tail-resumptive, the handler can skip continuation capture entirely:
+    /// the tail-resume closure runs inline with the full stack intact.
     fn is_tail_resumptive_body(body: &Expr, cont_param: Symbol, interner: &Interner) -> bool {
-        let elements = ast::list_to_array(body);
-        // Must be exactly (resume k <expr>) — a 3-element list
-        if elements.len() != 3 {
-            return false;
+        // k must not appear outside of tail-position (resume k expr) calls
+        Self::is_tail_resume_safe(body, cont_param, interner, true)
+    }
+
+    /// Check if expr is safe for the generalized tail-resumptive optimization.
+    /// `in_tail` indicates whether this expr is in tail position.
+    /// Returns true if k is only used in tail-position (resume k expr) calls.
+    fn is_tail_resume_safe(
+        expr: &Expr,
+        cont_param: Symbol,
+        interner: &Interner,
+        in_tail: bool,
+    ) -> bool {
+        let elements = ast::list_to_array(expr);
+        if elements.is_empty() {
+            // Nil — ok, doesn't reference k
+            return true;
         }
-        // First element must be "resume"
-        let head_sym = match Self::get_symbol(elements[0]) {
-            Some(s) => s,
-            None => return false,
-        };
-        if interner.resolve(head_sym) != "resume" {
-            return false;
+
+        // Single atom
+        if elements.len() == 1 {
+            // k as a standalone expression is not ok (it escapes)
+            return !Self::expr_references_symbol(expr, cont_param);
         }
-        // Second element must be the continuation parameter
-        let k_sym = match Self::get_symbol(elements[1]) {
-            Some(s) => s,
-            None => return false,
-        };
-        if k_sym != cont_param {
-            return false;
+
+        // Check if this is a (resume k <expr>) form in tail position
+        if elements.len() == 3
+            && let Some(sym) = Self::get_symbol(elements[0])
+            && interner.resolve(sym) == "resume"
+            && let Some(k_sym) = Self::get_symbol(elements[1])
+            && k_sym == cont_param
+            && in_tail
+        {
+            return !Self::expr_references_symbol(elements[2], cont_param);
         }
-        // The resume-value expression must not reference k
-        let resume_value = elements[2];
-        if Self::expr_references_symbol(resume_value, cont_param) {
-            return false;
+
+        // Check for known special forms
+        if let Some(head_sym) = Self::get_symbol(elements[0]) {
+            let name = interner.resolve(head_sym);
+            match name {
+                "if" => {
+                    // (if cond then else) — cond is not tail, then/else are tail
+                    if elements.len() >= 3 {
+                        if Self::expr_references_symbol(elements[1], cont_param) {
+                            return false;
+                        }
+                        let then_ok =
+                            Self::is_tail_resume_safe(elements[2], cont_param, interner, in_tail);
+                        let else_ok = if elements.len() > 3 {
+                            Self::is_tail_resume_safe(elements[3], cont_param, interner, in_tail)
+                        } else {
+                            true
+                        };
+                        return then_ok && else_ok;
+                    }
+                }
+                "begin" => {
+                    // (begin e1 e2 ... en) — only en is in tail position
+                    for (i, &elem) in elements.iter().enumerate().skip(1) {
+                        let is_last = i == elements.len() - 1;
+                        if is_last {
+                            if !Self::is_tail_resume_safe(elem, cont_param, interner, in_tail) {
+                                return false;
+                            }
+                        } else if Self::expr_references_symbol(elem, cont_param) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                "let" => {
+                    // (let ((x e1)) body) — e1 not tail, body is tail
+                    if elements.len() >= 3 {
+                        // Check bindings don't reference k
+                        if Self::expr_references_symbol(elements[1], cont_param) {
+                            return false;
+                        }
+                        // Body is in tail position
+                        return Self::is_tail_resume_safe(
+                            elements[2],
+                            cont_param,
+                            interner,
+                            in_tail,
+                        );
+                    }
+                }
+                "match" => {
+                    // (match scrutinee (pattern body) ...) — scrutinee not tail, bodies are tail
+                    if elements.len() >= 2 {
+                        if Self::expr_references_symbol(elements[1], cont_param) {
+                            return false;
+                        }
+                        for &arm in &elements[2..] {
+                            let arm_elems = ast::list_to_array(arm);
+                            if let Some(&arm_body) = arm_elems.last()
+                                && !Self::is_tail_resume_safe(
+                                    arm_body, cont_param, interner, in_tail,
+                                )
+                            {
+                                return false;
+                            }
+                        }
+                        return true;
+                    }
+                }
+                "lambda" | "handle" => {
+                    // lambda/handle: reject if they reference k (k would escape)
+                    return !Self::expr_references_symbol(expr, cont_param);
+                }
+                _ => {}
+            }
         }
-        // Conservative: reject if the expression contains perform, handle, or lambda
-        if Self::expr_contains_effect_forms(resume_value, interner) {
-            return false;
-        }
-        true
+
+        // For any other expression (function calls, etc.):
+        // k must not be referenced anywhere
+        !Self::expr_references_symbol(expr, cont_param)
     }
 
     /// Check if an expression contains any reference to a given symbol.
@@ -1675,23 +1779,6 @@ impl<'a> Compiler<'a> {
             Expr::Atom(_, _) | Expr::Nil(_) => false,
             Expr::List { head, tail, .. } => {
                 Self::expr_references_symbol(head, sym) || Self::expr_references_symbol(tail, sym)
-            }
-        }
-    }
-
-    /// Conservative check: does an expression contain perform, handle, or lambda forms?
-    /// These could interact with effect handler state in ways that make the
-    /// tail-resumptive fast path unsafe.
-    fn expr_contains_effect_forms(expr: &Expr, interner: &Interner) -> bool {
-        match expr {
-            Expr::Atom(LispValue::Symbol(s), _) => {
-                let name = interner.resolve(*s);
-                matches!(name, "perform" | "handle" | "lambda")
-            }
-            Expr::Atom(_, _) | Expr::Nil(_) => false,
-            Expr::List { head, tail, .. } => {
-                Self::expr_contains_effect_forms(head, interner)
-                    || Self::expr_contains_effect_forms(tail, interner)
             }
         }
     }

@@ -114,6 +114,9 @@ pub enum VMObject {
     },
     Pid(u64),
     Port(u64),
+    /// A mutable reference cell. Shared via Arc, mutated via Mutex.
+    /// Used for general-purpose mutable state (e.g. position tracking in effect handlers).
+    MutableBox(Arc<Mutex<Value>>),
     /// A raw byte array. Immutable once created (all "mutation" builtins return new copies).
     ByteArray(Vec<u8>),
     /// A bound FFI function: stores the library global name and function name.
@@ -144,6 +147,7 @@ impl VMObject {
             VMObject::Closure(_) => "closure",
             VMObject::Continuation(_) => "continuation",
             VMObject::Builtin { .. } => "builtin",
+            VMObject::MutableBox(_) => "box",
             VMObject::Pid(_) => "pid",
             VMObject::Port(_) => "port",
             VMObject::ByteArray(_) => "bytes",

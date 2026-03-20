@@ -687,40 +687,6 @@ pub extern "C" fn marlang_jit_perform(
 /// Returns `Some(value)` if the effect was handled inline (tail-resumptive or default handler),
 /// or `None` if the caller must bail to the interpreter.
 fn perform_from_jit(vm: &mut VM, op_name: &str, args: &[Value]) -> Option<Value> {
-    // Fast-path: VM-managed parse state
-    if let Some(crate::vm::ParseState { chars, pos }) = vm.parse_state_stack.last_mut() {
-        let bare_op = op_name.rsplit_once('/').map_or(op_name, |(_, op)| op);
-        match bare_op {
-            "peek" => {
-                let result = if *pos >= chars.len() {
-                    crate::object::make_none()
-                } else {
-                    crate::object::make_some(chars[*pos].clone())
-                };
-                return Some(result);
-            }
-            "consume" => {
-                if *pos < chars.len() {
-                    let ch = chars[*pos].clone();
-                    *pos += 1;
-                    return Some(ch);
-                }
-                // Empty — bail to interpreter for throw dispatch
-                return None;
-            }
-            "get-pos" => {
-                return Some(Value::int(*pos as i64));
-            }
-            "set-pos" => {
-                if let Some(n) = args.first().and_then(|v| v.as_int()) {
-                    *pos = n as usize;
-                }
-                return Some(Value::nil());
-            }
-            _ => {}
-        }
-    }
-
     // Parse effect/op name
     let (performed_effect, performed_op) = if let Some((eff, op)) = op_name.rsplit_once('/') {
         (eff, op)

@@ -578,6 +578,10 @@ fn format_object(obj: &VMObject) -> String {
             format!("#<vm-closure {}>", c.proto.name)
         }
         VMObject::Continuation(_) => "#<continuation>".to_string(),
+        VMObject::MutableBox(cell) => {
+            let inner = cell.lock().unwrap();
+            format!("#<box {}>", format_value(&inner))
+        }
         VMObject::Builtin { name, .. } => {
             format!("#<vm-builtin {}>", name)
         }

@@ -320,40 +320,54 @@
 
 (define char= (lambda (a b) (= (char-code a) (char-code b))))
 
+
 ; ============================================================
 ; Internal: Parse Handlers
 ; ============================================================
 
-; with-input : String -> (-> Unit a) -> a
-; Runs a thunk with ParseState effects handled by the VM.
-; The VM manages the parse state as a mutable Vec internally,
-; so peek/consume/get-pos/set-pos are O(1) with no
-; continuation capture overhead.
-; IMPORTANT: Callers must ensure __parse-pop-input is called on all
-; exit paths (normal and exception). See run-parse-safe.
-(define with-input (lambda (input thunk)
-  (begin
-    (__parse-push-input input)
-    (let ((result (thunk)))
-      (begin
-        (__parse-pop-input nil)
-        result)))))
-
 ; run-parse-safe : String -> (-> Unit a) -> (Result String a)
-; Runs a parser in a fresh handler scope.
-; NOTE: inner-thunk is created BEFORE the handle block to work around
-; a compiler limitation with closure captures inside handle bodies.
-(define run-parse-safe (lambda (input parser)
-  (let ((inner-thunk (lambda ()
-    (parser))))
-    (handle
-      (Ok (with-input input inner-thunk))
-      ((throw msg k) ->
-        (begin
-          (__parse-pop-input nil)
-          (Err msg)))))))
+; Runs a parser with ParseState and Exception effects handled.
+; Uses a mutable box for O(1) position tracking.
+; NOTE: ParseState and Exception are handled in separate nested handlers
+; so that inner Exception handlers (e.g. try-parse) work correctly.
+; with-parse-state : String -> (-> Unit a) -> a
+; Installs a ParseState handler that tracks position via a mutable box.
+; ParseState operations (peek/consume/get-pos/set-pos) are handled here.
+; Exception (throw) is NOT handled — it propagates to the caller.
+(define with-parse-state (lambda (input thunk)
+  (let ((pos (box-new 0)))
+    (let ((len (string-length input)))
+      (handle
+        (thunk)
+        ((peek k) ->
+          (let ((p (box-get pos)))
+            (resume k (if (>= p len)
+              None
+              (string-char-at input p)))))
+        ((consume k) ->
+          (let ((p (box-get pos)))
+            (if (>= p len)
+              (perform throw "unexpected end of input")
+              (match (string-char-at input p)
+                (None (perform throw "unexpected end of input"))
+                ((Some c)
+                  (begin
+                    (box-set! pos (+ p 1))
+                    (resume k c)))))))
+        ((get-pos k) ->
+          (resume k (box-get pos)))
+        ((set-pos n k) ->
+          (begin
+            (box-set! pos n)
+            (resume k nil))))))))
 
-; try-parse : (-> Unit a) -> (Option a)
+(define run-parse-safe (lambda (input parser)
+  (let ((thunk (lambda () (with-parse-state input parser))))
+    (handle
+      (Ok (thunk))
+      ((throw msg k) ->
+        (Err msg))))))
+
 ; Try a parser; on failure restore position and return None.
 (define try-parse (lambda (parser)
   (let ((saved (perform get-pos)))

@@ -162,9 +162,10 @@
 (declare bytes-from-list (-> (List Int) Bytes))
 (declare bytes-to-list (-> Bytes (List Int)))
 
-; Parse state builtins (VM-managed mutable parse state for codec)
-(declare __parse-push-input (-> String Unit))
-(declare __parse-pop-input (-> Unit Unit))
+; Mutable box builtins (general-purpose mutable reference cells)
+(declare box-new (-> a (Box a)))
+(declare box-get (-> (Box a) a))
+(declare box-set! (-> (Box a) a Unit))
 
 ; Macro/quote builtins
 (declare make-symbol (-> String Symbol))
