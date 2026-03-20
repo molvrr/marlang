@@ -340,26 +340,29 @@
       (handle
         (thunk)
         ((peek k) ->
-          (let ((p (box-get pos)))
-            (resume k (if (>= p len)
-              None
-              (string-char-at input p)))))
+          (resume k
+            (let ((p (box-get pos)))
+              (if (>= p len)
+                None
+                (string-char-at input p)))))
         ((consume k) ->
-          (let ((p (box-get pos)))
-            (if (>= p len)
-              (perform throw "unexpected end of input")
-              (match (string-char-at input p)
-                (None (perform throw "unexpected end of input"))
-                ((Some c)
-                  (begin
-                    (box-set! pos (+ p 1))
-                    (resume k c)))))))
+          (resume k
+            (let ((p (box-get pos)))
+              (if (>= p len)
+                (perform throw "unexpected end of input")
+                (match (string-char-at input p)
+                  (None (perform throw "unexpected end of input"))
+                  ((Some c)
+                    (begin
+                      (box-set! pos (+ p 1))
+                      c)))))))
         ((get-pos k) ->
           (resume k (box-get pos)))
         ((set-pos n k) ->
-          (begin
-            (box-set! pos n)
-            (resume k nil))))))))
+          (resume k
+            (begin
+              (box-set! pos n)
+              nil))))))))
 
 (define run-parse-safe (lambda (input parser)
   (let ((thunk (lambda () (with-parse-state input parser))))
