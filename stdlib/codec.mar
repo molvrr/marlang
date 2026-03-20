@@ -347,15 +347,9 @@
                 (string-char-at input p)))))
         ((consume k) ->
           (resume k
-            (let ((p (box-get pos)))
-              (if (>= p len)
-                (perform throw "unexpected end of input")
-                (match (string-char-at input p)
-                  (None (perform throw "unexpected end of input"))
-                  ((Some c)
-                    (begin
-                      (box-set! pos (+ p 1))
-                      c)))))))
+            (match (string-consume-char! pos input len)
+              (None (perform throw "unexpected end of input"))
+              ((Some c) c))))
         ((get-pos k) ->
           (resume k (box-get pos)))
         ((set-pos n k) ->

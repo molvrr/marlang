@@ -1190,6 +1190,57 @@ pub fn register_builtins(vm: &mut VM) {
         }
     });
 
+    // string-consume-char! : Box Int -> String -> Int -> (Option Char)
+    // Combined read + bump for parser state. Reads char at position from string,
+    // increments the position box. Returns None if at end. Replaces the pattern:
+    //   (let ((p (box-get pos)))
+    //     (if (>= p len) None
+    //       (match (string-char-at input p)
+    //         (None None)
+    //         ((Some c) (begin (box-set! pos (+ p 1)) c)))))
+    builtin(vm, "string-consume-char!", |_vm, args| {
+        if args.len() < 3 {
+            return Err(VMError::runtime(
+                "string-consume-char! expects 3 arguments (pos-box, input, len)",
+            ));
+        }
+        let pos_cell = match args[0].as_object() {
+            Some(VMObject::MutableBox(cell)) => cell,
+            _ => {
+                return Err(VMError::runtime(
+                    "string-consume-char!: first arg must be a box",
+                ));
+            }
+        };
+        let input = args[1]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("string-consume-char!: second arg must be string"))?;
+        let len = args[2].get_int() as usize;
+
+        let pos = {
+            let guard = pos_cell.lock().unwrap();
+            guard.get_int() as usize
+        };
+
+        if pos >= len {
+            Ok(crate::object::make_none())
+        } else {
+            // ASCII fast path
+            let bytes = input.as_bytes();
+            let ch = if input.is_ascii() {
+                bytes[pos] as char
+            } else {
+                match input.chars().nth(pos) {
+                    Some(c) => c,
+                    None => return Ok(crate::object::make_none()),
+                }
+            };
+            // Bump position
+            *pos_cell.lock().unwrap() = Value::int((pos + 1) as i64);
+            Ok(crate::object::make_some(Value::char(ch)))
+        }
+    });
+
     // FFI builtins
     #[cfg(feature = "ffi")]
     register_ffi_builtins(vm, builtin);
