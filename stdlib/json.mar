@@ -147,16 +147,22 @@ JsonNull
 (define json-string-char
     (c/mk-codec
         (lambda ()
-            (match (c/try-parse (c/codec-parser json-escaped-char))
-((Some ch) ch)
-                (None
-                    (let ((ch (do-consume)))
-                        (let ((code (char-code ch)))
-                            (if (< code 32)
-(perform throw "unescaped control character in string")
-                                (if (= code 34)
-(perform throw "unexpected quote")
-(if (= code 92) (perform throw "unexpected backslash") ch))))))))
+            ; Fast path: peek first to avoid try-parse overhead for non-escaped chars.
+            ; Only attempt escape parsing when we see a backslash.
+            (match (do-peek)
+                (None (perform throw "unexpected end of input in string"))
+                ((Some peeked)
+                    (let ((code (char-code peeked)))
+                        (if (= code 92)
+                            ; Backslash — parse escape sequence
+                            ((c/codec-parser json-escaped-char))
+                            ; Normal char — consume and validate
+                            (let ((ch (do-consume)))
+                                (if (< code 32)
+                                    (perform throw "unescaped control character in string")
+                                    (if (= code 34)
+                                        (perform throw "unexpected quote")
+                                        ch))))))))
         (lambda (ch)
             (let ((code (char-code ch)))
                 (if (if (= code 34) #t (if (= code 92) #t (< code 32)))
