@@ -166,6 +166,8 @@
 (declare box-new (-> a (Box a)))
 (declare box-get (-> (Box a) a))
 (declare box-set! (-> (Box a) a Unit))
+(declare box-string-push! (-> (Box String) String Unit))
+(declare box-string-push-char! (-> (Box String) Char Unit))
 
 ; Macro/quote builtins
 (declare make-symbol (-> String Symbol))

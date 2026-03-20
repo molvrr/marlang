@@ -395,12 +395,12 @@
       ((emit s k) ->
         (resume k
           (begin
-            (box-set! buf (string-append (box-get buf) s))
+            (box-string-push! buf s)
             nil)))
       ((emit-char c k) ->
         (resume k
           (begin
-            (box-set! buf (string-append (box-get buf) (char->string c)))
+            (box-string-push-char! buf c)
             nil)))))))
 
 ; try-print : (-> Unit Unit) -> (Option String)

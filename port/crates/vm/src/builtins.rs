@@ -1128,6 +1128,68 @@ pub fn register_builtins(vm: &mut VM) {
         }
     });
 
+    // box-string-push! : Box String -> String -> Unit
+    // Efficiently append a string to a string box in-place.
+    // Avoids the allocation of string-append + box-set! pattern.
+    builtin(vm, "box-string-push!", |_vm, args| {
+        if args.len() < 2 {
+            return Err(VMError::runtime("box-string-push! expects 2 arguments"));
+        }
+        match args[0].as_object() {
+            Some(VMObject::MutableBox(cell)) => {
+                let suffix = args[1]
+                    .as_string()
+                    .ok_or_else(|| VMError::runtime("box-string-push!: second arg must be string"))?
+                    .to_string();
+                let mut guard = cell.lock().unwrap();
+                if let Some(current) = guard.as_string() {
+                    let mut new_str = current.to_string();
+                    new_str.push_str(&suffix);
+                    *guard = Value::string(new_str.as_str());
+                } else {
+                    return Err(VMError::runtime(
+                        "box-string-push!: box must contain a string",
+                    ));
+                }
+                Ok(Value::nil())
+            }
+            _ => Err(VMError::runtime(
+                "box-string-push!: first argument must be a box",
+            )),
+        }
+    });
+
+    // box-string-push-char! : Box String -> Char -> Unit
+    // Efficiently append a char to a string box in-place.
+    builtin(vm, "box-string-push-char!", |_vm, args| {
+        if args.len() < 2 {
+            return Err(VMError::runtime(
+                "box-string-push-char! expects 2 arguments",
+            ));
+        }
+        match args[0].as_object() {
+            Some(VMObject::MutableBox(cell)) => {
+                let ch = args[1].as_char().ok_or_else(|| {
+                    VMError::runtime("box-string-push-char!: second arg must be char")
+                })?;
+                let mut guard = cell.lock().unwrap();
+                if let Some(current) = guard.as_string() {
+                    let mut new_str = current.to_string();
+                    new_str.push(ch);
+                    *guard = Value::string(new_str.as_str());
+                } else {
+                    return Err(VMError::runtime(
+                        "box-string-push-char!: box must contain a string",
+                    ));
+                }
+                Ok(Value::nil())
+            }
+            _ => Err(VMError::runtime(
+                "box-string-push-char!: first argument must be a box",
+            )),
+        }
+    });
+
     // FFI builtins
     #[cfg(feature = "ffi")]
     register_ffi_builtins(vm, builtin);
