@@ -93,6 +93,11 @@ pub struct VM {
     /// Avoids re-parsing the JSON descriptor string on every PushHandler.
     pub(crate) handler_descriptor_cache: FxHashMap<usize, HandlerDescriptor>,
 
+    /// Global resolution cache: maps constant string pointer → resolved Value.
+    /// Avoids repeated HashMap lookups in PushGlobal for stable globals (builtins etc.).
+    /// Cleared on every SetGlobal to handle redefinitions.
+    pub(crate) global_cache: FxHashMap<*const ConstantValue, Value>,
+
     // --- JIT ---
     /// JIT compilation engine (lazily initialized on first hot function).
     #[cfg(feature = "jit")]
@@ -125,6 +130,7 @@ impl VM {
             dirty_globals: None,
             current_pid: None,
             handler_descriptor_cache: FxHashMap::default(),
+            global_cache: FxHashMap::default(),
             #[cfg(feature = "jit")]
             jit_engine: None,
             #[cfg(feature = "jit")]
@@ -793,41 +799,54 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
             Op::PushGlobal => {
                 // SAFETY: operand is a valid constant index
-                let cval = unsafe { &*constants.add(inst.operand as usize) };
-                match cval {
-                    ConstantValue::String(s) => {
-                        // Resolve against closure's home module first, then root
-                        let closure_module = vm.frames[frame_idx].closure.module_id;
-                        match vm.resolve_global(s.as_str(), closure_module) {
-                            Some(v) => vm.push(v.clone()),
-                            None => {
-                                // Fallback: strip hygiene marks and retry
-                                let stripped = crate::expand::strip_all_marks(s);
-                                if stripped != s.as_str() {
-                                    if let Some(v) = vm.resolve_global(stripped, closure_module) {
-                                        vm.push(v.clone());
+                let cval_ptr = unsafe { constants.add(inst.operand as usize) };
+                let cval = unsafe { &*cval_ptr };
+
+                // Fast path: check global resolution cache (stable for builtins)
+                if let Some(cached) = vm.global_cache.get(&(cval_ptr as *const ConstantValue)) {
+                    vm.push(cached.clone());
+                } else {
+                    match cval {
+                        ConstantValue::String(s) => {
+                            let closure_module = vm.frames[frame_idx].closure.module_id;
+                            let resolved = vm
+                                .resolve_global(s.as_str(), closure_module)
+                                .cloned()
+                                .or_else(|| {
+                                    let stripped = crate::expand::strip_all_marks(s);
+                                    if stripped != s.as_str() {
+                                        vm.resolve_global(stripped, closure_module).cloned()
                                     } else {
-                                        vm.frames[frame_idx].ip = ip;
-                                        return Err(VMSignal::Error(vm.vm_error(
-                                            format!("Undefined variable: {}", stripped),
-                                            &vm.frames[frame_idx],
-                                        )));
+                                        None
                                     }
-                                } else {
+                                });
+                            match resolved {
+                                Some(v) => {
+                                    vm.global_cache
+                                        .insert(cval_ptr as *const ConstantValue, v.clone());
+                                    vm.push(v);
+                                }
+                                None => {
                                     vm.frames[frame_idx].ip = ip;
                                     return Err(VMSignal::Error(vm.vm_error(
-                                        format!("Undefined variable: {}", s),
+                                        format!(
+                                            "Undefined variable: {}",
+                                            match cval {
+                                                ConstantValue::String(s) => s.as_str(),
+                                                _ => "<unknown>",
+                                            }
+                                        ),
                                         &vm.frames[frame_idx],
                                     )));
                                 }
                             }
                         }
-                    }
-                    _ => {
-                        vm.frames[frame_idx].ip = ip;
-                        return Err(VMSignal::Error(
-                            vm.vm_error("Global name must be string", &vm.frames[frame_idx]),
-                        ));
+                        _ => {
+                            vm.frames[frame_idx].ip = ip;
+                            return Err(VMSignal::Error(
+                                vm.vm_error("Global name must be string", &vm.frames[frame_idx]),
+                            ));
+                        }
                     }
                 }
             }
@@ -866,10 +885,12 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 arity,
                             }),
                         );
+                        vm.global_cache.clear();
                         continue;
                     }
                 }
                 vm.module_globals[target_module as usize].insert(name, value);
+                vm.global_cache.clear();
             }
 
             Op::Pop => {
