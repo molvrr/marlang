@@ -1962,11 +1962,12 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                 // Parse the performed operation name (could be "effectName/opName" or just "opName")
                 // Use rsplit_once to handle effect names with slashes (e.g., "io/IO")
+                // Use borrowed &str to avoid String allocation on every Perform.
                 let (performed_effect, performed_op) =
                     if let Some((eff, op)) = op_name_ref.rsplit_once('/') {
-                        (eff.to_string(), op.to_string())
+                        (eff, op)
                     } else {
-                        (String::new(), op_name_ref.to_string())
+                        ("", op_name_ref)
                     };
 
                 // Walk handler stack to find a matching handler
