@@ -1,0 +1,198 @@
+; =========================================================================
+; Notes App — Phase 1 example (pure SSR, no WebSocket)
+;
+; A simple note-taking app demonstrating:
+;   - Response ADT (ok, redirect)
+;   - HTML DSL
+;   - Routing with path parameters
+;   - Form handling (POST + redirect)
+;   - Server-side state via actor-backed cells
+;   - Automatic 500 error pages on handler failure
+;
+; Run with:
+;   cargo run -p marlang-cli -- run examples/notes-app.mar
+;
+; Then open http://127.0.0.1:3000
+; =========================================================================
+
+(import "std:web" as w)
+(import "std:io" as io)
+
+; =========================================================================
+; State
+; =========================================================================
+
+(define next-id (w/cell-new 1))
+(define notes (w/cell-new (list)))
+
+; Generate a fresh ID and increment the counter.
+(define gen-id (lambda ()
+  (let ((id (w/cell-get next-id)))
+    (begin (w/cell-set next-id (+ id 1)) id))))
+
+; Find a note by ID in a list. Returns (Option (Pair Int (Pair String String))).
+(define find-note (lambda (target-id note-list)
+  (match note-list
+    (Nil None)
+    ((Cons (MkPair id data) rest)
+      (if (= id target-id) (Some (MkPair id data)) (find-note target-id rest))))))
+
+; Remove a note by ID from a list.
+(define remove-note (lambda (target-id note-list)
+  (match note-list
+    (Nil (list))
+    ((Cons (MkPair id data) rest)
+      (if (= id target-id) rest (Cons (MkPair id data) (remove-note target-id rest)))))))
+
+; Truncate a string with ellipsis.
+(define truncate-text (lambda (s max-len)
+  (if (<= (string-length s) max-len) s
+    (string-append (string-substring s 0 max-len) "..."))))
+
+; =========================================================================
+; CSS
+; =========================================================================
+
+(define css "
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 0 auto; padding: 2rem; color: #1a1a1a; background: #fafafa; }
+  nav { margin-bottom: 2rem; }
+  nav a { font-size: 1.3rem; text-decoration: none; color: #333; font-weight: 600; }
+  h1 { margin-bottom: 1rem; }
+  .note { background: white; padding: 1rem 1.25rem; border-radius: 8px; margin-bottom: 0.75rem; border: 1px solid #e5e5e5; }
+  .note h3 { margin: 0 0 0.25rem; font-size: 1rem; }
+  .note h3 a { color: #1a1a1a; text-decoration: none; }
+  .note h3 a:hover { text-decoration: underline; }
+  .note p { margin: 0; color: #555; font-size: 0.9rem; white-space: pre-wrap; }
+  .add-form { background: white; padding: 1.25rem; border-radius: 8px; margin-bottom: 1.5rem; border: 1px solid #e5e5e5; }
+  .add-form input, .add-form textarea { display: block; width: 100%; margin-bottom: 0.5rem; padding: 0.5rem 0.75rem; border: 1px solid #ddd; border-radius: 4px; font-size: 0.95rem; font-family: inherit; }
+  .add-form textarea { resize: vertical; }
+  button { padding: 0.4rem 1rem; border: 1px solid #ccc; border-radius: 4px; background: white; cursor: pointer; font-size: 0.9rem; }
+  button:hover { background: #f0f0f0; }
+  button[type=submit] { background: #333; color: white; border-color: #333; }
+  button[type=submit]:hover { background: #555; }
+  .detail-body { white-space: pre-wrap; line-height: 1.6; margin: 1rem 0; }
+  .back { display: inline-block; margin-bottom: 1rem; color: #666; text-decoration: none; }
+  .back:hover { color: #333; }
+  .empty { color: #999; font-style: italic; }
+  .actions { margin-top: 0.75rem; }
+")
+
+; =========================================================================
+; Layout
+; =========================================================================
+
+(define layout (lambda (title-text body-html)
+  (w/html (list (MkPair "lang" "en"))
+    (string-append
+      (w/head (string-append
+        (w/title (string-append title-text " — Notes"))
+        (w/meta (list (MkPair "charset" "utf-8")))
+        (w/meta (list (MkPair "name" "viewport") (MkPair "content" "width=device-width, initial-scale=1")))
+        (w/style css)))
+      (w/body (list)
+        (string-append
+          (w/nav (list) (w/a (list (MkPair "href" "/")) "Notes"))
+          (w/main (list) body-html)))))))
+
+; =========================================================================
+; Handlers
+; =========================================================================
+
+; Render a list of note summaries.
+(define render-note-list (lambda (note-list)
+  (match note-list
+    (Nil (w/p (list (MkPair "class" "empty")) (w/em "No notes yet.")))
+    ((Cons (MkPair id (MkPair note-title note-body)) rest)
+      (string-append
+        (w/div (list (MkPair "class" "note"))
+          (string-append
+            (w/h3 (list)
+              (w/a (list (MkPair "href" (string-append "/notes/" (show id))))
+                (w/text note-title)))
+            (w/p (list) (w/text (truncate-text note-body 120)))))
+        (render-note-list rest))))))
+
+; GET / — list all notes + add form
+(define handle-home (lambda ()
+  (let ((all-notes (w/cell-get notes)))
+    (w/ok
+      (layout "Home"
+        (string-append
+          (w/h1 (list) "Notes")
+          (w/div (list (MkPair "class" "add-form"))
+            (w/form (list (MkPair "method" "post") (MkPair "action" "/notes"))
+              (string-append
+                (w/input (list (MkPair "type" "text")
+                               (MkPair "name" "title")
+                               (MkPair "placeholder" "Title")
+                               (MkPair "required" "true")))
+                (w/textarea (list (MkPair "name" "body")
+                                  (MkPair "placeholder" "Write something...")
+                                  (MkPair "rows" "3")) "")
+                (w/button (list (MkPair "type" "submit")) "Add Note"))))
+          (render-note-list all-notes)))))))
+
+; POST /notes — create note, redirect to /
+(define handle-create-note (lambda ()
+  (let ((note-title (match (w/form-val "title") ((Some t) t) (None "")))
+        (note-body  (match (w/form-val "body")  ((Some b) b) (None ""))))
+    (let ((id (gen-id)))
+      (begin
+        (w/cell-update notes (lambda (ns)
+          (append ns (list (MkPair id (MkPair note-title note-body))))))
+        (w/redirect "/"))))))
+
+; GET /notes/:id — view single note
+(define handle-view-note (lambda ()
+  (match (w/param "id")
+    (None (w/redirect "/"))
+    ((Some id-str)
+      (match (__try-string->int id-str)
+        (None (w/redirect "/"))
+        ((Some id)
+          (let ((all-notes (w/cell-get notes)))
+            (match (find-note id all-notes)
+              (None
+                (w/ok (layout "Not Found"
+                  (string-append
+                    (w/a (list (MkPair "href" "/") (MkPair "class" "back")) "← Back")
+                    (w/h1 (list) "Note not found")))))
+              ((Some (MkPair _ (MkPair note-title note-body)))
+                (w/ok (layout note-title
+                  (string-append
+                    (w/a (list (MkPair "href" "/") (MkPair "class" "back")) "← Back")
+                    (w/h1 (list) (w/text note-title))
+                    (w/div (list (MkPair "class" "detail-body")) (w/text note-body))
+                    (w/div (list (MkPair "class" "actions"))
+                      (w/form (list (MkPair "method" "post")
+                                    (MkPair "action" (string-append "/notes/" (show id) "/delete")))
+                        (w/button (list (MkPair "type" "submit")) "Delete")))))))))))))))
+
+; POST /notes/:id/delete — delete note, redirect to /
+(define handle-delete-note (lambda ()
+  (match (w/param "id")
+    (None (w/redirect "/"))
+    ((Some id-str)
+      (match (__try-string->int id-str)
+        (None (w/redirect "/"))
+        ((Some id)
+          (begin
+            (w/cell-update notes (lambda (ns) (remove-note id ns)))
+            (w/redirect "/"))))))))
+
+; =========================================================================
+; Routes
+; =========================================================================
+
+(define routes (list
+  (w/GET  "/"                   handle-home)
+  (w/GET  "/notes/:id"          handle-view-note)
+  (w/POST "/notes"              handle-create-note)
+  (w/POST "/notes/:id/delete"   handle-delete-note)))
+
+; =========================================================================
+; Start
+; =========================================================================
+
+(w/run! 3000 routes)

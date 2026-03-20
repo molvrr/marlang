@@ -1,7 +1,8 @@
-; Web framework — server-side rendering with HTMX live updates
+; Web framework — server-side rendering with live updates
 ;
-; Provides: HTML DSL, routing, request context effect, state cells
-; (actor-backed observable values), HTMX helpers, and a server runner.
+; Provides: HTML DSL, routing, request context effect, Response ADT,
+; state cells (actor-backed observable values), static file serving,
+; and a server runner.
 ;
 ; Usage:
 ;   (import "std:web" as w)
@@ -15,6 +16,32 @@
 (import "std:io" as io)
 (import "std:concurrent" as conc)
 (import "std:actor" as actor)
+
+; =========================================================================
+; Response ADT
+; =========================================================================
+
+; Every route handler returns a Response value.
+; dispatch inspects it to send the appropriate HTTP response.
+
+(data Response
+  (HtmlResponse String)
+  (RedirectResponse String)
+  (TextResponse Int (List (Pair String String)) String))
+
+; Convenience constructors
+
+; ok : (-> String Response)
+; Respond with 200 and HTML content.
+(define ok (lambda (content) (HtmlResponse content)))
+
+; redirect : (-> String Response)
+; Respond with 303 See Other to the given URL.
+(define redirect (lambda (url) (RedirectResponse url)))
+
+; text-response : (-> Int (List (Pair String String)) String Response)
+; Respond with a custom status, headers, and text body.
+(define text-response (lambda (status headers body) (TextResponse status headers body)))
 
 ; =========================================================================
 ; HTML DSL
@@ -103,17 +130,6 @@
 (define code    (lambda (a c) (el "code" a c)))
 
 ; =========================================================================
-; HTMX attribute helpers
-; =========================================================================
-
-(define hx-get     (lambda (url) (MkPair "hx-get" url)))
-(define hx-post    (lambda (url) (MkPair "hx-post" url)))
-(define hx-target  (lambda (sel) (MkPair "hx-target" sel)))
-(define hx-swap    (lambda (s)   (MkPair "hx-swap" s)))
-(define hx-trigger (lambda (t)   (MkPair "hx-trigger" t)))
-(define hx-vals    (lambda (j)   (MkPair "hx-vals" j)))
-
-; =========================================================================
 ; URL / form parsing
 ; =========================================================================
 
@@ -167,10 +183,13 @@
 
 ; A route is a triple: (method, pattern, handler).
 ; Stored as nested pairs to avoid ADT effect-row constraints.
-; Handler is a thunk that may perform Ctx effects and returns HTML.
+; Handler is a thunk that may perform Ctx effects and returns Response.
 
-(define GET  (lambda (pattern handler) (MkPair "GET"  (MkPair pattern handler))))
-(define POST (lambda (pattern handler) (MkPair "POST" (MkPair pattern handler))))
+(define GET    (lambda (pattern handler) (MkPair "GET"    (MkPair pattern handler))))
+(define POST   (lambda (pattern handler) (MkPair "POST"   (MkPair pattern handler))))
+(define PUT    (lambda (pattern handler) (MkPair "PUT"    (MkPair pattern handler))))
+(define DELETE (lambda (pattern handler) (MkPair "DELETE" (MkPair pattern handler))))
+(define PATCH  (lambda (pattern handler) (MkPair "PATCH"  (MkPair pattern handler))))
 
 ; Split "/a/b/c" into ("a" "b" "c"), dropping empty segments
 (define split-path (lambda (path)
@@ -230,14 +249,14 @@
 (define path       (lambda () (perform ctx-path)))
 
 ; Install the Ctx handler and run a handler thunk
-(define run-handler (lambda (method path params query-params form-params headers handler)
+(define run-handler (lambda (meth pth params query-params form-params headers handler)
   (handle (handler)
     ((ctx-param  key k) -> (resume k (lookup key params)))
     ((ctx-query  key k) -> (resume k (lookup key query-params)))
     ((ctx-form   key k) -> (resume k (lookup key form-params)))
     ((ctx-header key k) -> (resume k (lookup key headers)))
-    ((ctx-method k)     -> (resume k method))
-    ((ctx-path   k)     -> (resume k path)))))
+    ((ctx-method k)     -> (resume k meth))
+    ((ctx-path   k)     -> (resume k pth)))))
 
 ; =========================================================================
 ; State cells — actor-backed observable values
@@ -275,6 +294,73 @@
     (cell-set cell (f old)))))
 
 ; =========================================================================
+; Error pages
+; =========================================================================
+
+(define error-page-style "font-family:system-ui,sans-serif;max-width:640px;margin:0 auto;padding:2rem;color:#333")
+
+(define error-page-500 (lambda (msg)
+  (html (list (MkPair "lang" "en"))
+    (string-append
+      (head (string-append
+        (title "500 Internal Server Error")
+        (meta (list (MkPair "charset" "utf-8")))))
+      (body (list (MkPair "style" error-page-style))
+        (string-append
+          (h1 (list) "500 Internal Server Error")
+          (pre (list (MkPair "style" "margin-top:1rem;padding:1rem;background:#f5f5f5;border-radius:4px;overflow-x:auto"))
+            (code (list) (text msg)))))))))
+
+(define not-found-page (lambda (path-str)
+  (html (list (MkPair "lang" "en"))
+    (string-append
+      (head (string-append
+        (title "404 Not Found")
+        (meta (list (MkPair "charset" "utf-8")))))
+      (body (list (MkPair "style" error-page-style))
+        (string-append
+          (h1 (list) "404 Not Found")
+          (p (list) (string-append "The page " (text path-str) " could not be found."))))))))
+
+; =========================================================================
+; Static file serving
+; =========================================================================
+
+; Determine MIME type from file extension.
+(define mime-type (lambda (path)
+  (if (string-ends-with path ".html") "text/html; charset=utf-8"
+  (if (string-ends-with path ".css") "text/css; charset=utf-8"
+  (if (string-ends-with path ".js") "application/javascript; charset=utf-8"
+  (if (string-ends-with path ".json") "application/json; charset=utf-8"
+  (if (string-ends-with path ".svg") "image/svg+xml"
+  (if (string-ends-with path ".xml") "application/xml"
+  (if (string-ends-with path ".txt") "text/plain; charset=utf-8"
+  (if (string-ends-with path ".ico") "image/x-icon"
+  (if (string-ends-with path ".png") "image/png"
+  (if (string-ends-with path ".jpg") "image/jpeg"
+  (if (string-ends-with path ".jpeg") "image/jpeg"
+  (if (string-ends-with path ".gif") "image/gif"
+  (if (string-ends-with path ".woff") "font/woff"
+  (if (string-ends-with path ".woff2") "font/woff2"
+  (if (string-ends-with path ".wasm") "application/wasm"
+  "application/octet-stream")))))))))))))))))
+
+; serve-file : (-> HttpConnection String String Bool)
+; Serve a static file. base-dir is the filesystem directory, url-path
+; is the path relative to it. Reads the file as bytes and responds with
+; the correct Content-Type. Returns #t if the file was served, #f if not found.
+(define serve-file (lambda (conn base-dir url-path)
+  (let ((file-path (string-append base-dir url-path)))
+    (match (io/read-file-bytes file-path)
+      ((Ok content)
+        (begin
+          (http/respond! conn 200
+            (list (MkPair "content-type" (mime-type url-path)))
+            content)
+          #t))
+      ((Err _) #f)))))
+
+; =========================================================================
 ; Server
 ; =========================================================================
 
@@ -284,10 +370,24 @@
     ((Cons (MkPair k v) rest)
       (Cons (MkPair (string-to-lower k) v) (headers->pairs rest))))))
 
+; Send the appropriate HTTP response for a Response value.
+(define send-response (lambda (conn response)
+  (match response
+    ((HtmlResponse content)
+      (http/respond-text! conn 200
+        (list (MkPair "content-type" "text/html; charset=utf-8"))
+        content))
+    ((RedirectResponse url)
+      (http/respond-text! conn 303
+        (list (MkPair "location" url)
+              (MkPair "content-type" "text/plain"))
+        ""))
+    ((TextResponse status hdrs body-text)
+      (http/respond-text! conn status hdrs body-text)))))
+
 ; Dispatch a single request
 (define dispatch (lambda (method full-path headers body conn routes)
-  (let ((split   (split-query full-path))
-        (qstring ""))
+  (let ((split (split-query full-path)))
     (match split
       ((MkPair clean-path qs)
         (let ((query-params (parse-params qs))
@@ -296,26 +396,36 @@
                                ((Ok s) (parse-params s))
                                ((Err _) (list)))
                              (list)))
-              (hdrs         (headers->pairs headers)))
+              (hdrs (headers->pairs headers)))
           (match (match-routes method clean-path routes)
             ((Some (MkPair handler params))
-              (let ((html (run-handler method clean-path params query-params form-params hdrs handler)))
-                (http/respond-text! conn 200
-                  (list (MkPair "content-type" "text/html; charset=utf-8"))
-                  html)))
+              (handle
+                (let ((response (run-handler method clean-path params query-params form-params hdrs handler)))
+                  (send-response conn response))
+                ((throw msg k) ->
+                  (begin
+                    (io/println (string-append "500 error: " msg))
+                    (let ((ignored (http/respond-text conn 500
+                            (list (MkPair "content-type" "text/html; charset=utf-8"))
+                            (error-page-500 msg))))
+                      nil)))))
             (None
               (http/respond-text! conn 404
-                (list (MkPair "content-type" "text/plain"))
-                "404 Not Found")))))))))
+                (list (MkPair "content-type" "text/html; charset=utf-8"))
+                (not-found-page full-path))))))))))
 
-; Accept loop
+; Accept loop — catches unhandled errors so the server keeps running
 (define accept-loop (lambda (server routes)
   (match (http/accept server)
     (None nil)
     ((Some (HttpRequest method path headers body conn))
       (begin
-        (io/println (string-append method " " path))
-        (dispatch method path headers body conn routes)
+        (handle
+          (begin
+            (io/println (string-append method " " path))
+            (dispatch method path headers body conn routes))
+          ((throw msg k) ->
+            (io/println (string-append "Unhandled error: " msg))))
         (accept-loop server routes))))))
 
 ; Re-export commonly needed http functions

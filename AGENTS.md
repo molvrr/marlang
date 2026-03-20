@@ -55,6 +55,9 @@ Located in `stdlib/`:
 - `codec.mar` - Bidirectional parser/printer: Iso type, Codec (parse/print/round-trip), combinators (seq, alt, many, between, sep-by, choice), character codecs (satisfy, digit, letter, space), numeric codecs (nat, integer), isomorphisms (iso-chars, iso-int, iso-float, iso-cons, iso-some), convenience (token, symbol, parens, braces, brackets), parse-only compat (chainl1, chainr1, or-else)
 - `net.mar` - TCP networking wrappers: safe (connect, listen, send return Result) and throwing (connect!, listen!, send! raise on error), plus accept, recv, close, close-listener
 - `http.mar` - HTTP client and server: HttpMethod ADT (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS), HttpResponse ADT (status, headers, body as Bytes), HttpRequest ADT (method, path, headers, body, connection handle). Client: safe (get, post, request return Result) and throwing (get!, post!, request! raise on error) variants. Server: serve/serve! (bind port), accept (returns Option HttpRequest), respond/respond! (send response via connection handle), close-server (shutdown). Backed by hyper in the multi-threaded scheduler. Both HTTP and HTTPS supported for client (TLS via rustls with native OS certificates).
+- `ws.mar` - WebSocket module: WsMessage ADT (WsText, WsBinary), WebSocket effect (ws-upgrade, ws-send, ws-send-bin, ws-recv, ws-close), upgrade? predicate, safe and throwing wrappers.
+- `web.mar` - Web framework: Response ADT (HtmlResponse, RedirectResponse, TextResponse), HTML DSL (el, void-el, named elements, text escaping), routing (GET/POST/PUT/DELETE/PATCH with :param extraction), Ctx effect (param, query, form-val, header, method, path), state cells (cell-new, cell-get, cell-set, cell-update), error pages (500, 404), static file serving (serve-file, mime-type), server runner (run!, dispatch, accept-loop).
+- `json.mar` - RFC 8259 compliant JSON codec: Json ADT (JsonNull, JsonBool, JsonInt, JsonFloat, JsonString, JsonArray, JsonObject), encode/decode, accessors (json-get, json-nth, json-string, json-int, etc.).
 
 Note: ADT constructors (None, Some, Nil, Cons, MkPair, Ok, Err) and utility functions (not, cons, car, cdr, append, string->int, string->float) are defined in `stdlib/prelude.mar`, not as Rust builtins. The prelude is auto-loaded before every program.
 
@@ -129,7 +132,7 @@ Without a handler, `throw` crashes the fiber. Note: `string->int` and `string->f
 
 ## General Principles
 
-- Never take hacky approaches. Always implement the proper, clean solution.
+- Never take hacky approaches. Always implement the proper, clean solution, even if that means things are momentarily broken.
 
 ## Workflow
 

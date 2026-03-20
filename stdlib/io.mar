@@ -28,7 +28,9 @@
   (println (-> a Unit))
   (read-line (-> Unit String))
   (read-file (-> String (Result String String)))
-  (write-file (-> String String (Result String Unit))))
+  (read-file-bytes (-> String (Result String Bytes)))
+  (write-file (-> String String (Result String Unit)))
+  (write-file-bytes (-> String Bytes (Result String Unit))))
 
 ; === Console IO Operations ===
 
@@ -68,5 +70,29 @@
 ; Write a string to a file. Throws on error.
 (define write-file! (lambda (path content)
   (match (write-file path content)
+    ((Ok _) nil)
+    ((Err msg) (raise msg)))))
+
+; === Binary File IO Operations ===
+
+; read-file-bytes : (-> String {IO} (Result String Bytes))
+; Read the entire contents of a file as raw bytes. Returns (Ok bytes) or (Err msg).
+(define read-file-bytes (lambda (path) (perform read-file-bytes path)))
+
+; read-file-bytes! : (-> String {IO, Exception} Bytes)
+; Read the entire contents of a file as raw bytes. Throws on error.
+(define read-file-bytes! (lambda (path)
+  (match (read-file-bytes path)
+    ((Ok content) content)
+    ((Err msg) (raise msg)))))
+
+; write-file-bytes : (-> String Bytes {IO} (Result String Unit))
+; Write raw bytes to a file (overwrites existing content). Returns (Ok nil) or (Err msg).
+(define write-file-bytes (lambda (path content) (perform write-file-bytes path content)))
+
+; write-file-bytes! : (-> String Bytes {IO, Exception} Unit)
+; Write raw bytes to a file. Throws on error.
+(define write-file-bytes! (lambda (path content)
+  (match (write-file-bytes path content)
     ((Ok _) nil)
     ((Err msg) (raise msg)))))

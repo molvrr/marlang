@@ -90,8 +90,7 @@
   .status .dot.live { background: #4a4; }
 ")
 
-; Tiny inline JS: HTMX WebSocket extension for receiving server-pushed HTML.
-; When the server sends <div id="X">...</div>, replace #X's innerHTML.
+; Client JS: WebSocket for live updates + fetch() for actions.
 (define client-js "
   let ws; let dot;
   function connect() {
@@ -108,6 +107,12 @@
       }
     };
   }
+  function post(url) { fetch(url, {method:'POST'}); }
+  function submitForm(form, url) {
+    fetch(url, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:new URLSearchParams(new FormData(form))});
+    form.reset();
+    return false;
+  }
   document.addEventListener('DOMContentLoaded', () => { dot = document.querySelector('.dot'); connect(); });
 ")
 
@@ -118,7 +123,6 @@
         (w/title title-text)
         (w/meta (list (MkPair "charset" "utf-8")))
         (w/meta (list (MkPair "name" "viewport") (MkPair "content" "width=device-width,initial-scale=1")))
-        (w/script (list (MkPair "src" "https://unpkg.com/htmx.org@2.0.4")) "")
         (w/style css)
         (w/script (list) client-js)))
       (w/body (list) body-html)))))
@@ -133,13 +137,13 @@
 (define map-msg (lambda (msgs)
   (match msgs
     (Nil (list))
-    ((Cons (MkPair author text) rest)
+    ((Cons (MkPair author msg-text) rest)
       (Cons
         (w/div (list (MkPair "class" "msg"))
           (string-append
             (w/span (list (MkPair "class" "msg-author")) (w/text author))
             " "
-            (w/span (list) (w/text text))))
+            (w/span (list) (w/text msg-text))))
         (map-msg rest))))))
 
 (define render-messages (lambda ()
@@ -153,54 +157,51 @@
 ; =========================================================================
 
 (define handle-home (lambda ()
-  (layout "Live Dashboard"
-    (string-append
-      (w/h1 (list) "Live Dashboard")
+  (w/ok
+    (layout "Live Dashboard"
+      (string-append
+        (w/h1 (list) "Live Dashboard")
 
-      ; --- Counter section ---
-      (w/div (list (MkPair "class" "card"))
-        (string-append
-          (w/h2 (list) "Shared Counter")
-          (w/div (list (MkPair "class" "counter-display")
-                       (MkPair "id" "counter-val"))
-            (render-counter-value))
-          (w/div (list (MkPair "class" "counter-buttons"))
-            (string-append
-              (w/button (list (w/hx-post "/api/decrement")
-                              (w/hx-swap "none"))
-                "-")
-              (w/button (list (w/hx-post "/api/increment")
-                              (w/hx-swap "none"))
-                "+")
-              (w/button (list (w/hx-post "/api/reset")
-                              (w/hx-swap "none"))
-                "Reset")))))
+        ; --- Counter section ---
+        (w/div (list (MkPair "class" "card"))
+          (string-append
+            (w/h2 (list) "Shared Counter")
+            (w/div (list (MkPair "class" "counter-display")
+                         (MkPair "id" "counter-val"))
+              (render-counter-value))
+            (w/div (list (MkPair "class" "counter-buttons"))
+              (string-append
+                (w/button (list (MkPair "onclick" "post('/api/decrement')"))
+                  "-")
+                (w/button (list (MkPair "onclick" "post('/api/increment')"))
+                  "+")
+                (w/button (list (MkPair "onclick" "post('/api/reset')"))
+                  "Reset")))))
 
-      ; --- Messages section ---
-      (w/div (list (MkPair "class" "card"))
-        (string-append
-          (w/h2 (list) "Message Board")
-          (w/form (list (MkPair "class" "msg-form")
-                        (w/hx-post "/api/message")
-                        (w/hx-swap "none"))
-            (string-append
-              (w/input (list (MkPair "type" "text")
-                             (MkPair "name" "author")
-                             (MkPair "placeholder" "Name")
-                             (MkPair "required" "true")))
-              (w/input (list (MkPair "type" "text")
-                             (MkPair "name" "text")
-                             (MkPair "placeholder" "Message...")
-                             (MkPair "required" "true")))
-              (w/button (list (MkPair "type" "submit")) "Send")))
-          (w/div (list (MkPair "id" "msg-list"))
-            (render-messages))))
+        ; --- Messages section ---
+        (w/div (list (MkPair "class" "card"))
+          (string-append
+            (w/h2 (list) "Message Board")
+            (w/form (list (MkPair "class" "msg-form")
+                          (MkPair "onsubmit" "return submitForm(this,'/api/message')"))
+              (string-append
+                (w/input (list (MkPair "type" "text")
+                               (MkPair "name" "author")
+                               (MkPair "placeholder" "Name")
+                               (MkPair "required" "true")))
+                (w/input (list (MkPair "type" "text")
+                               (MkPair "name" "text")
+                               (MkPair "placeholder" "Message...")
+                               (MkPair "required" "true")))
+                (w/button (list (MkPair "type" "submit")) "Send")))
+            (w/div (list (MkPair "id" "msg-list"))
+              (render-messages))))
 
-      ; Status indicator
-      (w/p (list (MkPair "class" "status"))
-        (string-append
-          (w/span (list (MkPair "class" "dot")) "")
-          " Live via WebSocket"))))))
+        ; Status indicator
+        (w/p (list (MkPair "class" "status"))
+          (string-append
+            (w/span (list (MkPair "class" "dot")) "")
+            " Live via WebSocket")))))))
 
 ; =========================================================================
 ; API endpoints — mutate state, broadcast to all clients
@@ -209,25 +210,25 @@
 (define handle-increment (lambda ()
   (w/cell-update counter (lambda (n) (+ n 1)))
   (broadcast "counter-val" (render-counter-value))
-  ""))
+  (w/ok "")))
 
 (define handle-decrement (lambda ()
   (w/cell-update counter (lambda (n) (- n 1)))
   (broadcast "counter-val" (render-counter-value))
-  ""))
+  (w/ok "")))
 
 (define handle-reset (lambda ()
   (w/cell-set counter 0)
   (broadcast "counter-val" (render-counter-value))
-  ""))
+  (w/ok "")))
 
 (define handle-post-message (lambda ()
   (let ((author (match (w/form-val "author") ((Some a) a) (None "Anon")))
-        (text   (match (w/form-val "text")   ((Some t) t) (None ""))))
+        (msg-text (match (w/form-val "text") ((Some t) t) (None ""))))
     (w/cell-update messages (lambda (msgs)
-      (Cons (MkPair author text) msgs)))
+      (Cons (MkPair author msg-text) msgs)))
     (broadcast "msg-list" (render-messages))
-    "")))
+    (w/ok ""))))
 
 ; =========================================================================
 ; WebSocket handler — each connected browser tab spawns one
@@ -274,8 +275,6 @@
           (if (ws/upgrade? headers)
             (match (ws/upgrade conn)
               ((Ok ws-conn)
-                ; Spawn the WS handler — the upgrade is done, now we just
-                ; need to hold the connection and listen for close.
                 (begin
                   (conc/spawn (lambda () (handle-ws ws-conn)))
                   nil))

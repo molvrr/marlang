@@ -372,7 +372,9 @@ const HANDLED_EFFECTS: &[&str] = &[
     "println",
     "read-line",
     "read-file",
+    "read-file-bytes",
     "write-file",
+    "write-file-bytes",
     // Layer 4: TCP
     "tcp-connect",
     "tcp-listen",
@@ -978,6 +980,53 @@ fn handle_effect(
                 let result = match tokio::fs::write(&path, content.as_bytes()).await {
                     Ok(_) => Ok(make_ok(Value::nil())),
                     Err(e) => Ok(make_err(&format!("write-file: {}", e))),
+                };
+                let _ = sender.send(SchedulerMessage::IoComplete { pid, result });
+            });
+        }
+
+        "read-file-bytes" => {
+            let path = args
+                .first()
+                .and_then(|v| v.as_string())
+                .ok_or_else(|| VMError::runtime("read-file-bytes: path must be a string"))?
+                .to_string();
+            let sender = shared.scheduler_senders[sched.id].clone();
+            let pid = sched.current_pid;
+
+            sched.io_parked.insert(pid, cont);
+            shared.pending_io.fetch_add(1, Ordering::AcqRel);
+
+            shared.tokio_handle.spawn(async move {
+                let result = match tokio::fs::read(&path).await {
+                    Ok(data) => Ok(make_ok(Value::bytes(data))),
+                    Err(e) => Ok(make_err(&format!("read-file-bytes: {}", e))),
+                };
+                let _ = sender.send(SchedulerMessage::IoComplete { pid, result });
+            });
+        }
+
+        "write-file-bytes" => {
+            let path = args
+                .first()
+                .and_then(|v| v.as_string())
+                .ok_or_else(|| VMError::runtime("write-file-bytes: path must be a string"))?
+                .to_string();
+            let content = args
+                .get(1)
+                .and_then(|v| v.as_bytes())
+                .ok_or_else(|| VMError::runtime("write-file-bytes: content must be Bytes"))?
+                .to_vec();
+            let sender = shared.scheduler_senders[sched.id].clone();
+            let pid = sched.current_pid;
+
+            sched.io_parked.insert(pid, cont);
+            shared.pending_io.fetch_add(1, Ordering::AcqRel);
+
+            shared.tokio_handle.spawn(async move {
+                let result = match tokio::fs::write(&path, &content).await {
+                    Ok(_) => Ok(make_ok(Value::nil())),
+                    Err(e) => Ok(make_err(&format!("write-file-bytes: {}", e))),
                 };
                 let _ = sender.send(SchedulerMessage::IoComplete { pid, result });
             });
