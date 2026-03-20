@@ -446,10 +446,11 @@ fn value_to_f64(v: &Value, fn_name: &str, arg_idx: usize) -> Result<f64, VMError
 }
 
 fn value_to_pointer(v: &Value, fn_name: &str, arg_idx: usize) -> Result<u64, VMError> {
-    // Accept: FfiPointer, FfiStruct (buffer pointer), nil (null), or number
+    // Accept: FfiPointer, FfiStruct (buffer pointer), ByteArray, nil (null), or number
     match v.as_object() {
         Some(VMObject::FfiPointer(addr)) => Ok(*addr),
         Some(VMObject::FfiStruct(s)) => Ok(s.buffer.as_ptr() as u64),
+        Some(VMObject::ByteArray(bytes)) => Ok(bytes.as_ptr() as u64),
         _ => {
             if v.is_nil() {
                 Ok(0)

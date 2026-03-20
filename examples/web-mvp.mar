@@ -1,9 +1,9 @@
 ; =========================================================================
-; Live Dashboard — web framework MVP with WebSocket push
+; Live Dashboard — web framework with WebSocket + morphdom
 ;
-; A shared counter + message board. State lives in actor-backed cells.
-; Mutations push HTML fragments to all connected clients instantly via
-; WebSocket — no polling.
+; A shared counter + message board. State lives in live sources that
+; auto-push HTML fragments to all connected clients via WebSocket.
+; The client uses morphdom for efficient DOM patching.
 ;
 ; Run with:
 ;   cargo run -p marlang-cli -- run examples/web-mvp.mar
@@ -12,59 +12,41 @@
 ; =========================================================================
 
 (import "std:web" as w)
-(import "std:ws" as ws)
 (import "std:io" as io)
-(import "std:concurrent" as conc)
-(import "std:actor" as actor)
 
 ; =========================================================================
-; State — actor-backed cells
+; Render helpers (must be defined before live sources that reference them)
 ; =========================================================================
 
-(define counter  (w/cell-new 0))
-(define messages (w/cell-new (list)))
-
-; =========================================================================
-; Connected clients — a cell holding a list of WsConn handles
-; =========================================================================
-
-(define clients (w/cell-new (list)))
-
-(define filter-neq (lambda (target lst)
-  (match lst
+(define map-msg (lambda (msgs)
+  (match msgs
     (Nil (list))
-    ((Cons h rest)
-      (if (equal? h target) (filter-neq target rest)
-        (Cons h (filter-neq target rest)))))))
+    ((Cons (MkPair author msg-text) rest)
+      (Cons
+        (w/div (list (MkPair "class" "msg"))
+          (string-append
+            (w/span (list (MkPair "class" "msg-author")) (w/text author))
+            " "
+            (w/span (list) (w/text msg-text))))
+        (map-msg rest))))))
 
-(define add-client (lambda (ws-conn)
-  (w/cell-update clients (lambda (cs) (Cons ws-conn cs)))))
-
-(define remove-client (lambda (ws-conn)
-  (w/cell-update clients (lambda (cs) (filter-neq ws-conn cs)))))
-
-; Broadcast an HTML fragment to all connected clients.
-; The fragment is wrapped in a div with an id so the client JS
-; swaps it into the correct target on the page.
-(define broadcast-to (lambda (conns msg)
-  (match conns
-    (Nil nil)
-    ((Cons ws rest)
-      (begin
-        ; Send best-effort — ignore errors (client may have disconnected)
-        (ws/send ws msg)
-        (broadcast-to rest msg))))))
-
-(define broadcast (lambda (id html)
-  (let ((msg (w/div (list (MkPair "id" id)) html))
-        (conns (w/cell-get clients)))
-    (broadcast-to conns msg))))
-
-(define length (lambda (lst)
-  (match lst (Nil 0) ((Cons _ rest) (+ 1 (length rest))))))
+(define render-messages (lambda (msgs)
+  (if (nil? msgs)
+    (w/p (list (MkPair "class" "empty")) "No messages yet.")
+    (w/join (map-msg msgs)))))
 
 ; =========================================================================
-; Shared layout
+; Live sources — auto-push to all WebSocket clients on change
+; =========================================================================
+
+(define counter (w/live "counter-val" 0
+  (lambda (n) (show n))))
+
+(define messages (w/live "msg-list" (list)
+  render-messages))
+
+; =========================================================================
+; Layout
 ; =========================================================================
 
 (define css "
@@ -90,32 +72,6 @@
   .status .dot.live { background: #4a4; }
 ")
 
-; Client JS: WebSocket for live updates + fetch() for actions.
-(define client-js "
-  let ws; let dot;
-  function connect() {
-    ws = new WebSocket('ws://' + location.host + '/ws');
-    ws.onopen = () => { dot.classList.add('live'); dot.title = 'Connected'; };
-    ws.onclose = () => { dot.classList.remove('live'); dot.title = 'Disconnected'; setTimeout(connect, 1000); };
-    ws.onmessage = (e) => {
-      const tmp = document.createElement('div');
-      tmp.innerHTML = e.data;
-      const el = tmp.firstElementChild;
-      if (el && el.id) {
-        const target = document.getElementById(el.id);
-        if (target) target.innerHTML = el.innerHTML;
-      }
-    };
-  }
-  function post(url) { fetch(url, {method:'POST'}); }
-  function submitForm(form, url) {
-    fetch(url, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:new URLSearchParams(new FormData(form))});
-    form.reset();
-    return false;
-  }
-  document.addEventListener('DOMContentLoaded', () => { dot = document.querySelector('.dot'); connect(); });
-")
-
 (define layout (lambda (title-text body-html)
   (w/html (list (MkPair "lang" "en"))
     (string-append
@@ -124,36 +80,17 @@
         (w/meta (list (MkPair "charset" "utf-8")))
         (w/meta (list (MkPair "name" "viewport") (MkPair "content" "width=device-width,initial-scale=1")))
         (w/style css)
-        (w/script (list) client-js)))
-      (w/body (list) body-html)))))
+        (w/live-scripts)))
+      (w/body (list)
+        (string-append
+          (w/nav (list (MkPair "style" "margin-bottom:1.5rem;display:flex;gap:1rem"))
+            (string-append
+              (w/a (list (MkPair "href" "/")) "Dashboard")
+              (w/a (list (MkPair "href" "/about")) "About")))
+          body-html))))))
 
 ; =========================================================================
-; HTML fragments — rendered on mutation and pushed via WebSocket
-; =========================================================================
-
-(define render-counter-value (lambda ()
-  (show (w/cell-get counter))))
-
-(define map-msg (lambda (msgs)
-  (match msgs
-    (Nil (list))
-    ((Cons (MkPair author msg-text) rest)
-      (Cons
-        (w/div (list (MkPair "class" "msg"))
-          (string-append
-            (w/span (list (MkPair "class" "msg-author")) (w/text author))
-            " "
-            (w/span (list) (w/text msg-text))))
-        (map-msg rest))))))
-
-(define render-messages (lambda ()
-  (let ((msgs (w/cell-get messages)))
-    (if (nil? msgs)
-      (w/p (list (MkPair "class" "empty")) "No messages yet.")
-      (w/join (map-msg msgs))))))
-
-; =========================================================================
-; Home page
+; Handlers
 ; =========================================================================
 
 (define handle-home (lambda ()
@@ -168,15 +105,12 @@
             (w/h2 (list) "Shared Counter")
             (w/div (list (MkPair "class" "counter-display")
                          (MkPair "id" "counter-val"))
-              (render-counter-value))
+              (show (w/live-get counter)))
             (w/div (list (MkPair "class" "counter-buttons"))
               (string-append
-                (w/button (list (MkPair "onclick" "post('/api/decrement')"))
-                  "-")
-                (w/button (list (MkPair "onclick" "post('/api/increment')"))
-                  "+")
-                (w/button (list (MkPair "onclick" "post('/api/reset')"))
-                  "Reset")))))
+                (w/button (list (MkPair "onclick" "post('/api/decrement')")) "-")
+                (w/button (list (MkPair "onclick" "post('/api/increment')")) "+")
+                (w/button (list (MkPair "onclick" "post('/api/reset')")) "Reset")))))
 
         ; --- Messages section ---
         (w/div (list (MkPair "class" "card"))
@@ -195,96 +129,54 @@
                                (MkPair "required" "true")))
                 (w/button (list (MkPair "type" "submit")) "Send")))
             (w/div (list (MkPair "id" "msg-list"))
-              (render-messages))))
+              (render-messages (w/live-get messages)))))
 
         ; Status indicator
         (w/p (list (MkPair "class" "status"))
           (string-append
-            (w/span (list (MkPair "class" "dot")) "")
+            (w/span (list (MkPair "class" "dot ws-dot")) "")
             " Live via WebSocket")))))))
 
-; =========================================================================
-; API endpoints — mutate state, broadcast to all clients
-; =========================================================================
+(define handle-about (lambda ()
+  (w/ok
+    (layout "About"
+      (w/div (list (MkPair "class" "card"))
+        (string-append
+          (w/h1 (list) "About")
+          (w/p (list) "Live Dashboard — a real-time collaborative app powered by Marlang.")
+          (w/p (list (MkPair "style" "margin-top:0.75rem;color:#666"))
+            "State is shared across all connected clients via WebSocket. Navigation happens over WebSocket too — no full page reloads.")))))))
+
+; --- API endpoints ---
 
 (define handle-increment (lambda ()
-  (w/cell-update counter (lambda (n) (+ n 1)))
-  (broadcast "counter-val" (render-counter-value))
+  (w/live-update counter (lambda (n) (+ n 1)))
   (w/ok "")))
 
 (define handle-decrement (lambda ()
-  (w/cell-update counter (lambda (n) (- n 1)))
-  (broadcast "counter-val" (render-counter-value))
+  (w/live-update counter (lambda (n) (- n 1)))
   (w/ok "")))
 
 (define handle-reset (lambda ()
-  (w/cell-set counter 0)
-  (broadcast "counter-val" (render-counter-value))
+  (w/live-set counter 0)
   (w/ok "")))
 
 (define handle-post-message (lambda ()
   (let ((author (match (w/form-val "author") ((Some a) a) (None "Anon")))
         (msg-text (match (w/form-val "text") ((Some t) t) (None ""))))
-    (w/cell-update messages (lambda (msgs)
-      (Cons (MkPair author msg-text) msgs)))
-    (broadcast "msg-list" (render-messages))
+    (w/live-update messages (lambda (msgs) (Cons (MkPair author msg-text) msgs)))
     (w/ok ""))))
 
 ; =========================================================================
-; WebSocket handler — each connected browser tab spawns one
-; =========================================================================
-
-(define ws-read-loop (lambda (ws-conn)
-  (match (ws/recv ws-conn)
-    (None nil)
-    ((Some _) (ws-read-loop ws-conn)))))
-
-(define handle-ws (lambda (ws-conn)
-  (add-client ws-conn)
-  (io/println (string-append "client connected ("
-    (show (length (w/cell-get clients))) " total)"))
-  (ws-read-loop ws-conn)
-  (remove-client ws-conn)
-  (io/println (string-append "client disconnected ("
-    (show (length (w/cell-get clients))) " total)"))))
-
-; =========================================================================
-; Routes
+; Routes & Start
 ; =========================================================================
 
 (define routes (list
   (w/GET  "/"              handle-home)
+  (w/GET  "/about"         handle-about)
   (w/POST "/api/increment" handle-increment)
   (w/POST "/api/decrement" handle-decrement)
   (w/POST "/api/reset"     handle-reset)
   (w/POST "/api/message"   handle-post-message)))
 
-; =========================================================================
-; Server — handles both HTTP routes and WebSocket upgrades
-; =========================================================================
-
-; Accept loop. WS upgrade is done inline (it must complete before the
-; hyper connection is released). The long-lived WS read loop is spawned
-; into a fiber so the accept loop can continue processing HTTP requests.
-(define accept-loop (lambda (server)
-  (match (w/http-accept server)
-    (None nil)
-    ((Some (HttpRequest method path headers body conn))
-      (begin
-        (handle
-          (if (ws/upgrade? headers)
-            (match (ws/upgrade conn)
-              ((Ok ws-conn)
-                (begin
-                  (conc/spawn (lambda () (handle-ws ws-conn)))
-                  nil))
-              ((Err msg) nil))
-            (begin
-              (io/println (string-append method " " path))
-              (w/dispatch method path headers body conn routes)))
-          ((throw msg k) -> nil))
-        (accept-loop server))))))
-
-(let ((server (w/serve! 3000)))
-  (io/println "Listening on http://127.0.0.1:3000")
-  (accept-loop server))
+(w/run-live! 3000 routes)

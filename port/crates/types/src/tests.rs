@@ -1391,22 +1391,27 @@ fn variadic_lambda_too_few_args_fails() {
 
 #[test]
 fn effect_row_pure_lambda_inferred() {
-    // A pure lambda should get Closed([]) effect row
+    // A pure lambda gets an open effect row (effect-polymorphic)
     let types = check_ok("(lambda (x) (+ x 1))");
     let t = format_type(&types[0]);
-    assert_eq!(t, "(-> Int {} Int)");
+    // Open row: {ε...} — the row variable name varies, just check it's open
+    assert!(
+        t.contains("| ε") || t.contains("{ε"),
+        "expected open effect row in type, got: {}",
+        t
+    );
 }
 
 #[test]
 fn effect_row_effectful_lambda_inferred() {
-    // A lambda that performs IO should have IO in its effect row
+    // A lambda that performs IO should have IO in an open effect row
     let types = check_ok(
         r#"(effect IO
                (println (-> String Unit)))
            (lambda (x) (perform println x))"#,
     );
     let t = format_type(types.last().unwrap());
-    assert!(t.contains("{IO}"), "expected {{IO}} in type, got: {}", t);
+    assert!(t.contains("IO"), "expected IO in type, got: {}", t);
 }
 
 #[test]

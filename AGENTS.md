@@ -58,6 +58,7 @@ Located in `stdlib/`:
 - `ws.mar` - WebSocket module: WsMessage ADT (WsText, WsBinary), WebSocket effect (ws-upgrade, ws-send, ws-send-bin, ws-recv, ws-close), upgrade? predicate, safe and throwing wrappers.
 - `web.mar` - Web framework: Response ADT (HtmlResponse, RedirectResponse, TextResponse), HTML DSL (el, void-el, named elements, text escaping), routing (GET/POST/PUT/DELETE/PATCH with :param extraction), Ctx effect (param, query, form-val, header, method, path), state cells (cell-new, cell-get, cell-set, cell-update), error pages (500, 404), static file serving (serve-file, mime-type), server runner (run!, dispatch, accept-loop).
 - `json.mar` - RFC 8259 compliant JSON codec: Json ADT (JsonNull, JsonBool, JsonInt, JsonFloat, JsonString, JsonArray, JsonObject), encode/decode, accessors (json-get, json-nth, json-string, json-int, etc.).
+- `crypto.mar` - SHA-256 and HMAC-SHA256 via FFI to CommonCrypto (macOS). Functions: sha256 (Bytes→Bytes), hmac-sha256 (key→message→Bytes), hex (Bytes→String).
 
 Note: ADT constructors (None, Some, Nil, Cons, MkPair, Ok, Err) and utility functions (not, cons, car, cdr, append, string->int, string->float) are defined in `stdlib/prelude.mar`, not as Rust builtins. The prelude is auto-loaded before every program.
 

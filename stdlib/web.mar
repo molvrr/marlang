@@ -14,6 +14,7 @@
 
 (import "std:http" as http)
 (import "std:io" as io)
+(import "std:ws" as ws)
 (import "std:concurrent" as conc)
 (import "std:actor" as actor)
 
@@ -436,8 +437,327 @@
 (define http-accept   http/accept)
 (define http-respond  http/respond-text!)
 
-; Start the server
+; Start the server (SSR only, no WebSocket)
 (define run! (lambda (port routes)
   (let ((server (http/serve! port)))
     (io/println (string-append "Listening on http://127.0.0.1:" (show port)))
     (accept-loop server routes))))
+
+; =========================================================================
+; Live Updates — WebSocket + morphdom
+;
+; Live sources are reactive cells that auto-push HTML fragments to all
+; connected WebSocket clients when their value changes.
+;
+; Usage:
+;   (define counter (w/live "counter-val" 0 (lambda (n) (show n))))
+;   (w/live-update counter (lambda (n) (+ n 1)))  ; pushes to all clients
+;   (w/run-live! 3000 routes)
+; =========================================================================
+
+; --- ConnectionActor messages ---
+
+(data ConnMsg
+  (ConnUpdate String String)    ; target-id, html-fragment
+  (ConnWsText String)           ; text message from WebSocket client
+  (ConnWsClosed))               ; WebSocket closed
+
+; --- Helpers ---
+
+(define remove-sub (lambda (target subs)
+  (match subs
+    (Nil (list))
+    ((Cons s rest)
+      (if (equal? s target)
+        (remove-sub target rest)
+        (Cons s (remove-sub target rest)))))))
+
+(define broadcast-live (lambda (pids target-id frag-html)
+  (match pids
+    (Nil nil)
+    ((Cons pid rest)
+      (begin
+        (actor/send pid (ConnUpdate target-id frag-html))
+        (broadcast-live rest target-id frag-html))))))
+
+; --- Global registry of live sources (type-erased via closures) ---
+; Each entry is (Pair subscribe-fn unsubscribe-fn) where both take a Pid.
+
+(define __live-sources (cell-new (list)))
+
+; --- LiveHandle: typed handle returned to the user ---
+
+(data (LiveHandle a)
+  (MkLiveHandle Pid Pid String (-> a String)))
+; Fields: value-cell, subs-cell, target-id, render-fn
+
+; --- Public API ---
+
+; live : create a live source and register it globally.
+; target-id is the DOM element id to patch. render-fn converts the value to HTML.
+; Returns a typed LiveHandle for use with live-get / live-update / live-set.
+(define live (lambda (target-id initial render-fn)
+  (let ((val-cell (cell-new initial))
+        (subs-cell (cell-new (list))))
+    (let ((sub-fn
+            (lambda (conn-pid)
+              (begin
+                ; Add to subscribers first (ensures we catch concurrent updates)
+                (cell-update subs-cell (lambda (pids) (Cons conn-pid pids)))
+                ; Send current rendered state to new subscriber
+                (let ((current (cell-get val-cell)))
+                  (let ((frag-html (render-fn current)))
+                    (begin (actor/send conn-pid (ConnUpdate target-id frag-html)) nil))))))
+          (unsub-fn
+            (lambda (conn-pid)
+              (begin
+                (cell-update subs-cell (lambda (pids) (remove-sub conn-pid pids)))
+                nil))))
+      (begin
+        (cell-update __live-sources (lambda (sources)
+          (Cons (MkPair sub-fn unsub-fn) sources)))
+        (MkLiveHandle val-cell subs-cell target-id render-fn))))))
+
+; live-get : read the current value of a live source.
+(define live-get (lambda (handle)
+  (match handle
+    ((MkLiveHandle val-cell _ _ _)
+      (cell-get val-cell)))))
+
+; live-update : update the value and push the re-rendered fragment to all subscribers.
+; Returns the new value.
+(define live-update (lambda (handle fn)
+  (match handle
+    ((MkLiveHandle val-cell subs-cell target-id render-fn)
+      (let ((new-val (cell-update val-cell fn)))
+        (let ((frag-html (render-fn new-val)))
+          (let ((pids (cell-get subs-cell)))
+            (begin
+              (broadcast-live pids target-id frag-html)
+              new-val))))))))
+
+; live-set : set the value directly and push to all subscribers.
+; Returns the new value.
+(define live-set (lambda (handle val)
+  (live-update handle (lambda (_) val))))
+
+; --- Client JS: morphdom + WebSocket + navigation ---
+
+(define live-client-js "
+  let ws;
+  function connect() {
+    ws = new WebSocket('ws://' + location.host + '/');
+    ws.onopen = () => { document.querySelectorAll('.ws-dot').forEach(d => d.classList.add('live')); };
+    ws.onclose = () => { document.querySelectorAll('.ws-dot').forEach(d => d.classList.remove('live')); setTimeout(connect, 1000); };
+    ws.onmessage = (e) => {
+      const data = e.data;
+      if (data.startsWith('__NAV__')) {
+        const rest = data.substring(7);
+        const nl = rest.indexOf('\\n');
+        const path = nl >= 0 ? rest.substring(0, nl) : '/';
+        const html = nl >= 0 ? rest.substring(nl + 1) : rest;
+        const p = new DOMParser();
+        const doc = p.parseFromString(html, 'text/html');
+        if (doc.body) morphdom(document.body, doc.body);
+        if (doc.title) document.title = doc.title;
+        history.pushState(null, '', path);
+      } else {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = data;
+        const el = tmp.firstElementChild;
+        if (el && el.id) {
+          const target = document.getElementById(el.id);
+          if (target) morphdom(target, el, {childrenOnly: true});
+        }
+      }
+    };
+  }
+  function navigate(path) {
+    if (ws && ws.readyState === 1) ws.send(path);
+    else location.href = path;
+  }
+  function post(url) {
+    if (ws && ws.readyState === 1) ws.send('POST ' + url);
+    else fetch(url, {method:'POST'});
+  }
+  function submitForm(form, url) {
+    if (ws && ws.readyState === 1) {
+      ws.send('POST ' + url + '\\n' + new URLSearchParams(new FormData(form)).toString());
+      form.reset();
+    } else {
+      fetch(url, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:new URLSearchParams(new FormData(form))});
+      form.reset();
+    }
+    return false;
+  }
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('a[href^=\"/\"]');
+    if (a) { e.preventDefault(); navigate(a.getAttribute('href')); }
+  });
+  window.addEventListener('popstate', () => navigate(location.pathname + location.search));
+  document.addEventListener('DOMContentLoaded', connect);
+")
+
+; live-scripts : include in <head> for morphdom + WebSocket live updates + navigation.
+(define live-scripts (lambda ()
+  (string-append
+    (script (list (MkPair "src" "https://unpkg.com/morphdom@2.7.4/dist/morphdom-umd.min.js")) "")
+    (script (list) live-client-js))))
+
+; --- ConnectionActor ---
+; One per WebSocket client. Receives live updates from sources and
+; WebSocket messages from the reader fiber. Handles navigation.
+
+(define split-first-line (lambda (s)
+  (match (string-index-of s "\n")
+    (None (MkPair s ""))
+    ((Some idx) (MkPair (string-substring s 0 idx)
+                        (string-substring s (+ idx 1) (string-length s)))))))
+
+; Send a navigation response over WebSocket: __NAV__/path\nhtml
+(define send-nav (lambda (ws-conn nav-path content)
+  (begin (ws/send ws-conn (string-append "__NAV__" nav-path "\n" content)) nil)))
+
+; Handle GET navigation over WebSocket.
+(define handle-ws-nav (lambda (ws-conn nav-path routes)
+  (let ((split (split-query nav-path)))
+    (match split
+      ((MkPair clean-path qs)
+        (let ((query-params (parse-params qs))
+              (hdrs (list)))
+          (match (match-routes "GET" clean-path routes)
+            ((Some (MkPair handler params))
+              (handle
+                (let ((response (run-handler "GET" clean-path params query-params (list) hdrs handler)))
+                  (match response
+                    ((HtmlResponse content) (send-nav ws-conn nav-path content))
+                    ((RedirectResponse url) (handle-ws-nav ws-conn url routes))
+                    ((TextResponse _ _ resp-body) (send-nav ws-conn nav-path resp-body))))
+                ((throw err-msg k) ->
+                  (send-nav ws-conn nav-path (error-page-500 err-msg)))))
+            (None
+              (send-nav ws-conn nav-path (not-found-page nav-path))))))))))
+
+; Handle POST over WebSocket. Text format: "/path\nkey=val&key=val"
+(define handle-ws-post (lambda (ws-conn post-text routes)
+  (let ((parts (split-first-line post-text)))
+    (match parts
+      ((MkPair post-path post-body)
+        (let ((split (split-query post-path)))
+          (match split
+            ((MkPair clean-path qs)
+              (let ((query-params (parse-params qs))
+                    (form-params (parse-params post-body))
+                    (hdrs (list)))
+                (match (match-routes "POST" clean-path routes)
+                  ((Some (MkPair handler params))
+                    (handle
+                      (let ((response (run-handler "POST" clean-path params query-params form-params hdrs handler)))
+                        (match response
+                          ; Non-empty HTML → navigate to it
+                          ((HtmlResponse content)
+                            (if (string-is-empty content) nil
+                              (send-nav ws-conn post-path content)))
+                          ; Redirect → navigate to the target
+                          ((RedirectResponse url) (handle-ws-nav ws-conn url routes))
+                          ((TextResponse _ _ _) nil)))
+                      ((throw err-msg k) ->
+                        (send-nav ws-conn post-path (error-page-500 err-msg)))))
+                  (None nil)))))))))))
+
+; The ConnectionActor main loop.
+(define conn-loop (lambda (ws-conn routes)
+  (let ((msg (actor/receive)))
+    (match msg
+      ((ConnUpdate target-id frag-html)
+        (begin
+          (ws/send ws-conn (el "div" (list (MkPair "id" target-id)) frag-html))
+          (conn-loop ws-conn routes)))
+      ((ConnWsText ws-text)
+        (begin
+          (if (string-starts-with ws-text "POST ")
+            (handle-ws-post ws-conn (string-substring ws-text 5 (string-length ws-text)) routes)
+            (if (string-starts-with ws-text "/")
+              (handle-ws-nav ws-conn ws-text routes)
+              nil))
+          (conn-loop ws-conn routes)))
+      ((ConnWsClosed)
+        nil)))))
+
+; --- WebSocket reader fiber ---
+; Reads from WebSocket and forwards messages to the ConnectionActor.
+
+(define ws-reader (lambda (ws-conn conn-pid)
+  (match (ws/recv ws-conn)
+    (None (actor/send conn-pid ConnWsClosed))
+    ((Some (WsText ws-text))
+      (begin
+        (actor/send conn-pid (ConnWsText ws-text))
+        (ws-reader ws-conn conn-pid)))
+    ((Some (WsBinary _))
+      (ws-reader ws-conn conn-pid)))))
+
+; --- Subscription management ---
+
+(define subscribe-each (lambda (sources conn-pid)
+  (match sources
+    (Nil nil)
+    ((Cons (MkPair sub-fn _) rest)
+      (begin (sub-fn conn-pid) (subscribe-each rest conn-pid))))))
+
+(define unsubscribe-each (lambda (sources conn-pid)
+  (match sources
+    (Nil nil)
+    ((Cons (MkPair _ unsub-fn) rest)
+      (begin (unsub-fn conn-pid) (unsubscribe-each rest conn-pid))))))
+
+(define subscribe-all-live (lambda (conn-pid)
+  (let ((sources (cell-get __live-sources)))
+    (subscribe-each sources conn-pid))))
+
+(define unsubscribe-all-live (lambda (conn-pid)
+  (let ((sources (cell-get __live-sources)))
+    (unsubscribe-each sources conn-pid))))
+
+; --- Per-client lifecycle ---
+
+(define handle-live-client (lambda (ws-conn routes)
+  (let ((conn-pid (conc/spawn (lambda () (conn-loop ws-conn routes)))))
+    (begin
+      (subscribe-all-live conn-pid)
+      (ws-reader ws-conn conn-pid)
+      ; WebSocket closed — ws-reader sent ConnWsClosed to actor.
+      ; Clean up subscriptions.
+      (unsubscribe-all-live conn-pid)))))
+
+; --- Server with live update support ---
+
+; Accept loop with WebSocket upgrade + navigation.
+(define accept-loop-live (lambda (server routes)
+  (match (http/accept server)
+    (None nil)
+    ((Some (HttpRequest method path headers body conn))
+      (begin
+        (handle
+          (if (ws/upgrade? headers)
+            (match (ws/upgrade conn)
+              ((Ok ws-conn)
+                (begin
+                  (conc/spawn (lambda () (handle-live-client ws-conn routes)))
+                  nil))
+              ((Err msg) nil))
+            (begin
+              (io/println (string-append method " " path))
+              (dispatch method path headers body conn routes)))
+          ((throw msg k) ->
+            (io/println (string-append "Unhandled error: " msg))))
+        (accept-loop-live server routes))))))
+
+; run-live! : start server with WebSocket live updates and navigation.
+; WebSocket clients get a ConnectionActor that handles live pushes,
+; GET navigation, and POST form submissions — all over WebSocket.
+(define run-live! (lambda (port routes)
+  (let ((server (serve! port)))
+    (begin
+      (io/println (string-append "Listening on http://127.0.0.1:" (show port)))
+      (accept-loop-live server routes)))))

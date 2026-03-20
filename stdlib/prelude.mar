@@ -149,6 +149,7 @@
 (declare struct-new (-> FFIStructDef a FFIStruct))
 (declare struct-get (-> FFIStruct String a))
 (declare struct-set (-> FFIStruct String a Unit))
+(declare struct-bytes (-> FFIStruct Bytes))
 
 ; Bytes
 (declare bytes-new (-> Int Bytes))

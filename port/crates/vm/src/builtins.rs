@@ -1504,4 +1504,16 @@ fn register_ffi_builtins(vm: &mut VM, builtin: RegisterFn) {
         ffi::write_field(&mut s.buffer, &field, &args[2])?;
         Ok(Value::object(VMObject::FfiStruct(Box::new(s))))
     });
+
+    // struct-bytes: (struct-bytes s) → Bytes
+    // Returns the raw buffer of an FFI struct as an immutable Bytes value.
+    builtin(vm, "struct-bytes", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("struct-bytes expects one argument"));
+        }
+        match args[0].as_object() {
+            Some(VMObject::FfiStruct(s)) => Ok(Value::bytes(s.buffer.clone())),
+            _ => Err(VMError::runtime("struct-bytes: argument must be a struct")),
+        }
+    });
 }

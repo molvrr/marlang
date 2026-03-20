@@ -540,7 +540,13 @@ fn variadic_arith_min_args(op: &str) -> Option<usize> {
     }
 }
 
-const FFI_VARIADIC_FUNCTIONS: &[&str] = &["ffi-call", "struct-new", "struct-get", "struct-set"];
+const FFI_VARIADIC_FUNCTIONS: &[&str] = &[
+    "ffi-call",
+    "struct-new",
+    "struct-get",
+    "struct-set",
+    "struct-bytes",
+];
 
 // ===== Effect Row Parsing =====
 
@@ -1121,7 +1127,13 @@ fn infer_lambda(
         .collect();
     let rest_type = rest_param.map(|(_, t)| apply_subst(&body_subst, &t));
     let result_type = apply_subst(&body_subst, &body_type);
-    let fn_effects = Some(body_effects);
+    // Make lambda effect rows open (effect-polymorphic) so that lambdas with
+    // different effect sets can coexist in the same list/context. A fresh row
+    // variable allows the caller to instantiate additional effects as needed.
+    let fn_effects = Some(match body_effects {
+        EffectRow::Closed(effects) => effect_row_open(effects, fresh_effect_row_var()),
+        open @ EffectRow::Open { .. } => open,
+    });
     // Zero-param lambdas get an implicit Unit param: (lambda () body) => (-> Unit body_type)
     if param_types.is_empty() && rest_type.is_none() {
         param_types.push(t_unit());
@@ -1855,6 +1867,11 @@ fn infer_ffi_application(
                 }
             }
             t_unit()
+        }
+        "struct-bytes" => {
+            // (struct-bytes struct-instance) → Bytes
+            // Accepts any FFI struct type
+            t_bytes()
         }
         "list" => type_app(type_const("List"), vec![fresh_type_var()]),
         _ => fresh_type_var(),
@@ -2779,7 +2796,10 @@ fn ffi_type_to_marlang(ty: &Type, env: &TypeEnv, span: Span) -> Result<Type, Typ
             "CString" => Ok(t_string()),
             "Bool" => Ok(t_bool()),
             "Void" => Ok(t_unit()),
-            "Ptr" => Ok(t_ffi_pointer()),
+            // Ptr uses a fresh type variable so it accepts any pointer-compatible
+            // value (Bytes, FFIStruct, FFIPointer, Int). FFI is inherently unsafe —
+            // the runtime's value_to_pointer validates at call time.
+            "Ptr" => Ok(fresh_type_var()),
             "FFIStruct" | "FFIPointer" | "FFILibrary" | "String" | "Unit" => Ok(ty.clone()),
             _ => {
                 if is_ffi_struct_type(env, name) {

@@ -20,8 +20,10 @@ These are runtime capabilities the framework needs that must be built first:
 |-----|-----------|------------|
 | **Database driver** | Persistent state, dep system | Hard — FFI to libpq or pure-Marlang postgres wire protocol |
 | **File watching** | Live reload | Medium — FFI to notify/kqueue |
-| **Crypto (HMAC-SHA256)** | `server-fn` token signing | Easy — FFI or ring via Rust |
 | **JavaScript target** | Client-side components | Medium — `emit-js` macro compiles Marlang S-expressions to JS strings at expansion time (no Rust backend needed, proven working) |
+
+**Resolved:**
+- ~~Crypto (HMAC-SHA256)~~ — `stdlib/crypto.mar` via FFI to CommonCrypto (macOS)
 
 The framework is designed in phases. Phase 1 works with what exists today. Later phases add capabilities as runtime gaps are filled.
 
@@ -404,12 +406,18 @@ AppActor
 ### Phase 2 — WebSocket + Morphdom Live Updates
 - [x] WebSocket runtime — accept, send, recv, close (already built)
 - [x] Working demo — `examples/web-mvp.mar` (counter + message board with push)
-- [ ] morphdom integration — replace innerHTML swap with morphdom diffing
-- [ ] ConnectionActor — per-client state + WebSocket
-- [ ] Server-push patches — standardized fragment protocol
-- [ ] SourceActor — subscription fan-out
+- [x] morphdom integration — client JS uses morphdom for DOM patching
+- [x] LiveHandle ADT — typed handle wrapping value cell + subscribers + render function
+- [x] `live` / `live-get` / `live-update` / `live-set` — declarative reactive state API
+- [x] Auto-subscribe — `run-live!` auto-subscribes new WebSocket clients to all live sources
+- [x] `live-scripts` — includes morphdom CDN + WebSocket client JS
+- [x] Effect-polymorphic lambdas — open effect rows so handlers with different effects coexist in route lists
+- [x] ConnectionActor — per-client actor (`conn-loop`) with WS reader fiber, processes both live updates and client messages
+- [x] Navigation over WebSocket — link clicks intercepted by event delegation, rendered server-side, morphdom patches entire body, pushState for history
+- [x] POST over WebSocket — forms/actions sent over WS, redirect responses trigger navigation
+- [x] `ConnMsg` ADT — `ConnUpdate`, `ConnWsText`, `ConnWsClosed` message protocol
+- [ ] SourceActor — subscription fan-out with ref counting
 - [ ] RouterActor — source registry, connection lifecycle
-- [ ] Navigation over WebSocket (no full reload)
 - [ ] Dep protocol — fetch, subscribe, combined
 - [ ] Batching — defer flush to end of actor turn
 
