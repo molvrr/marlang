@@ -134,7 +134,9 @@ pub(crate) fn is_integer_pure_recursive(proto: &FunctionPrototype) -> bool {
     // Scan all instructions
     for (ip, inst) in proto.chunk.code.iter().enumerate() {
         match inst.op {
-            // Safe integer-only operations
+            // Safe integer-only operations.
+            // Eq and Not are polymorphic but safe here since we verify all values
+            // are integers — Eq becomes i64 equality, Not becomes boolean negation.
             Op::PushLocal
             | Op::SetLocal
             | Op::Pop
@@ -147,6 +149,8 @@ pub(crate) fn is_integer_pure_recursive(proto: &FunctionPrototype) -> bool {
             | Op::GtInt
             | Op::LeInt
             | Op::GeInt
+            | Op::Eq
+            | Op::Not
             | Op::Jump
             | Op::JumpIfFalse
             | Op::Return => {}
@@ -263,11 +267,25 @@ pub(crate) fn translate_fast_function(
     ];
     fast_locals[..arity].copy_from_slice(&bcx.block_params(entry_block)[..arity]);
 
-    // Loop header for tail calls
+    // Loop header for tail calls — needs block params so SSA values
+    // from the tail-call site can flow back to the loop start.
     let loop_header = if has_self_recursive_tailcalls {
         let lh = bcx.create_block();
-        bcx.ins().jump(lh, &[]);
+        // Add block params for each argument (they change across iterations)
+        for _ in 0..arity {
+            bcx.append_block_param(lh, PTR_TY);
+        }
+        // Jump to loop header with initial arg values
+        let initial_block_args: Vec<cranelift_codegen::ir::instructions::BlockArg> = fast_locals
+            [..arity]
+            .iter()
+            .map(|v| cranelift_codegen::ir::instructions::BlockArg::Value(*v))
+            .collect();
+        bcx.ins().jump(lh, &initial_block_args);
         bcx.switch_to_block(lh);
+        // Update fast_locals to use the loop header's block params
+        let params = bcx.block_params(lh);
+        fast_locals[..arity].copy_from_slice(&params[..arity]);
         Some(lh)
     } else {
         None
@@ -379,6 +397,36 @@ pub(crate) fn translate_fast_function(
                 let a = vstack_fast.pop().unwrap();
                 vstack_fast.push(bcx.ins().ineg(a));
             }
+            Op::Eq => {
+                let b = vstack_fast.pop().unwrap();
+                let a = vstack_fast.pop().unwrap();
+                // In integer-pure context, Eq is integer equality
+                // Peephole: fuse with JumpIfFalse
+                if ip < code.len() && code[ip].op == Op::JumpIfFalse && !block_starts.contains(&ip)
+                {
+                    let target = code[ip].operand as usize;
+                    ip += 1;
+                    let target_block = bc_to_block[&target];
+                    let fallthrough_block = bc_to_block[&ip];
+                    let cmp = bcx.ins().icmp(IntCC::Equal, a, b);
+                    let args = vstack_fast_as_args(&vstack_fast);
+                    bcx.ins()
+                        .brif(cmp, fallthrough_block, &args, target_block, &args);
+                    in_dead_code = true;
+                    continue;
+                }
+                let cmp = bcx.ins().icmp(IntCC::Equal, a, b);
+                let result = bcx.ins().uextend(PTR_TY, cmp);
+                vstack_fast.push(result);
+            }
+            Op::Not => {
+                let a = vstack_fast.pop().unwrap();
+                // In integer-pure context, values are 0/1 for false/true
+                let zero = bcx.ins().iconst(PTR_TY, 0);
+                let cmp = bcx.ins().icmp(IntCC::Equal, a, zero);
+                let result = bcx.ins().uextend(PTR_TY, cmp);
+                vstack_fast.push(result);
+            }
             Op::LtInt | Op::GtInt | Op::LeInt | Op::GeInt => {
                 let b = vstack_fast.pop().unwrap();
                 let a = vstack_fast.pop().unwrap();
@@ -452,11 +500,14 @@ pub(crate) fn translate_fast_function(
                     && self_recursive_calls.contains(&(ip - 1))
                     && let Some(lh) = loop_header
                 {
-                    // Tail-call: update locals and jump to loop header
-                    for (i, arg) in args.iter().enumerate() {
-                        fast_locals[i] = *arg;
-                    }
-                    bcx.ins().jump(lh, &[]);
+                    // Tail-call: pass new arg values as block params to loop header.
+                    // This correctly handles SSA — the loop header's block params
+                    // merge values from the entry and the tail-call site.
+                    let block_args: Vec<cranelift_codegen::ir::instructions::BlockArg> = args
+                        .iter()
+                        .map(|v| cranelift_codegen::ir::instructions::BlockArg::Value(*v))
+                        .collect();
+                    bcx.ins().jump(lh, &block_args);
                 } else {
                     // Direct self-call with lean signature
                     let call = bcx.ins().call(self_func_ref, &args);
