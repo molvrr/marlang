@@ -23,6 +23,7 @@ const RUNTIME_HANDLED_EFFECTS: &[&str] = &[
     "Tcp",
     "HttpClient",
     "HttpServer",
+    "WebSocket",
     "ParseState", // VM-managed fast-path for codec parsing
 ];
 

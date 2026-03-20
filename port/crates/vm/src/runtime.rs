@@ -3,6 +3,16 @@
 //! N scheduler threads each own a VM instance. Fibers are distributed across
 //! threads at spawn time, cross-thread communication uses crossbeam channels.
 //! Bytecode execution on each thread is lock-free.
+//!
+//! TODO: The HTTP and WebSocket layers (Layers 5-7) are implemented here as
+//! built-in effects backed by hyper/tungstenite. Long-term, these should be
+//! rewritten as pure Marlang libraries on top of the raw TCP primitives
+//! (Layer 4), using the codec module for HTTP/1.1 parsing and WebSocket
+//! framing. This would remove the hyper/tungstenite dependencies, make the
+//! protocol stack inspectable and extensible from userland, and prove that
+//! Marlang's TCP + codec + effect system is sufficient for real protocols.
+//! The built-in versions exist for bootstrapping — they let us ship a working
+//! web framework today without waiting for the pure implementations.
 
 use crate::bytecode::{Chunk, FunctionPrototype};
 use crate::errors::VMError;
@@ -87,6 +97,18 @@ enum SchedulerMessage {
         server_id: u64,
         request: Value, // HttpRequest ADT
     },
+    // WebSocket messages
+    WsReady {
+        ws_id: u64,
+        write_tx: tokio::sync::mpsc::UnboundedSender<tokio_tungstenite::tungstenite::Message>,
+    },
+    WsData {
+        ws_id: u64,
+        msg: WsRecvMsg,
+    },
+    WsClosed {
+        ws_id: u64,
+    },
     Shutdown,
 }
 
@@ -152,6 +174,34 @@ struct HttpResponseData {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+}
+
+enum HttpResponseAction {
+    Normal(HttpResponseData),
+    /// Upgrade this connection to WebSocket.
+    /// The ws_id and scheduler sender are used to set up the WS state
+    /// after the hyper upgrade completes.
+    WebSocketUpgrade {
+        ws_id: u64,
+        scheduler_sender: Sender<SchedulerMessage>,
+        sched_id: usize,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket State (per-scheduler, no locking)
+// ---------------------------------------------------------------------------
+
+struct WsState {
+    write_tx: tokio::sync::mpsc::UnboundedSender<tokio_tungstenite::tungstenite::Message>,
+    recv_queue: VecDeque<WsRecvMsg>,
+    waiting_recv: Option<(FiberId, Value)>,
+    closed: bool,
+}
+
+enum WsRecvMsg {
+    Text(String),
+    Binary(Vec<u8>),
 }
 
 /// Cross-scheduler TCP operation request.
@@ -225,8 +275,11 @@ struct SharedState {
 
     // HTTP server state
     http_server_owners: Mutex<HashMap<u64, usize>>,
-    http_connections: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<HttpResponseData>>>>,
+    http_connections: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<HttpResponseAction>>>>,
     active_http_servers: AtomicUsize,
+
+    // WebSocket state
+    ws_owners: Mutex<HashMap<u64, usize>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +305,10 @@ struct PerScheduler {
     tcp_listeners: HashMap<u64, TcpListenerState>,
     // HTTP server state (owned by this scheduler)
     http_servers: HashMap<u64, HttpServerState>,
+    // WebSocket state (owned by this scheduler)
+    ws_connections: HashMap<u64, WsState>,
+    /// Maps ws_id → fiber pid for in-flight ws-upgrade calls.
+    pending_ws_upgrades: HashMap<u64, FiberId>,
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +387,12 @@ const HANDLED_EFFECTS: &[&str] = &[
     "http-accept",
     "http-respond",
     "http-close-server",
+    // Layer 6: WebSocket
+    "ws-upgrade",
+    "ws-send",
+    "ws-send-bin",
+    "ws-recv",
+    "ws-close",
     // "throw" is NOT here — with CPS dispatch, user handlers catch throw inline.
     // Unhandled throw uses try_default_handler → "Uncaught exception: ..." error.
 ];
@@ -1577,6 +1640,11 @@ fn handle_effect(
 
             let sender = shared.scheduler_senders[sched.id].clone();
             let http_conns = shared.http_connections.clone();
+            // WS ownership is tracked via WsReady messages, but the async upgrade
+            // task needs somewhere to record it immediately. Use a dummy Arc<Mutex>
+            // — the real ownership is set when WsReady is processed by the scheduler.
+            let ws_owners_async: Arc<Mutex<HashMap<u64, usize>>> =
+                Arc::new(Mutex::new(HashMap::new()));
 
             // Spawn background accept loop
             shared.tokio_handle.spawn(async move {
@@ -1588,11 +1656,13 @@ fn handle_effect(
                                     let sender = sender.clone();
                                     let http_conns = http_conns.clone();
                                     let conn_id_counter = conn_id_counter.clone();
+                                    let ws_owners_async = ws_owners_async.clone();
                                     tokio::spawn(async move {
                                         let io = hyper_util::rt::TokioIo::new(stream);
                                         let sender = sender.clone();
                                         let http_conns = http_conns.clone();
                                         let conn_id_counter = conn_id_counter.clone();
+                                        let ws_owners_async = ws_owners_async.clone();
                                         let _ = hyper::server::conn::http1::Builder::new()
                                             .serve_connection(
                                                 io,
@@ -1600,13 +1670,15 @@ fn handle_effect(
                                                     let sender = sender.clone();
                                                     let http_conns = http_conns.clone();
                                                     let conn_id_counter = conn_id_counter.clone();
+                                                    let ws_owners_async = ws_owners_async.clone();
                                                     async move {
                                                         http_handle_incoming_request(
-                                                            req, server_id, &sender, &http_conns, &conn_id_counter,
+                                                            req, server_id, &sender, &http_conns, &conn_id_counter, &ws_owners_async,
                                                         ).await
                                                     }
                                                 }),
                                             )
+                                            .with_upgrades()
                                             .await;
                                     });
                                 }
@@ -1711,11 +1783,11 @@ fn handle_effect(
             };
 
             let resume_value = match resp_tx {
-                Some(tx) => match tx.send(HttpResponseData {
+                Some(tx) => match tx.send(HttpResponseAction::Normal(HttpResponseData {
                     status,
                     headers: header_pairs,
                     body: body_bytes,
-                }) {
+                })) {
                     Ok(()) => make_ok(Value::nil()),
                     Err(_) => make_err("http-respond: connection closed"),
                 },
@@ -1767,6 +1839,197 @@ fn handle_effect(
             });
         }
 
+        // --- Layer 7: WebSocket ---
+        "ws-upgrade" => {
+            let connection_id = args
+                .first()
+                .and_then(|v| match v.as_object() {
+                    Some(VMObject::Port(id)) => Some(*id),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    VMError::runtime("ws-upgrade: argument must be an HttpConnection handle")
+                })?;
+
+            let ws_id = shared.next_tcp_id.fetch_add(1, Ordering::Relaxed);
+
+            // Take the HTTP oneshot and send WebSocketUpgrade through it
+            let resp_tx = {
+                let mut conns = shared.http_connections.lock().unwrap();
+                conns.remove(&connection_id)
+            };
+
+            match resp_tx {
+                Some(tx) => {
+                    let sender = shared.scheduler_senders[sched.id].clone();
+                    let sched_id = sched.id;
+                    let pid = sched.current_pid;
+                    sched.io_parked.insert(pid, cont);
+                    sched.pending_ws_upgrades.insert(ws_id, pid);
+                    shared.pending_io.fetch_add(1, Ordering::AcqRel);
+
+                    // Send upgrade request to the service function
+                    let _ = tx.send(HttpResponseAction::WebSocketUpgrade {
+                        ws_id,
+                        scheduler_sender: sender,
+                        sched_id,
+                    });
+                }
+                None => {
+                    sched.ready_queue.push_back(Fiber::Suspended {
+                        continuation: cont,
+                        resume_value: make_err("ws-upgrade: unknown connection"),
+                        pid: sched.current_pid,
+                    });
+                }
+            }
+        }
+
+        "ws-send" => {
+            let ws_id = args
+                .first()
+                .and_then(|v| match v.as_object() {
+                    Some(VMObject::Port(id)) => Some(*id),
+                    _ => None,
+                })
+                .ok_or_else(|| VMError::runtime("ws-send: first arg must be a WsConnection"))?;
+
+            let text = args
+                .get(1)
+                .and_then(|v| v.as_string())
+                .ok_or_else(|| VMError::runtime("ws-send: second arg must be a string"))?
+                .to_string();
+
+            let resume_value = if let Some(ws) = sched.ws_connections.get(&ws_id) {
+                if ws.closed {
+                    make_err("ws-send: connection closed")
+                } else {
+                    match ws
+                        .write_tx
+                        .send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
+                    {
+                        Ok(()) => make_ok(Value::nil()),
+                        Err(_) => make_err("ws-send: write channel closed"),
+                    }
+                }
+            } else {
+                make_err("ws-send: unknown connection")
+            };
+
+            sched.ready_queue.push_back(Fiber::Suspended {
+                continuation: cont,
+                resume_value,
+                pid: sched.current_pid,
+            });
+        }
+
+        "ws-send-bin" => {
+            let ws_id = args
+                .first()
+                .and_then(|v| match v.as_object() {
+                    Some(VMObject::Port(id)) => Some(*id),
+                    _ => None,
+                })
+                .ok_or_else(|| VMError::runtime("ws-send-bin: first arg must be a WsConnection"))?;
+
+            let data = args
+                .get(1)
+                .and_then(|v| v.as_bytes())
+                .ok_or_else(|| VMError::runtime("ws-send-bin: second arg must be Bytes"))?
+                .to_vec();
+
+            let resume_value = if let Some(ws) = sched.ws_connections.get(&ws_id) {
+                if ws.closed {
+                    make_err("ws-send-bin: connection closed")
+                } else {
+                    match ws
+                        .write_tx
+                        .send(tokio_tungstenite::tungstenite::Message::Binary(data.into()))
+                    {
+                        Ok(()) => make_ok(Value::nil()),
+                        Err(_) => make_err("ws-send-bin: write channel closed"),
+                    }
+                }
+            } else {
+                make_err("ws-send-bin: unknown connection")
+            };
+
+            sched.ready_queue.push_back(Fiber::Suspended {
+                continuation: cont,
+                resume_value,
+                pid: sched.current_pid,
+            });
+        }
+
+        "ws-recv" => {
+            let ws_id = args
+                .first()
+                .and_then(|v| match v.as_object() {
+                    Some(VMObject::Port(id)) => Some(*id),
+                    _ => None,
+                })
+                .ok_or_else(|| VMError::runtime("ws-recv: argument must be a WsConnection"))?;
+
+            if let Some(ws) = sched.ws_connections.get_mut(&ws_id) {
+                if let Some(msg) = ws.recv_queue.pop_front() {
+                    let val = ws_msg_to_value(msg);
+                    sched.ready_queue.push_back(Fiber::Suspended {
+                        continuation: cont,
+                        resume_value: make_some(val),
+                        pid: sched.current_pid,
+                    });
+                } else if ws.closed {
+                    sched.ready_queue.push_back(Fiber::Suspended {
+                        continuation: cont,
+                        resume_value: make_none(),
+                        pid: sched.current_pid,
+                    });
+                } else {
+                    // Park until data arrives
+                    ws.waiting_recv = Some((sched.current_pid, cont));
+                }
+            } else {
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: make_none(),
+                    pid: sched.current_pid,
+                });
+            }
+        }
+
+        "ws-close" => {
+            let ws_id = args
+                .first()
+                .and_then(|v| match v.as_object() {
+                    Some(VMObject::Port(id)) => Some(*id),
+                    _ => None,
+                })
+                .ok_or_else(|| VMError::runtime("ws-close: argument must be a WsConnection"))?;
+
+            if let Some(ws) = sched.ws_connections.get_mut(&ws_id) {
+                if !ws.closed {
+                    ws.closed = true;
+                    let _ = ws
+                        .write_tx
+                        .send(tokio_tungstenite::tungstenite::Message::Close(None));
+                }
+                // Wake any waiting recv with None
+                if let Some((wait_pid, wait_cont)) = ws.waiting_recv.take() {
+                    sched.ready_queue.push_back(Fiber::Suspended {
+                        continuation: wait_cont,
+                        resume_value: make_none(),
+                        pid: wait_pid,
+                    });
+                }
+            }
+
+            sched.ready_queue.push_back(Fiber::Suspended {
+                continuation: cont,
+                resume_value: Value::nil(),
+                pid: sched.current_pid,
+            });
+        }
+
         // --- Exception effect (default handler: crash the fiber) ---
         "throw" => {
             let msg = args
@@ -1791,19 +2054,143 @@ fn handle_effect(
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
+/// Check if an HTTP request is a WebSocket upgrade.
+fn is_websocket_upgrade(req: &hyper::Request<hyper::body::Incoming>) -> bool {
+    req.headers()
+        .get("upgrade")
+        .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"))
+}
+
+/// Compute the Sec-WebSocket-Accept value from the client's key.
+fn compute_ws_accept(key: &str) -> String {
+    // SHA-1 of key + magic GUID, base64-encoded
+    let mut hasher = Sha1::new();
+    hasher.update(key.as_bytes());
+    hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    let hash = hasher.finalize();
+    base64_encode(&hash)
+}
+
+/// Minimal base64 encoder (RFC 4648).
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[((n >> 18) & 63) as usize]);
+        out.push(CHARS[((n >> 12) & 63) as usize]);
+        if chunk.len() > 1 {
+            out.push(CHARS[((n >> 6) & 63) as usize]);
+        } else {
+            out.push(b'=');
+        }
+        if chunk.len() > 2 {
+            out.push(CHARS[(n & 63) as usize]);
+        } else {
+            out.push(b'=');
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
+/// Minimal SHA-1 (for WebSocket accept key computation only).
+struct Sha1 {
+    state: [u32; 5],
+    buffer: Vec<u8>,
+    len: u64,
+}
+
+impl Sha1 {
+    fn new() -> Self {
+        Sha1 {
+            state: [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0],
+            buffer: Vec::new(),
+            len: 0,
+        }
+    }
+    fn update(&mut self, data: &[u8]) {
+        self.buffer.extend_from_slice(data);
+        self.len += data.len() as u64;
+        while self.buffer.len() >= 64 {
+            let block: [u8; 64] = self.buffer[..64].try_into().unwrap();
+            self.buffer.drain(..64);
+            self.process_block(&block);
+        }
+    }
+    fn finalize(mut self) -> [u8; 20] {
+        let bit_len = self.len * 8;
+        self.buffer.push(0x80);
+        while self.buffer.len() % 64 != 56 {
+            self.buffer.push(0);
+        }
+        self.buffer.extend_from_slice(&bit_len.to_be_bytes());
+        let remaining = std::mem::take(&mut self.buffer);
+        for chunk in remaining.chunks(64) {
+            let block: [u8; 64] = chunk.try_into().unwrap();
+            self.process_block(&block);
+        }
+        let mut out = [0u8; 20];
+        for (i, &s) in self.state.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&s.to_be_bytes());
+        }
+        out
+    }
+    fn process_block(&mut self, block: &[u8; 64]) {
+        let mut w = [0u32; 80];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes(block[i * 4..i * 4 + 4].try_into().unwrap());
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e] = self.state;
+        for (i, &wi) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | ((!b) & d), 0x5A827999u32),
+                20..=39 => (b ^ c ^ d, 0x6ED9EBA1u32),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDC_u32),
+                _ => (b ^ c ^ d, 0xCA62C1D6_u32),
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(wi);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        self.state[0] = self.state[0].wrapping_add(a);
+        self.state[1] = self.state[1].wrapping_add(b);
+        self.state[2] = self.state[2].wrapping_add(c);
+        self.state[3] = self.state[3].wrapping_add(d);
+        self.state[4] = self.state[4].wrapping_add(e);
+    }
+}
+
 /// Handle an incoming HTTP request in the server's hyper service function.
 /// Parses the request, creates a oneshot channel for the response, queues
 /// the request for the Marlang fiber, and awaits the response.
+/// Also handles WebSocket upgrade requests.
 async fn http_handle_incoming_request(
     req: hyper::Request<hyper::body::Incoming>,
     server_id: u64,
     sender: &Sender<SchedulerMessage>,
-    http_conns: &Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<HttpResponseData>>>>,
+    http_conns: &Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<HttpResponseAction>>>>,
     conn_id_counter: &AtomicU64,
+    ws_owners: &Arc<Mutex<HashMap<u64, usize>>>,
 ) -> Result<hyper::Response<http_body_util::Full<bytes::Bytes>>, hyper::Error> {
     use http_body_util::{BodyExt, Full};
 
-    // Extract request info
+    let is_upgrade = is_websocket_upgrade(&req);
+
+    // Extract request info before potentially moving `req`
     let method = req.method().to_string();
     let path = req
         .uri()
@@ -1816,20 +2203,35 @@ async fn http_handle_incoming_request(
         .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
 
-    // Read full body
-    let body_bytes = match req.into_body().collect().await {
-        Ok(collected) => collected.to_bytes().to_vec(),
-        Err(_) => {
-            return Ok(hyper::Response::builder()
-                .status(500)
-                .body(Full::new(bytes::Bytes::from("failed to read request body")))
-                .unwrap());
-        }
+    let ws_key = if is_upgrade {
+        req.headers()
+            .get("sec-websocket-key")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    // For WebSocket upgrades: don't read body, keep `req` for hyper::upgrade::on()
+    // For normal HTTP: read the full body
+    let (body_bytes, upgrade_req) = if is_upgrade {
+        (Vec::new(), Some(req))
+    } else {
+        let body = match req.into_body().collect().await {
+            Ok(collected) => collected.to_bytes().to_vec(),
+            Err(_) => {
+                return Ok(hyper::Response::builder()
+                    .status(500)
+                    .body(Full::new(bytes::Bytes::from("failed to read request body")))
+                    .unwrap());
+            }
+        };
+        (body, None)
     };
 
     // Allocate connection ID and create oneshot for response
     let connection_id = conn_id_counter.fetch_add(1, Ordering::Relaxed);
-    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<HttpResponseData>();
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<HttpResponseAction>();
 
     // Store sender in shared map
     {
@@ -1855,7 +2257,7 @@ async fn http_handle_incoming_request(
 
     // Wait for response from Marlang code
     match resp_rx.await {
-        Ok(resp_data) => {
+        Ok(HttpResponseAction::Normal(resp_data)) => {
             let mut builder = hyper::Response::builder().status(resp_data.status);
             for (key, value) in &resp_data.headers {
                 builder = builder.header(key.as_str(), value.as_str());
@@ -1864,13 +2266,134 @@ async fn http_handle_incoming_request(
                 .body(Full::new(bytes::Bytes::from(resp_data.body)))
                 .unwrap())
         }
-        Err(_) => {
-            // Oneshot sender was dropped (connection abandoned by Marlang code)
+        Ok(HttpResponseAction::WebSocketUpgrade {
+            ws_id,
+            scheduler_sender,
+            sched_id,
+        }) => {
+            // Perform WebSocket upgrade
+            let Some(ws_key) = ws_key else {
+                return Ok(hyper::Response::builder()
+                    .status(400)
+                    .body(Full::new(bytes::Bytes::from("missing Sec-WebSocket-Key")))
+                    .unwrap());
+            };
+            let Some(upgrade_req) = upgrade_req else {
+                return Ok(hyper::Response::builder()
+                    .status(400)
+                    .body(Full::new(bytes::Bytes::from("not an upgrade request")))
+                    .unwrap());
+            };
+
+            let accept_key = compute_ws_accept(&ws_key);
+            let ws_owners = ws_owners.clone();
+
+            // Set up the upgrade future before returning the 101 response
+            let on_upgrade = hyper::upgrade::on(upgrade_req);
+
+            // Spawn the post-upgrade handler
+            tokio::spawn(async move {
+                match on_upgrade.await {
+                    Ok(upgraded) => {
+                        let io = hyper_util::rt::TokioIo::new(upgraded);
+                        let mut ws_stream = tokio_tungstenite::WebSocketStream::from_raw_socket(
+                            io,
+                            tokio_tungstenite::tungstenite::protocol::Role::Server,
+                            None,
+                        )
+                        .await;
+
+                        use futures_util::{SinkExt, StreamExt};
+                        use tokio_tungstenite::tungstenite::Message;
+
+                        // Channel for Marlang to send messages through
+                        let (write_tx, mut write_rx) =
+                            tokio::sync::mpsc::unbounded_channel::<Message>();
+
+                        // Register WS ownership
+                        {
+                            let mut owners = ws_owners.lock().unwrap();
+                            owners.insert(ws_id, sched_id);
+                        }
+
+                        // Notify scheduler that the WS connection is ready
+                        let _ =
+                            scheduler_sender.send(SchedulerMessage::WsReady { ws_id, write_tx });
+
+                        // Single-task select loop: read from WS and write channel
+                        loop {
+                            tokio::select! {
+                                // Messages from the WebSocket (client → server)
+                                ws_msg = ws_stream.next() => {
+                                    match ws_msg {
+                                        Some(Ok(Message::Text(text))) => {
+                                            let _ = scheduler_sender.send(
+                                                SchedulerMessage::WsData {
+                                                    ws_id,
+                                                    msg: WsRecvMsg::Text(text.to_string()),
+                                                },
+                                            );
+                                        }
+                                        Some(Ok(Message::Binary(data))) => {
+                                            let _ = scheduler_sender.send(
+                                                SchedulerMessage::WsData {
+                                                    ws_id,
+                                                    msg: WsRecvMsg::Binary(data.to_vec()),
+                                                },
+                                            );
+                                        }
+                                        Some(Ok(Message::Close(frame))) => {
+                                            // Echo the close frame back for clean shutdown
+                                            let _ = ws_stream.send(Message::Close(frame)).await;
+                                            break;
+                                        }
+                                        None | Some(Err(_)) => {
+                                            break;
+                                        }
+                                        _ => {} // Ping/Pong handled by tungstenite
+                                    }
+                                }
+                                // Messages from Marlang (server → client)
+                                outgoing = write_rx.recv() => {
+                                    match outgoing {
+                                        Some(msg) => {
+                                            if ws_stream.send(msg).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        None => break, // channel closed
+                                    }
+                                }
+                            }
+                        }
+
+                        // Connection closed
+                        let _ = ws_stream.close(None).await;
+                        let _ = scheduler_sender.send(SchedulerMessage::WsClosed { ws_id });
+                    }
+                    Err(e) => {
+                        // Upgrade failed — signal error via IoComplete
+                        let _ = scheduler_sender.send(SchedulerMessage::IoComplete {
+                            pid: 0, // dummy — the parked fiber is woken by WsReady
+                            result: Err(format!("ws upgrade failed: {}", e)),
+                        });
+                    }
+                }
+            });
+
+            // Return 101 Switching Protocols
             Ok(hyper::Response::builder()
-                .status(500)
-                .body(Full::new(bytes::Bytes::from("request handler dropped")))
+                .status(101)
+                .header("Upgrade", "websocket")
+                .header("Connection", "Upgrade")
+                .header("Sec-WebSocket-Accept", accept_key)
+                .body(Full::new(bytes::Bytes::new()))
                 .unwrap())
         }
+        Err(_) => Ok(hyper::Response::builder()
+            .status(500)
+            .body(Full::new(bytes::Bytes::from("request handler dropped")))
+            .unwrap()),
     }
 }
 
@@ -2600,6 +3123,54 @@ fn tcp_handle_op(sched: &mut PerScheduler, shared: &SharedState, op: TcpOp) {
 // ---------------------------------------------------------------------------
 
 /// Handle a new HTTP request arriving at a server.
+/// Convert a WsRecvMsg to a Marlang Value: (WsText string) or (WsBinary bytes)
+fn ws_msg_to_value(msg: WsRecvMsg) -> Value {
+    match msg {
+        WsRecvMsg::Text(s) => Value::object(VMObject::AdtValue {
+            tag: "WsText".to_string(),
+            fields: vec![Value::string(&*s)],
+        }),
+        WsRecvMsg::Binary(b) => Value::object(VMObject::AdtValue {
+            tag: "WsBinary".to_string(),
+            fields: vec![Value::bytes(b)],
+        }),
+    }
+}
+
+/// Handle an incoming WebSocket message.
+fn ws_handle_data(sched: &mut PerScheduler, ws_id: u64, msg: WsRecvMsg) {
+    if let Some(ws) = sched.ws_connections.get_mut(&ws_id) {
+        if let Some((wait_pid, wait_cont)) = ws.waiting_recv.take() {
+            let val = ws_msg_to_value(msg);
+            sched.ready_queue.push_back(Fiber::Suspended {
+                continuation: wait_cont,
+                resume_value: make_some(val),
+                pid: wait_pid,
+            });
+        } else {
+            ws.recv_queue.push_back(msg);
+        }
+    }
+}
+
+/// Handle WebSocket connection closed.
+fn ws_handle_closed(sched: &mut PerScheduler, shared: &SharedState, ws_id: u64) {
+    if let Some(ws) = sched.ws_connections.get_mut(&ws_id) {
+        ws.closed = true;
+        if let Some((wait_pid, wait_cont)) = ws.waiting_recv.take() {
+            sched.ready_queue.push_back(Fiber::Suspended {
+                continuation: wait_cont,
+                resume_value: make_none(),
+                pid: wait_pid,
+            });
+        }
+    }
+    {
+        let mut owners = shared.ws_owners.lock().unwrap();
+        owners.remove(&ws_id);
+    }
+}
+
 fn http_handle_accepted(sched: &mut PerScheduler, server_id: u64, request: Value) {
     if let Some(server_state) = sched.http_servers.get_mut(&server_id) {
         if let Some((wait_pid, wait_cont)) = server_state.waiting_accept.take() {
@@ -2765,6 +3336,39 @@ fn process_single_message(
         }
         SchedulerMessage::HttpAccepted { server_id, request } => {
             http_handle_accepted(sched, server_id, request);
+        }
+        SchedulerMessage::WsReady { ws_id, write_tx } => {
+            // Register WS connection and wake the fiber that called ws-upgrade
+            {
+                let mut owners = shared.ws_owners.lock().unwrap();
+                owners.insert(ws_id, sched.id);
+            }
+            sched.ws_connections.insert(
+                ws_id,
+                WsState {
+                    write_tx,
+                    recv_queue: VecDeque::new(),
+                    waiting_recv: None,
+                    closed: false,
+                },
+            );
+            // Wake the parked ws-upgrade fiber
+            if let Some(pid) = sched.pending_ws_upgrades.remove(&ws_id)
+                && let Some(cont) = sched.io_parked.remove(&pid)
+            {
+                shared.pending_io.fetch_sub(1, Ordering::AcqRel);
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: make_ok(Value::object(VMObject::Port(ws_id))),
+                    pid,
+                });
+            }
+        }
+        SchedulerMessage::WsData { ws_id, msg } => {
+            ws_handle_data(sched, ws_id, msg);
+        }
+        SchedulerMessage::WsClosed { ws_id } => {
+            ws_handle_closed(sched, shared, ws_id);
         }
         SchedulerMessage::Shutdown => {
             return true;
@@ -2944,6 +3548,7 @@ impl Scheduler {
             http_server_owners: Mutex::new(HashMap::new()),
             http_connections: Arc::new(Mutex::new(HashMap::new())),
             active_http_servers: AtomicUsize::new(0),
+            ws_owners: Mutex::new(HashMap::new()),
         });
 
         // Scheduler 0's local state
@@ -2969,6 +3574,8 @@ impl Scheduler {
             tcp_sockets: HashMap::new(),
             tcp_listeners: HashMap::new(),
             http_servers: HashMap::new(),
+            ws_connections: HashMap::new(),
+            pending_ws_upgrades: HashMap::new(),
         };
 
         // Register the persistent main PID (0)

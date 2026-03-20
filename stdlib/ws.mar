@@ -1,0 +1,86 @@
+; WebSocket module — server-side WebSocket via the effect system
+;
+; WebSocket connections are created by upgrading an HTTP connection.
+; All operations are effects handled by the always-on scheduler.
+;
+; TODO: Add ws-connect for client-side WebSocket (ws:// and wss:// via TLS).
+; TODO: Long-term, rewrite framing as pure Marlang on top of TCP + codec.
+;
+; Example usage:
+;   (import "std:http" as http)
+;   (import "std:ws" as ws)
+;
+;   (let ((server (http/serve! 9001)))
+;     (match (http/accept server)
+;       ((Some (HttpRequest method path headers body conn))
+;         (if (ws/upgrade? headers)
+;           (match (ws/upgrade conn)
+;             ((Ok ws-conn)
+;               ; Echo loop
+;               (ws/echo-loop ws-conn))
+;             ((Err msg) (http/respond-text! conn 400 (list) msg)))
+;           (http/respond-text! conn 200 (list) "not a websocket")))
+;       (None nil)))
+
+; === Data Types ===
+
+(data WsMessage (WsText String) (WsBinary Bytes))
+
+; === WebSocket Effect ===
+
+(effect WebSocket
+  (ws-upgrade  (-> HttpConnection (Result String WsConn)))
+  (ws-send     (-> WsConn String (Result String Unit)))
+  (ws-send-bin (-> WsConn Bytes (Result String Unit)))
+  (ws-recv     (-> WsConn (Option WsMessage)))
+  (ws-close    (-> WsConn Unit)))
+
+; === Check if a request is a WebSocket upgrade ===
+
+(define headers-contain (lambda (headers key value)
+  (match headers
+    (Nil #f)
+    ((Cons (MkPair k v) rest)
+      (if (if (string= (string-to-lower k) key)
+            (string= (string-to-lower v) value)
+            #f)
+        #t
+        (headers-contain rest key value))))))
+
+(define upgrade? (lambda (headers)
+  (headers-contain headers "upgrade" "websocket")))
+
+; === Safe wrappers ===
+
+(define upgrade (lambda (conn)
+  (perform ws-upgrade conn)))
+
+(define send (lambda (ws text)
+  (perform ws-send ws text)))
+
+(define send-bin (lambda (ws data)
+  (perform ws-send-bin ws data)))
+
+(define recv (lambda (ws)
+  (perform ws-recv ws)))
+
+(define close (lambda (ws)
+  (perform ws-close ws)))
+
+; === Internal helper ===
+
+(define unwrap-or-throw (lambda (result label)
+  (match result
+    ((Ok v) v)
+    ((Err msg) (raise (string-append label ": " msg))))))
+
+; === Throwing wrappers ===
+
+(define upgrade! (lambda (conn)
+  (unwrap-or-throw (upgrade conn) "ws-upgrade")))
+
+(define send! (lambda (ws text)
+  (unwrap-or-throw (send ws text) "ws-send")))
+
+(define send-bin! (lambda (ws data)
+  (unwrap-or-throw (send-bin ws data) "ws-send-bin")))
