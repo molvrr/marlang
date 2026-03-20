@@ -312,6 +312,7 @@ fn install_handler_frame(vm: &mut VM) {
             closure: dummy.clone(),
             arity: 1,
             tail_resume_closure: None,
+            is_aborting: false,
         })
         .collect();
 

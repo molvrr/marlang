@@ -256,6 +256,10 @@ pub struct HandlerEntry {
     /// returns the value to resume with. When set, `Perform` can skip
     /// continuation capture entirely.
     pub tail_resume_closure: Option<Closure>,
+    /// True when the handler body doesn't reference the continuation `k`.
+    /// Aborting handlers discard the continuation, so `Perform` can skip
+    /// the expensive continuation capture and just unwind + dispatch.
+    pub is_aborting: bool,
 }
 
 /// A handler frame installed on the handler stack by `handle`.

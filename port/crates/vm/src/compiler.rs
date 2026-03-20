@@ -1386,6 +1386,9 @@ impl<'a> Compiler<'a> {
             arity: u8,
             /// Prototype index for the tail-resume-value closure, or None.
             tail_resume_proto_idx: Option<u32>,
+            /// True when the handler body doesn't reference the continuation `k`.
+            /// Aborting handlers can skip continuation capture entirely.
+            is_aborting: bool,
         }
         let mut handler_infos: Vec<HandlerInfo> = Vec::new();
         let mut return_proto_idx: Option<u32> = None;
@@ -1549,12 +1552,18 @@ impl<'a> Compiler<'a> {
                 let effect_name_idx = self.add_constant(ConstantValue::String(effect_name));
                 let op_name_idx = self.add_constant(ConstantValue::String(op_name));
                 let proto_idx = self.add_constant(ConstantValue::Prototype(proto));
+                // Check if handler body doesn't reference k — "aborting" handler.
+                // Aborting handlers discard the continuation, so Perform can skip
+                // the expensive continuation capture entirely.
+                let is_aborting = !Self::expr_references_symbol(handler_body, cont_param);
+
                 handler_infos.push(HandlerInfo {
                     effect_name_idx,
                     op_name_idx,
                     proto_idx,
                     arity,
                     tail_resume_proto_idx,
+                    is_aborting,
                 });
             }
         }
@@ -1595,9 +1604,10 @@ impl<'a> Compiler<'a> {
             .iter()
             .map(|h| {
                 let tail_resume_idx = h.tail_resume_proto_idx.map_or(-1, |idx| idx as i32);
+                let aborting_flag = if h.is_aborting { 1 } else { 0 };
                 format!(
-                    "{{\"effectNameIdx\":{},\"opNameIdx\":{},\"protoIdx\":{},\"arity\":{},\"tailResumeProtoIdx\":{}}}",
-                    h.effect_name_idx, h.op_name_idx, h.proto_idx, h.arity, tail_resume_idx
+                    "{{\"effectNameIdx\":{},\"opNameIdx\":{},\"protoIdx\":{},\"arity\":{},\"tailResumeProtoIdx\":{},\"aborting\":{}}}",
+                    h.effect_name_idx, h.op_name_idx, h.proto_idx, h.arity, tail_resume_idx, aborting_flag
                 )
             })
             .collect();

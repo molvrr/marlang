@@ -552,6 +552,9 @@ struct HandlerClauseDescriptor {
     arity: u8,
     /// Prototype index for the tail-resume-value closure, or -1 if not tail-resumptive.
     tail_resume_proto_idx: i32,
+    /// True when the handler body doesn't reference the continuation.
+    /// Aborting handlers can skip continuation capture entirely.
+    is_aborting: bool,
 }
 
 fn parse_handler_descriptor(json: &str) -> Result<HandlerDescriptor, String> {
@@ -627,12 +630,17 @@ fn parse_handler_clause(json: &str) -> Result<HandlerClauseDescriptor, String> {
     let tail_resume_proto_idx = extract_number(inner, "tailResumeProtoIdx")
         .map(|n| n as i32)
         .unwrap_or(-1);
+    // Parse optional aborting flag (defaults to false)
+    let is_aborting = extract_number(inner, "aborting")
+        .map(|n| n as i32 != 0)
+        .unwrap_or(false);
     Ok(HandlerClauseDescriptor {
         effect_name_idx,
         op_name_idx,
         proto_idx,
         arity,
         tail_resume_proto_idx,
+        is_aborting,
     })
 }
 
@@ -1863,6 +1871,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         closure: create_closure_from_proto(&mut vm.frames[frame_idx], proto),
                         arity: h.arity,
                         tail_resume_closure,
+                        is_aborting: h.is_aborting,
                     });
                 }
 
@@ -2039,6 +2048,83 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                         && let Some(result) = try_fast_path_handler(vm, op_name_ref, &args)
                     {
                         vm.push(result);
+                        continue;
+                    }
+
+                    // ── Aborting handler fast path ──
+                    // When the matching handler clause doesn't reference k (is_aborting),
+                    // the continuation will be discarded. Skip the expensive capture
+                    // (cloning frames, stack, handlers) and just unwind + dispatch.
+                    if !is_scheduler
+                        && vm.handler_stack[handler_idx].handlers[entry_idx].is_aborting
+                    {
+                        let clause = vm.handler_stack[handler_idx].handlers[entry_idx]
+                            .closure
+                            .clone();
+                        let clause_arity = vm.handler_stack[handler_idx].handlers[entry_idx].arity;
+                        let handler_entries = vm.handler_stack[handler_idx].handlers.clone();
+                        let return_handler = vm.handler_stack[handler_idx].return_handler.clone();
+                        let _handler_id = vm.handler_stack[handler_idx].id;
+                        let capture_frame_start = vm.handler_stack[handler_idx].capture_frame_start;
+                        let unwind_fc = vm.handler_stack[handler_idx].unwind_frame_start;
+                        let unwind_st = vm.handler_stack[handler_idx].unwind_stack_start;
+
+                        // Save current frame
+                        vm.frames[frame_idx].ip = ip;
+
+                        // Unwind VM state (no capture!)
+                        vm.clear_stack_slots(unwind_st);
+                        vm.frame_count = unwind_fc;
+                        vm.stack_top = unwind_st;
+                        vm.handler_stack.truncate(handler_idx);
+
+                        // Remove handler dispatch markers for captured frames
+                        vm.handler_dispatch_stack
+                            .retain(|d| d.dispatch_frame < capture_frame_start);
+
+                        // Deep handler semantics: re-install handler with new ID
+                        let new_handler_id = next_handler_id();
+                        let new_handler_frame = VMHandlerFrame {
+                            handlers: handler_entries.clone(),
+                            return_handler: return_handler.clone(),
+                            unwind_frame_start: vm.frame_count,
+                            unwind_stack_start: vm.stack_top,
+                            capture_frame_start: vm.frame_count,
+                            capture_stack_start: vm.stack_top,
+                            id: new_handler_id,
+                            is_scheduler: false,
+                            is_tail_resumptive: false,
+                        };
+                        vm.handler_stack.push(new_handler_frame);
+
+                        // Push handler dispatch marker
+                        vm.handler_dispatch_stack.push(HandlerDispatch {
+                            dispatch_frame: vm.frame_count,
+                            handler_entries,
+                            return_handler,
+                            handler_id: new_handler_id,
+                        });
+
+                        // Build clause arguments: [effect_args..., nil_continuation]
+                        let expected_arg_count = (clause_arity as usize).saturating_sub(1);
+                        let local_count = clause.proto.chunk.local_count as usize;
+                        let mut clause_locals = vm.take_locals(local_count);
+                        let copy_count = expected_arg_count.min(args.len());
+                        clause_locals[..copy_count].clone_from_slice(&args[..copy_count]);
+                        // Pass nil as the continuation (aborting handler won't use it)
+                        clause_locals[expected_arg_count] = Value::nil();
+
+                        // Call handler clause inline
+                        let new_frame = CallFrame {
+                            closure: clause,
+                            ip: 0,
+                            open_upvalues: Vec::new(),
+                            locals: clause_locals,
+                        };
+                        vm.push_frame(new_frame);
+                        frame_idx = vm.frame_count - 1;
+                        ip = 0;
+                        cache_frame!();
                         continue;
                     }
 
