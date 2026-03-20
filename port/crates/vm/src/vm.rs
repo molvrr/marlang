@@ -549,7 +549,7 @@ pub fn interpret(vm: &mut VM, chunk: &Chunk) -> Result<Value, VMError> {
 // --- JSON parsing for handler descriptors ---
 
 #[derive(Clone)]
-struct HandlerDescriptor {
+pub(crate) struct HandlerDescriptor {
     body_proto_idx: u32,
     handlers: Vec<HandlerClauseDescriptor>,
     return_proto_idx: i32,
@@ -803,7 +803,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 let cval = unsafe { &*cval_ptr };
 
                 // Fast path: check global resolution cache (stable for builtins)
-                if let Some(cached) = vm.global_cache.get(&(cval_ptr as *const ConstantValue)) {
+                if let Some(cached) = vm.global_cache.get(&(cval_ptr)) {
                     vm.push(cached.clone());
                 } else {
                     match cval {
@@ -822,8 +822,7 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                                 });
                             match resolved {
                                 Some(v) => {
-                                    vm.global_cache
-                                        .insert(cval_ptr as *const ConstantValue, v.clone());
+                                    vm.global_cache.insert(cval_ptr, v.clone());
                                     vm.push(v);
                                 }
                                 None => {
