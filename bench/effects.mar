@@ -1,12 +1,16 @@
 ; Effect-heavy benchmark: many perform/resume cycles
+; Tests both tail-resumptive (counter) and continuation-capturing (collect) effects
+
 (effect Tick
   (tick (-> Unit Int)))
 
-(define loop (lambda (n acc)
+; Tail-resumptive handler: tick returns a constant
+; 100,000 iterations to get measurable time
+(define loop-tick (lambda (n acc)
   (if (= n 0)
     acc
-    (loop (- n 1) (+ acc (perform tick))))))
+    (loop-tick (- n 1) (+ acc (perform tick))))))
 
 (handle
-  (loop 1000 0)
+  (loop-tick 100000 0)
   ((tick k) -> (resume k 1)))

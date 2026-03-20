@@ -16,6 +16,7 @@ BENCHMARKS=(
   "sum-loop:$SCRIPT_DIR/sum-loop.mar"
   "pattern:$SCRIPT_DIR/pattern.mar"
   "effects:$SCRIPT_DIR/effects.mar"
+  "json:$SCRIPT_DIR/json.mar"
 )
 
 # Build release binary

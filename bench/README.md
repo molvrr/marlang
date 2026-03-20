@@ -25,15 +25,15 @@ cargo run -p marlang-cli -- run bench/effects.mar
 
 ## Results: Rust VM
 
-Measured on Apple Silicon, release build, 5 runs (median):
+Measured on Apple Silicon, release build, 10 runs (median):
 
 | Benchmark  | Time      |
 |------------|-----------|
-| fib        | 43.54ms   |
-| fib-tail   | 13.89ms   |
-| sum-loop   | 14.74ms   |
-| pattern    | 18.90ms   |
-| effects    | 14.02ms   |
+| fib        | 20.54ms   |
+| fib-tail   | 14.76ms   |
+| sum-loop   | 15.22ms   |
+| pattern    | 30.10ms   |
+| effects    | 14.60ms   |
 
 Run with: `./bench/run.sh [RUNS]`
 

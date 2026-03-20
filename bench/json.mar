@@ -1,0 +1,20 @@
+; JSON parse/encode benchmark
+; Tests effect-heavy code through codec library (ParseState, PrintState, Exception)
+(import "std:json" as json)
+
+; Build a moderately complex JSON string to parse
+(define test-json "{\"name\":\"Alice\",\"age\":30,\"scores\":[95,87,92,78,88],\"active\":true,\"address\":{\"city\":\"Springfield\",\"zip\":\"62704\"},\"tags\":[\"admin\",\"user\"],\"meta\":null}")
+
+; Parse and encode N times
+(define bench (lambda (n)
+  (if (= n 0)
+    nil
+    (begin
+      (match (json/decode test-json)
+        ((Ok val)
+          (let ((encoded (json/encode val)))
+            nil))
+        ((Err msg) (error msg)))
+      (bench (- n 1))))))
+
+(bench 100)
