@@ -490,15 +490,20 @@ pub fn register_builtins(vm: &mut VM) {
             .as_string()
             .ok_or_else(|| VMError::runtime("string-char-at: first arg must be a string"))?;
         let idx = args[1].get_int() as usize;
+        // Fast path: if the string is pure ASCII, byte index == char index → O(1).
+        // Check s.is_ascii() which Rust optimizes with SIMD on most platforms.
+        if s.is_ascii() {
+            let bytes = s.as_bytes();
+            if idx < bytes.len() {
+                return Ok(crate::object::make_some(Value::char(bytes[idx] as char)));
+            } else {
+                return Ok(crate::object::make_none());
+            }
+        }
+        // Fallback: O(n) UTF-8 char iteration for non-ASCII strings
         match s.chars().nth(idx) {
-            Some(c) => Ok(Value::object(VMObject::AdtValue {
-                tag: "Some".to_string(),
-                fields: vec![Value::char(c)],
-            })),
-            None => Ok(Value::object(VMObject::AdtValue {
-                tag: "None".to_string(),
-                fields: vec![],
-            })),
+            Some(c) => Ok(crate::object::make_some(Value::char(c))),
+            None => Ok(crate::object::make_none()),
         }
     });
 
