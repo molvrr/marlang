@@ -1,3 +1,4 @@
+- [ ] stdlib: random
 - [ ] add cli subcommand `profile`: Shows time spent on macro expansion, typechecking, function calls
 - [ ] parse error filename, line number and column
 - [ ] Inner define doesn't capture enclosing lambda parameters — closures created

@@ -414,7 +414,7 @@ AppActor
 - [x] Batching — natural message queueing: ConnUpdate messages queue in actor mailbox during handler execution, processed sequentially after
 - [x] Dep protocol — `live-map` (derive from one upstream), `live-map2` (derive from two), watcher fibers with `SourceWatch`/`SourceUnwatch`
 
-### Phase 3 — Database ✅
+### Phase 3 — Database ✅ (complete)
 - [x] PostgreSQL wire protocol client — pure Marlang over TCP, `stdlib/pg.mar`
 - [x] Parameterized queries — `$1`, `$2`, etc. via extended query protocol
 - [x] Buffered binary TCP reads — `tcp-send-bytes` / `tcp-recv-bytes` runtime support
@@ -424,10 +424,10 @@ AppActor
 - [x] Convenience helpers — `each`, `map-rows`, `scalar`, `scalar!`
 - [x] Crypto builtins — `md5`, `sha256`, `hmac-sha256` (ring + md-5 crates, portable)
 - [x] VM global cache fix — replaced dangling pointer keys with string keys
-- [ ] Connection pooling
-- [ ] DB-backed live deps — `db-row`, `db-table` as live sources
-- [ ] LISTEN/NOTIFY integration for live dep updates
-- [ ] SCRAM-SHA-256 authentication
+- [x] Connection pooling — actor-based pool with checkout/checkin, `pool-new`, `pool-query`, `pool-execute`
+- [x] DB-backed live deps — `db-live` creates live sources driven by LISTEN/NOTIFY + auto-requery
+- [x] LISTEN/NOTIFY integration — `listener-new`, `listener-subscribe`/`unsubscribe`, `listen`/`unlisten`/`notify`/`wait-notification`
+- [x] SCRAM-SHA-256 authentication — full RFC 5802 implementation with PBKDF2, new builtins: `pbkdf2-sha256`, `bytes-xor`, `base64-encode`, `base64-decode`, `random-bytes`
 
 ### Phase 4 — Client Components (extends `emit-js` macro)
 - [x] `emit-js` macro — compiles Marlang to JS strings at expansion time (literals, lambda, let, if, begin, define, match, ADTs, operators)

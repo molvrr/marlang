@@ -153,6 +153,11 @@
 (declare md5 (-> Bytes Bytes))
 (declare sha256 (-> Bytes Bytes))
 (declare hmac-sha256 (-> Bytes Bytes Bytes))
+(declare pbkdf2-sha256 (-> Bytes Bytes Int Bytes))
+(declare bytes-xor (-> Bytes Bytes Bytes))
+(declare base64-encode (-> Bytes String))
+(declare base64-decode (-> String Bytes))
+(declare random-bytes (-> Int Bytes))
 
 ; Bytes
 (declare bytes-new (-> Int Bytes))

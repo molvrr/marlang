@@ -1548,6 +1548,155 @@ fn register_ffi_builtins(vm: &mut VM, builtin: RegisterFn) {
         Ok(Value::bytes(tag.as_ref().to_vec()))
     });
 
+    // pbkdf2-sha256: (pbkdf2-sha256 password salt iterations) → Bytes (32-byte derived key)
+    builtin(vm, "pbkdf2-sha256", |_vm, args| {
+        if args.len() != 3 {
+            return Err(VMError::runtime("pbkdf2-sha256 expects three arguments"));
+        }
+        let password = args[0]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("pbkdf2-sha256: first argument must be Bytes"))?;
+        let salt = args[1]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("pbkdf2-sha256: second argument must be Bytes"))?;
+        let iterations = args[2]
+            .as_int()
+            .ok_or_else(|| VMError::runtime("pbkdf2-sha256: third argument must be Int"))?;
+        if iterations <= 0 {
+            return Err(VMError::runtime(
+                "pbkdf2-sha256: iterations must be positive",
+            ));
+        }
+        let iterations = std::num::NonZeroU32::new(iterations as u32)
+            .ok_or_else(|| VMError::runtime("pbkdf2-sha256: iterations must be positive"))?;
+        let mut out = [0u8; 32];
+        ring::pbkdf2::derive(
+            ring::pbkdf2::PBKDF2_HMAC_SHA256,
+            iterations,
+            salt,
+            password,
+            &mut out,
+        );
+        Ok(Value::bytes(out.to_vec()))
+    });
+
+    // bytes-xor: (bytes-xor a b) → Bytes (element-wise XOR, same length required)
+    builtin(vm, "bytes-xor", |_vm, args| {
+        if args.len() != 2 {
+            return Err(VMError::runtime("bytes-xor expects two arguments"));
+        }
+        let a = args[0]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("bytes-xor: first argument must be Bytes"))?;
+        let b = args[1]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("bytes-xor: second argument must be Bytes"))?;
+        if a.len() != b.len() {
+            return Err(VMError::runtime(
+                "bytes-xor: byte arrays must have the same length",
+            ));
+        }
+        let result: Vec<u8> = a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect();
+        Ok(Value::bytes(result))
+    });
+
+    // base64-encode: (base64-encode data) → String (standard base64 with padding)
+    builtin(vm, "base64-encode", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("base64-encode expects one argument"));
+        }
+        let data = args[0]
+            .as_bytes()
+            .ok_or_else(|| VMError::runtime("base64-encode: argument must be Bytes"))?;
+        // Manual base64 encoding (no external crate dependency)
+        const CHARS: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
+        for chunk in data.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+            let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+            let triple = (b0 << 16) | (b1 << 8) | b2;
+            result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
+            result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
+            if chunk.len() > 1 {
+                result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
+            } else {
+                result.push('=');
+            }
+            if chunk.len() > 2 {
+                result.push(CHARS[(triple & 0x3F) as usize] as char);
+            } else {
+                result.push('=');
+            }
+        }
+        Ok(Value::string(result))
+    });
+
+    // base64-decode: (base64-decode str) → Bytes (standard base64 with padding)
+    builtin(vm, "base64-decode", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("base64-decode expects one argument"));
+        }
+        let s = args[0]
+            .as_string()
+            .ok_or_else(|| VMError::runtime("base64-decode: argument must be String"))?;
+        fn decode_char(c: u8) -> Result<u8, VMError> {
+            match c {
+                b'A'..=b'Z' => Ok(c - b'A'),
+                b'a'..=b'z' => Ok(c - b'a' + 26),
+                b'0'..=b'9' => Ok(c - b'0' + 52),
+                b'+' => Ok(62),
+                b'/' => Ok(63),
+                _ => Err(VMError::runtime("base64-decode: invalid character")),
+            }
+        }
+        let input: Vec<u8> = s.bytes().filter(|&b| b != b'\n' && b != b'\r').collect();
+        if !input.len().is_multiple_of(4) {
+            return Err(VMError::runtime(
+                "base64-decode: input length must be a multiple of 4",
+            ));
+        }
+        let mut result = Vec::with_capacity(input.len() / 4 * 3);
+        for chunk in input.chunks(4) {
+            let pad = (chunk[2] == b'=') as usize + (chunk[3] == b'=') as usize;
+            let b0 = decode_char(chunk[0])?;
+            let b1 = decode_char(chunk[1])?;
+            let b2 = if pad >= 2 { 0 } else { decode_char(chunk[2])? };
+            let b3 = if pad >= 1 { 0 } else { decode_char(chunk[3])? };
+            let triple =
+                ((b0 as u32) << 18) | ((b1 as u32) << 12) | ((b2 as u32) << 6) | (b3 as u32);
+            result.push((triple >> 16) as u8);
+            if pad < 2 {
+                result.push((triple >> 8) as u8);
+            }
+            if pad < 1 {
+                result.push(triple as u8);
+            }
+        }
+        Ok(Value::bytes(result))
+    });
+
+    // random-bytes: (random-bytes n) → Bytes (n cryptographically random bytes)
+    builtin(vm, "random-bytes", |_vm, args| {
+        if args.len() != 1 {
+            return Err(VMError::runtime("random-bytes expects one argument"));
+        }
+        let n = args[0]
+            .as_int()
+            .ok_or_else(|| VMError::runtime("random-bytes: argument must be Int"))?;
+        if n < 0 {
+            return Err(VMError::runtime(
+                "random-bytes: length must be non-negative",
+            ));
+        }
+        let mut buf = vec![0u8; n as usize];
+        let rng = ring::rand::SystemRandom::new();
+        ring::rand::SecureRandom::fill(&rng, &mut buf)
+            .map_err(|_| VMError::runtime("random-bytes: RNG failure"))?;
+        Ok(Value::bytes(buf))
+    });
+
     // struct-bytes: (struct-bytes s) → Bytes
     // Returns the raw buffer of an FFI struct as an immutable Bytes value.
     builtin(vm, "struct-bytes", |_vm, args| {

@@ -294,6 +294,163 @@
       (Cons (MkPair col val) (make-row cols vals))))))
 
 ; =========================================================================
+; SCRAM-SHA-256 authentication (RFC 5802 / RFC 7677)
+; =========================================================================
+
+; Generate a random client nonce as a base64 string.
+(define scram-nonce (lambda ()
+  (base64-encode (random-bytes 18))))
+
+; Build the client-first-message-bare: n=user,r=nonce
+(define scram-client-first-bare (lambda (user nonce)
+  (string-append "n=" user ",r=" nonce)))
+
+; Build the SASLInitialResponse message:
+;   'p'(1) + length(4) + mechanism-cstring + length(4) + initial-response
+(define build-sasl-initial (lambda (client-first-bare)
+  (let ((mechanism (cstring "SCRAM-SHA-256"))
+        (gs2-header "n,,")
+        (client-first (string-append gs2-header client-first-bare))
+        (cf-bytes (bytes-from-string client-first))
+        (cf-len-bytes (int32-be (bytes-length cf-bytes))))
+    (let ((body (append mechanism (append cf-len-bytes (bytes-to-list cf-bytes)))))
+      (let ((len (+ 4 (list-length body))))
+        (bytes-from-list (append (list 112) (append (int32-be len) body))))))))
+
+; Build the SASLResponse message: 'p'(1) + length(4) + response-bytes
+(define build-sasl-response (lambda (response-str)
+  (let ((resp-bytes (bytes-from-string response-str)))
+    (let ((len (+ 4 (bytes-length resp-bytes))))
+      (bytes-from-list (append (list 112) (append (int32-be len) (bytes-to-list resp-bytes))))))))
+
+; Parse a SCRAM key=value message (comma-separated).
+; Returns a list of (Pair String String) for key=value fields.
+(define __scram-parse-kv (lambda (parts)
+  (match parts
+    (Nil (list))
+    ((Cons kv rest)
+      (if (< (string-length kv) 2) (__scram-parse-kv rest)
+        (let ((key (string-substring kv 0 1))
+              (val (string-substring kv 2 (string-length kv))))
+          (Cons (MkPair key val) (__scram-parse-kv rest))))))))
+
+(define scram-parse-fields (lambda (msg)
+  (__scram-parse-kv (string-split msg ","))))
+
+(define scram-field (lambda (fields key)
+  (match fields
+    (Nil None)
+    ((Cons (MkPair k v) rest)
+      (if (string= k key) (Some v) (scram-field rest key))))))
+
+; Verify the server's final SCRAM signature.
+(define scram-verify-server (lambda (payload3 expected-sig)
+  (let ((auth-type3 (read-int32 payload3 0)))
+    (if (= auth-type3 12)
+      ; AuthenticationSASLFinal — verify server signature
+      (let ((server-final-bytes (bytes-slice payload3 4 (bytes-length payload3))))
+        (match (bytes-to-string server-final-bytes)
+          ((Err _) (raise "scram: invalid server-final-message"))
+          ((Ok server-final)
+            (let ((sf-fields (scram-parse-fields server-final)))
+              (let ((verifier (match (scram-field sf-fields "v")
+                    ((Some v) v)
+                    (None (raise "scram: missing server verifier")))))
+                (if (string= verifier expected-sig)
+                  nil
+                  (raise "scram: server signature mismatch")))))))
+    (if (= auth-type3 0)
+      nil  ; Some servers send AuthOk directly
+      (raise (string-append "scram: unexpected auth type in step 4: " (show auth-type3))))))))
+
+; Compute SCRAM proof and send client-final-message.
+; Returns the expected server signature (base64).
+(define scram-compute-and-send (lambda (pg-conn password salt iterations
+                                        client-first-bare server-first server-nonce)
+  (let ((salted-password (pbkdf2-sha256 (bytes-from-string password) salt iterations))
+        (client-key (hmac-sha256 salted-password (bytes-from-string "Client Key")))
+        (stored-key (sha256 client-key))
+        (client-final-no-proof (string-append "c=biws,r=" server-nonce))
+        (auth-message (string-append client-first-bare
+            (string-append "," server-first
+            (string-append "," client-final-no-proof))))
+        (client-signature (hmac-sha256 stored-key (bytes-from-string auth-message)))
+        (client-proof (bytes-xor client-key client-signature))
+        (server-key (hmac-sha256 salted-password (bytes-from-string "Server Key")))
+        (server-signature (hmac-sha256 server-key (bytes-from-string auth-message)))
+        (client-final (string-append client-final-no-proof
+            (string-append ",p=" (base64-encode client-proof)))))
+    (begin
+      (pg-send pg-conn (build-sasl-response client-final))
+      (base64-encode server-signature)))))
+
+; Process the server-first-message and complete SCRAM exchange.
+(define scram-process-server-first (lambda (pg-conn password client-first-bare client-nonce server-first)
+  (let ((fields (scram-parse-fields server-first)))
+    (let ((server-nonce (match (scram-field fields "r")
+            ((Some v) v) (None (raise "scram: missing server nonce"))))
+          (salt-b64 (match (scram-field fields "s")
+            ((Some v) v) (None (raise "scram: missing salt"))))
+          (iter-str (match (scram-field fields "i")
+            ((Some v) v) (None (raise "scram: missing iterations")))))
+      (begin
+        ; Verify server nonce starts with our client nonce
+        (if (not (string-starts-with server-nonce client-nonce))
+          (raise "scram: server nonce doesn't start with client nonce")
+          nil)
+        (let ((salt (base64-decode salt-b64))
+              (iterations (string->int iter-str)))
+          (let ((expected-sig (scram-compute-and-send pg-conn password salt iterations
+                                client-first-bare server-first server-nonce)))
+            ; Step 4: Receive AuthenticationSASLFinal (type 12)
+            (let ((msg3 (recv-message pg-conn)))
+              (match msg3
+                ((MkPair 82 payload3)
+                  (scram-verify-server payload3 expected-sig))
+                ((MkPair 69 err-payload)
+                  (raise (string-append "scram: auth error: " (parse-error-fields err-payload 0))))
+                (_ (raise "scram: unexpected message in step 4")))))))))))
+
+; Perform the full SCRAM-SHA-256 exchange.
+(define scram-auth (lambda (pg-conn user password payload)
+  ; Step 1: Send SASLInitialResponse with client-first-message
+  (let ((client-nonce (scram-nonce))
+        (client-first-bare (scram-client-first-bare user client-nonce)))
+    (begin
+      (pg-send pg-conn (build-sasl-initial client-first-bare))
+      ; Step 2: Receive AuthenticationSASLContinue (type 11)
+      (let ((msg2 (recv-message pg-conn)))
+        (match msg2
+          ((MkPair 82 payload2)
+            (let ((auth-type2 (read-int32 payload2 0)))
+              (if (= auth-type2 11)
+                (let ((server-first-bytes (bytes-slice payload2 4 (bytes-length payload2))))
+                  (match (bytes-to-string server-first-bytes)
+                    ((Err _) (raise "scram: invalid server-first-message encoding"))
+                    ((Ok server-first)
+                      (scram-process-server-first pg-conn password client-first-bare
+                        client-nonce server-first))))
+                (raise (string-append "scram: expected SASLContinue (11), got: " (show auth-type2))))))
+          ((MkPair 69 err-payload)
+            (raise (string-append "scram: auth error: " (parse-error-fields err-payload 0))))
+          (_ (raise "scram: unexpected message in step 2"))))))))
+
+; Parse SASL mechanism names from AuthenticationSASL payload.
+; The payload after the auth type int32 is: mechanism-cstring ... \0
+(define parse-sasl-mechanisms (lambda (payload offset)
+  (if (>= offset (bytes-length payload)) (list)
+    (if (= (bytes-get payload offset) 0) (list)
+      (match (read-cstring payload offset)
+        ((MkPair mechanism next)
+          (Cons mechanism (parse-sasl-mechanisms payload next))))))))
+
+(define has-scram-sha256 (lambda (mechanisms)
+  (match mechanisms
+    (Nil #f)
+    ((Cons m rest)
+      (if (string= m "SCRAM-SHA-256") #t (has-scram-sha256 rest))))))
+
+; =========================================================================
 ; Connection + query execution
 ; =========================================================================
 
@@ -318,7 +475,16 @@
               (begin
                 (pg-send pg-conn (build-md5-password user password salt))
                 (handle-auth pg-conn user password)))
-            (raise (string-append "db: unsupported auth type: " (show auth-type))))))))
+          (if (= auth-type 10)
+            ; AuthenticationSASL — parse mechanism list and do SCRAM-SHA-256
+            (let ((mechanisms (parse-sasl-mechanisms payload 4)))
+              (if (has-scram-sha256 mechanisms)
+                (begin
+                  (scram-auth pg-conn user password payload)
+                  (handle-auth pg-conn user password))
+                (raise (string-append "db: server requires unsupported SASL mechanisms: "
+                         (show mechanisms)))))
+            (raise (string-append "db: unsupported auth type: " (show auth-type)))))))))
       ; 'E' = ErrorResponse
       ((MkPair 69 payload)
         (raise (string-append "db: auth error: " (parse-error-fields payload 0))))
@@ -555,3 +721,254 @@
   (match (scalar rows)
     ((Some v) v)
     (None (raise "db: no rows returned")))))
+
+; =========================================================================
+; Connection pooling — actor-based pool with checkout/checkin
+; =========================================================================
+
+; Pool message types
+(data PoolMsg
+  (PoolCheckout Pid)           ; request a connection (sender gets it back)
+  (PoolCheckin)                ; return a connection (followed by the conn value)
+  (PoolClose))                 ; shut down the pool
+
+; Internal: list length
+(define __pool-list-len (lambda (lst)
+  (match lst (Nil 0) ((Cons _ rest) (+ 1 (__pool-list-len rest))))))
+
+; Create a new connection for the pool.
+(define __pool-create-conn (lambda (host port database user password)
+  (connect! host port database user password)))
+
+; Pool actor main loop.
+; idle: list of available connections
+; waiters: list of Pids waiting for a connection
+; total: total connections created
+; max-size: maximum connections allowed
+(define __pool-loop (lambda (host port database user password idle waiters total max-size)
+  (let ((msg (actor/receive)))
+    (match msg
+      ((PoolCheckout sender)
+        (match idle
+          ; Idle connection available — give it to requester
+          ((Cons conn rest)
+            (begin
+              (actor/send sender conn)
+              (__pool-loop host port database user password rest waiters total max-size)))
+          ; No idle connections — can we create one?
+          (Nil
+            (if (< total max-size)
+              ; Create a new connection
+              (handle
+                (let ((conn (__pool-create-conn host port database user password)))
+                  (begin
+                    (actor/send sender conn)
+                    (__pool-loop host port database user password (list) waiters (+ total 1) max-size)))
+                ((throw msg k) ->
+                  ; Connection failed — notify requester with an error
+                  (begin
+                    (actor/send sender None)
+                    (__pool-loop host port database user password (list) waiters total max-size))))
+              ; At max capacity — queue the requester
+              (__pool-loop host port database user password (list) (append waiters (list sender)) total max-size)))))
+      ((PoolCheckin)
+        ; Next message is the connection being returned
+        (let ((conn (actor/receive)))
+          (match waiters
+            ; Someone waiting — give them the returned connection
+            ((Cons waiter rest)
+              (begin
+                (actor/send waiter conn)
+                (__pool-loop host port database user password idle rest total max-size)))
+            ; No one waiting — add to idle list
+            (Nil
+              (__pool-loop host port database user password (Cons conn idle) (list) total max-size)))))
+      ((PoolClose)
+        ; Close all idle connections
+        (each idle (lambda (conn) (close conn))))))))
+
+; pool-new : create a connection pool.
+; Returns a pool Pid. max-size is the maximum number of connections.
+(define pool-new (lambda (host port database user password max-size)
+  (conc/spawn (lambda ()
+    (__pool-loop host port database user password (list) (list) 0 max-size)))))
+
+; pool-checkout : get a connection from the pool.
+; Blocks until a connection is available. Returns a PgConn.
+(define pool-checkout (lambda (pool)
+  (begin
+    (actor/send pool (PoolCheckout (conc/self)))
+    (actor/receive))))
+
+; pool-checkin : return a connection to the pool.
+(define pool-checkin (lambda (pool conn)
+  (begin
+    (actor/send pool PoolCheckin)
+    (actor/send pool conn))))
+
+; pool-close : shut down the pool and close all idle connections.
+(define pool-close (lambda (pool)
+  (actor/send pool PoolClose)))
+
+; pool-query : checkout, query, checkin. Convenience wrapper.
+(define pool-query (lambda (pool sql params)
+  (let ((conn (pool-checkout pool)))
+    (handle
+      (let ((result (query! conn sql params)))
+        (begin (pool-checkin pool conn) result))
+      ((throw msg k) ->
+        (begin (pool-checkin pool conn) (raise msg)))))))
+
+; pool-execute : checkout, execute, checkin. Convenience wrapper.
+(define pool-execute (lambda (pool sql params)
+  (let ((conn (pool-checkout pool)))
+    (handle
+      (let ((result (execute! conn sql params)))
+        (begin (pool-checkin pool conn) result))
+      ((throw msg k) ->
+        (begin (pool-checkin pool conn) (raise msg)))))))
+
+; =========================================================================
+; LISTEN/NOTIFY — PostgreSQL async notifications
+; =========================================================================
+
+; Parse a NotificationResponse ('A') payload:
+;   pid(4) + channel-cstring + payload-cstring
+(define parse-notification (lambda (data)
+  (let ((pid (read-int32 data 0)))
+    (match (read-cstring data 4)
+      ((MkPair channel next)
+        (match (read-cstring data next)
+          ((MkPair payload _)
+            (MkPair channel payload))))))))
+
+; listen : subscribe to a PostgreSQL NOTIFY channel.
+; conn must be a dedicated connection (not shared/pooled).
+(define listen (lambda (conn channel)
+  (query! conn (string-append "LISTEN " channel) (list))))
+
+; unlisten : unsubscribe from a PostgreSQL NOTIFY channel.
+(define unlisten (lambda (conn channel)
+  (query! conn (string-append "UNLISTEN " channel) (list))))
+
+; notify : send a notification on a channel.
+(define notify (lambda (conn channel payload)
+  (if (string-is-empty payload)
+    (execute! conn (string-append "NOTIFY " channel) (list))
+    (execute! conn (string-append "NOTIFY " channel ", '" payload "'") (list)))))
+
+; wait-notification : block until a notification arrives on the connection.
+; Returns (Pair channel payload).
+; The connection must have LISTEN active on at least one channel.
+(define wait-notification (lambda (pg-conn)
+  (let ((msg (recv-message pg-conn)))
+    (match msg
+      ; 'A' = NotificationResponse
+      ((MkPair 65 payload)
+        (parse-notification payload))
+      ; Skip other messages (ParameterStatus, etc.) and keep waiting
+      (_ (wait-notification pg-conn))))))
+
+; Internal: remove a value from a list by equality.
+(define __remove-pid (lambda (target lst)
+  (match lst
+    (Nil (list))
+    ((Cons x rest)
+      (if (equal? x target)
+        (__remove-pid target rest)
+        (Cons x (__remove-pid target rest)))))))
+
+; Notification listener: message types for the listener actor.
+(data ListenerMsg
+  (ListenerSubscribe String Pid)    ; channel, callback-pid
+  (ListenerUnsubscribe String Pid)  ; channel, callback-pid
+  (ListenerNotification String String)  ; channel, payload (from reader fiber)
+  (ListenerStop))
+
+; Internal: find subscribers for a channel in an assoc list.
+(define __find-subs (lambda (channel subs)
+  (match subs
+    (Nil (list))
+    ((Cons (MkPair ch pids) rest)
+      (if (string= ch channel) pids (__find-subs channel rest))))))
+
+; Internal: set subscribers for a channel.
+(define __set-subs (lambda (channel new-pids subs)
+  (match subs
+    (Nil (list (MkPair channel new-pids)))
+    ((Cons (MkPair ch pids) rest)
+      (if (string= ch channel)
+        (Cons (MkPair ch new-pids) rest)
+        (Cons (MkPair ch pids) (__set-subs channel new-pids rest)))))))
+
+; Internal: notify all subscribers of a channel.
+(define __notify-subs (lambda (pids channel payload)
+  (match pids
+    (Nil nil)
+    ((Cons pid rest)
+      (begin
+        (actor/send pid (MkPair channel payload))
+        (__notify-subs rest channel payload))))))
+
+; Listener actor loop — manages subscriptions and dispatches notifications.
+(define __listener-loop (lambda (pg-conn subs)
+  (let ((msg (actor/receive)))
+    (match msg
+      ((ListenerSubscribe channel callback-pid)
+        (let ((current (__find-subs channel subs)))
+          (let ((new-subs (__set-subs channel (Cons callback-pid current) subs)))
+            ; If this is the first subscriber for this channel, LISTEN
+            (begin
+              (if (nil? current)
+                (let ((_ (listen pg-conn channel))) nil)
+                nil)
+              (__listener-loop pg-conn new-subs)))))
+      ((ListenerUnsubscribe channel callback-pid)
+        (let ((current (__find-subs channel subs)))
+          (let ((filtered (__remove-pid callback-pid current)))
+            (let ((new-subs (__set-subs channel filtered subs)))
+              (begin
+                ; If no more subscribers, UNLISTEN
+                (if (nil? filtered)
+                  (let ((_ (unlisten pg-conn channel))) nil)
+                  nil)
+                (__listener-loop pg-conn new-subs))))))
+      ((ListenerNotification channel payload)
+        (let ((pids (__find-subs channel subs)))
+          (begin
+            (__notify-subs pids channel payload)
+            (__listener-loop pg-conn subs))))
+      ((ListenerStop)
+        (close pg-conn))))))
+
+; Internal: reader fiber that forwards notifications to the listener actor.
+(define __listener-reader (lambda (pg-conn listener-pid)
+  (let ((notification (wait-notification pg-conn)))
+    (match notification
+      ((MkPair channel payload)
+        (begin
+          (actor/send listener-pid (ListenerNotification channel payload))
+          (__listener-reader pg-conn listener-pid)))))))
+
+; listener-new : create a new notification listener.
+; Opens a dedicated connection for LISTEN/NOTIFY.
+; Returns the listener actor Pid.
+(define listener-new (lambda (host port database user password)
+  (let ((conn (connect! host port database user password)))
+    (let ((listener-pid (conc/spawn (lambda () (__listener-loop conn (list))))))
+      (begin
+        (conc/spawn (lambda () (__listener-reader conn listener-pid)))
+        listener-pid)))))
+
+; listener-subscribe : subscribe to notifications on a channel.
+; callback-pid will receive (Pair channel payload) messages.
+(define listener-subscribe (lambda (listener channel callback-pid)
+  (actor/send listener (ListenerSubscribe channel callback-pid))))
+
+; listener-unsubscribe : unsubscribe from notifications on a channel.
+(define listener-unsubscribe (lambda (listener channel callback-pid)
+  (actor/send listener (ListenerUnsubscribe channel callback-pid))))
+
+; listener-stop : shut down the listener and close its connection.
+(define listener-stop (lambda (listener)
+  (actor/send listener ListenerStop)))

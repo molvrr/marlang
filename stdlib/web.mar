@@ -874,3 +874,69 @@
     (begin
       (io/println (string-append "Listening on http://127.0.0.1:" (show port)))
       (accept-loop-live server routes)))))
+
+; =========================================================================
+; DB-backed live deps — live sources driven by PostgreSQL LISTEN/NOTIFY
+;
+; Usage:
+;   (import "std:web" as w)
+;   (import "std:db" as db)
+;
+;   ; Create a listener on a dedicated PG connection
+;   (define listener (db/listener-new "127.0.0.1" 5432 "mydb" "user" "pass"))
+;
+;   ; Create a live source backed by a DB query.
+;   ; Re-runs the query whenever 'users_changed' is notified.
+;   (define users (w/db-live listener pool "users_changed"
+;     (lambda () (db/pool-query pool "SELECT id, name FROM users" (list)))
+;     (lambda (rows) (w/ul (list) (w/join (db/map-rows rows
+;       (lambda (r) (w/li (list) (db/col! r "name")))))))))
+;
+;   ; In your HTML: (w/live-el "div" users (list))
+;   ; Whenever someone does NOTIFY users_changed, the query re-runs
+;   ; and all connected clients get the updated HTML.
+; =========================================================================
+
+; db-live : create a live source backed by a DB query + LISTEN/NOTIFY.
+; subscribe-fn: (-> Pid Unit) — subscribes the watcher Pid for notifications.
+;   Typically: (lambda (pid) (pg/listener-subscribe listener channel pid))
+; query-fn: (-> Unit a) — thunk that runs the query
+; render-fn: (-> a String) — renders the query result as HTML
+; Returns a LiveHandle.
+;
+; Usage:
+;   (import "std:web" as w)
+;   (import "std:db" as db)
+;
+;   (define listener (db/listener-new "127.0.0.1" 5432 "mydb" "user" "pass"))
+;   (define pool (db/pool-new "127.0.0.1" 5432 "mydb" "user" "pass" 5))
+;
+;   (define users (w/db-live
+;     (lambda (pid) (db/listener-subscribe listener "users_changed" pid))
+;     (lambda () (db/pool-query pool "SELECT id, name FROM users" (list)))
+;     (lambda (rows) (w/ul (list) (w/join (db/map-rows rows
+;       (lambda (r) (w/li (list) (db/col! r "name")))))))))
+;
+;   ; In HTML: (w/live-el "div" users (list))
+;   ; Whenever: NOTIFY users_changed  =>  query re-runs, clients get updated HTML.
+; Internal: loop that waits for notifications and re-queries.
+(define __db-live-loop (lambda (query-fn handle)
+  ; Wait for any message (notification from the listener)
+  (let ((_ (actor/receive)))
+    (begin
+      ; Re-run the query and update the live source
+      (handle
+        (let ((new-data (query-fn)))
+          (live-set handle new-data))
+        ((throw msg k) -> nil))  ; Silently ignore query errors
+      (__db-live-loop query-fn handle)))))
+
+(define db-live (lambda (subscribe-fn query-fn render-fn)
+  (let ((initial-data (query-fn)))
+    (let ((handle (live initial-data render-fn)))
+      (begin
+        (conc/spawn (lambda ()
+          (begin
+            (subscribe-fn (conc/self))
+            (__db-live-loop query-fn handle))))
+        handle)))))
