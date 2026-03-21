@@ -142,6 +142,35 @@ impl VM {
         }
     }
 
+    /// Create a VM clone for a worker thread. Shares the globals (read-only after init)
+    /// but gets fresh stacks/frames/handlers.
+    pub fn clone_for_worker(&self) -> Self {
+        VM {
+            stack: Vec::with_capacity(256),
+            stack_top: 0,
+            frames: Vec::with_capacity(64),
+            frame_count: 0,
+            module_globals: self.module_globals.clone(),
+            current_module: ROOT_MODULE,
+            handler_stack: Vec::new(),
+            handler_dispatch_stack: Vec::new(),
+            resumed_continuations: HashSet::new(),
+            captured_output: None,
+            dirty_globals: None,
+            current_pid: None,
+            handler_descriptor_cache: self.handler_descriptor_cache.clone(),
+            global_cache: self.global_cache.clone(),
+            #[cfg(feature = "jit")]
+            jit_engine: None,
+            #[cfg(feature = "jit")]
+            jit_code: FxHashMap::default(),
+            #[cfg(feature = "jit")]
+            jit_call_counts: FxHashMap::default(),
+            #[cfg(feature = "jit")]
+            pending_effect: None,
+        }
+    }
+
     /// Convenience accessor for the root module globals table.
     /// Most code that used `vm.globals` should use this instead.
     #[inline]

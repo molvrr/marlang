@@ -301,6 +301,14 @@ pub fn run_program_from_exprs(
 
             // Execute via the scheduler
             let closure = make_script_closure(&result.chunk, vm.current_module);
+
+            // Before executing the last top-level expression, spawn worker threads.
+            // Only do this for the outermost run (owns_scheduler), not nested imports.
+            // The last expression might be a server loop that never returns.
+            if owns_scheduler && i + 1 == exprs.len() {
+                sched.notify_modules_loaded(vm);
+            }
+
             last_value = sched.execute_main(vm, &closure)?;
         }
 
@@ -315,6 +323,9 @@ pub fn run_program_from_exprs(
         // Make progress on background fibers between expressions
         sched.run_ready(vm);
     }
+
+    // All modules are loaded — spawn worker threads so fibers can be distributed.
+    sched.notify_modules_loaded(vm);
 
     // If we own the scheduler, finish all background fibers
     if owns_scheduler {

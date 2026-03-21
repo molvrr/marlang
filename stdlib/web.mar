@@ -263,31 +263,46 @@
 ; State cells — actor-backed observable values
 ; =========================================================================
 
-(data CellMsg (CellGet Pid) (CellSet Pid))
+; Cell actors using channels (avoids actor mailbox interleaving issues).
+; Each cell is a pair of channels: (req-chan, resp-chan).
 
-(define cell-loop (lambda (value)
-  (let ((msg (actor/receive)))
-    (match msg
-      ((CellGet sender)
-        (begin (actor/send sender value) (cell-loop value)))
-      ((CellSet sender)
-        (let ((new-val (actor/receive)))
-          (begin (actor/send sender new-val) (cell-loop new-val))))))))
+(define __cell-loop (lambda (value req resp)
+  (match (conc/chan-recv req)
+    (None nil)
+    ((Some msg)
+      (match msg
+        (None
+          (begin (conc/chan-send! resp value) (__cell-loop value req resp)))
+        ((Some new-val)
+          (begin (conc/chan-send! resp new-val) (__cell-loop new-val req resp))))))))
 
-; Create a new cell with an initial value. Returns a Pid.
+; Create a new cell with an initial value. Returns a (Pair Channel Channel).
 (define cell-new (lambda (initial)
-  (conc/spawn (lambda () (cell-loop initial)))))
+  (let ((req (conc/chan-new 1))
+        (resp (conc/chan-new 1)))
+    (begin
+      (conc/spawn (lambda () (__cell-loop initial req resp)))
+      (MkPair req resp)))))
 
 ; Read the current value of a cell.
 (define cell-get (lambda (cell)
-  (actor/send cell (CellGet (conc/self)))
-  (actor/receive)))
+  (match cell
+    ((MkPair req resp)
+      (begin
+        (conc/chan-send! req None)
+        (match (conc/chan-recv resp)
+          ((Some v) v)
+          (None (raise "cell-get: channel closed"))))))))
 
 ; Set the value of a cell. Returns the new value.
 (define cell-set (lambda (cell val)
-  (actor/send cell (CellSet (conc/self)))
-  (actor/send cell val)
-  (actor/receive)))
+  (match cell
+    ((MkPair req resp)
+      (begin
+        (conc/chan-send! req (Some val))
+        (match (conc/chan-recv resp)
+          ((Some v) v)
+          (None (raise "cell-set: channel closed"))))))))
 
 ; Update a cell by applying a function. Returns the new value.
 (define cell-update (lambda (cell f)
@@ -573,8 +588,8 @@
 
 ; --- LiveHandle: typed handle returned to the user ---
 
-(data (LiveHandle a)
-  (MkLiveHandle Pid Pid String (-> a String)))
+(data (LiveHandle a b)
+  (MkLiveHandle b Pid String (-> a String)))
 ; Fields: val-cell, source-pid, target-id, render-fn
 
 ; --- Public API ---

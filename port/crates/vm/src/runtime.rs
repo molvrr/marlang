@@ -109,7 +109,32 @@ enum SchedulerMessage {
     WsClosed {
         ws_id: u64,
     },
+    WsOp(WsOp),
+    WsOpResult {
+        fiber_pid: FiberId,
+        result: Value,
+    },
     Shutdown,
+}
+
+#[derive(Debug)]
+enum WsOp {
+    Send {
+        ws_id: u64,
+        data: tokio_tungstenite::tungstenite::Message,
+        fiber_pid: FiberId,
+        reply_scheduler: usize,
+    },
+    Recv {
+        ws_id: u64,
+        fiber_pid: FiberId,
+        reply_scheduler: usize,
+    },
+    Close {
+        ws_id: u64,
+        fiber_pid: FiberId,
+        reply_scheduler: usize,
+    },
 }
 
 struct ChannelState {
@@ -150,9 +175,24 @@ enum ExitReason {
 struct TcpSocketState {
     write_handle: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
     recv_queue: VecDeque<Vec<u8>>,
-    waiting_recv: Option<(FiberId, Value)>, // (pid, continuation)
-    waiting_recv_bytes: bool,               // true if waiting recv wants Bytes, false for String
+    waiting_recv: Option<TcpWaiter>,
     closed: bool,
+}
+
+/// Who is waiting for the next TCP message.
+enum TcpWaiter {
+    /// Local fiber (same scheduler): push directly to ready_queue.
+    Local {
+        pid: FiberId,
+        continuation: Value,
+        want_bytes: bool,
+    },
+    /// Remote fiber (different scheduler): send TcpOpResult back.
+    Remote {
+        fiber_pid: FiberId,
+        reply_scheduler: usize,
+        want_bytes: bool,
+    },
 }
 
 struct TcpListenerState {
@@ -196,8 +236,19 @@ enum HttpResponseAction {
 struct WsState {
     write_tx: tokio::sync::mpsc::UnboundedSender<tokio_tungstenite::tungstenite::Message>,
     recv_queue: VecDeque<WsRecvMsg>,
-    waiting_recv: Option<(FiberId, Value)>,
+    waiting_recv: Option<WsWaiter>,
     closed: bool,
+}
+
+/// Who is waiting for the next WebSocket message.
+enum WsWaiter {
+    /// Local fiber (same scheduler): push directly to ready_queue.
+    Local { pid: FiberId, continuation: Value },
+    /// Remote fiber (different scheduler): send WsOpResult back.
+    Remote {
+        fiber_pid: FiberId,
+        reply_scheduler: usize,
+    },
 }
 
 enum WsRecvMsg {
@@ -218,7 +269,7 @@ enum TcpOp {
         socket_id: u64,
         fiber_pid: FiberId,
         reply_scheduler: usize,
-        continuation: Value,
+        want_bytes: bool,
     },
     Close {
         socket_id: u64,
@@ -278,6 +329,10 @@ struct SharedState {
     http_server_owners: Mutex<HashMap<u64, usize>>,
     http_connections: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<HttpResponseAction>>>>,
     active_http_servers: AtomicUsize,
+
+    // Worker thread readiness flag — fibers are only distributed to workers
+    // after this is set. Prevents sending fibers to unread channels during init.
+    workers_ready: AtomicBool,
 
     // WebSocket state
     ws_owners: Mutex<HashMap<u64, usize>>,
@@ -364,6 +419,7 @@ const HANDLED_EFFECTS: &[&str] = &[
     "chan-close",
     "actor-send",
     "actor-receive",
+    "actor-try-receive",
     "actor-receive-match",
     "actor-monitor",
     "actor-link",
@@ -742,6 +798,24 @@ fn handle_effect(
             );
             let mut parked = shared.parked_pids.lock().unwrap();
             parked.insert(current_pid, sched.id);
+        }
+
+        "actor-try-receive" => {
+            let current_pid = sched.current_pid;
+            let mut mailboxes = shared.mailboxes.lock().unwrap();
+            let result = if let Some(mailbox) = mailboxes.get_mut(&current_pid)
+                && !mailbox.is_empty()
+            {
+                make_some(mailbox.pop_front().unwrap())
+            } else {
+                make_none()
+            };
+            drop(mailboxes);
+            sched.ready_queue.push_back(Fiber::Suspended {
+                continuation: cont,
+                resume_value: result,
+                pid: current_pid,
+            });
         }
 
         "actor-receive-match" => {
@@ -1290,7 +1364,7 @@ fn handle_effect(
                         socket_id: listener_id, // reusing Recv for accept routing
                         fiber_pid: sched.current_pid,
                         reply_scheduler: sched.id,
-                        continuation: Value::nil(), // not used; reply via IoComplete
+                        want_bytes: false,
                     },
                 ));
             } else {
@@ -1414,7 +1488,11 @@ fn handle_effect(
                         });
                     } else {
                         // Park until data arrives
-                        socket_state.waiting_recv = Some((sched.current_pid, cont));
+                        socket_state.waiting_recv = Some(TcpWaiter::Local {
+                            pid: sched.current_pid,
+                            continuation: cont,
+                            want_bytes: false,
+                        });
                     }
                 } else {
                     // Local owner but socket state gone — treat as closed
@@ -1432,7 +1510,7 @@ fn handle_effect(
                         socket_id,
                         fiber_pid: sched.current_pid,
                         reply_scheduler: sched.id,
-                        continuation: Value::nil(), // not used; reply via TcpOpResult
+                        want_bytes: false,
                     },
                 ));
             } else {
@@ -1534,8 +1612,11 @@ fn handle_effect(
                             pid: sched.current_pid,
                         });
                     } else {
-                        socket_state.waiting_recv_bytes = true;
-                        socket_state.waiting_recv = Some((sched.current_pid, cont));
+                        socket_state.waiting_recv = Some(TcpWaiter::Local {
+                            pid: sched.current_pid,
+                            continuation: cont,
+                            want_bytes: true,
+                        });
                     }
                 } else {
                     sched.ready_queue.push_back(Fiber::Suspended {
@@ -1551,7 +1632,7 @@ fn handle_effect(
                         socket_id,
                         fiber_pid: sched.current_pid,
                         reply_scheduler: sched.id,
-                        continuation: Value::nil(),
+                        want_bytes: true,
                     },
                 ));
             } else {
@@ -2071,27 +2152,51 @@ fn handle_effect(
                 .ok_or_else(|| VMError::runtime("ws-send: second arg must be a string"))?
                 .to_string();
 
-            let resume_value = if let Some(ws) = sched.ws_connections.get(&ws_id) {
-                if ws.closed {
-                    make_err("ws-send: connection closed")
-                } else {
-                    match ws
-                        .write_tx
-                        .send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
-                    {
-                        Ok(()) => make_ok(Value::nil()),
-                        Err(_) => make_err("ws-send: write channel closed"),
-                    }
-                }
-            } else {
-                make_err("ws-send: unknown connection")
+            let owner = {
+                let owners = shared.ws_owners.lock().unwrap();
+                owners.get(&ws_id).copied()
             };
 
-            sched.ready_queue.push_back(Fiber::Suspended {
-                continuation: cont,
-                resume_value,
-                pid: sched.current_pid,
-            });
+            if owner == Some(sched.id) {
+                // Local — send directly
+                let resume_value = if let Some(ws) = sched.ws_connections.get(&ws_id) {
+                    if ws.closed {
+                        make_err("ws-send: connection closed")
+                    } else {
+                        match ws
+                            .write_tx
+                            .send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
+                        {
+                            Ok(()) => make_ok(Value::nil()),
+                            Err(_) => make_err("ws-send: write channel closed"),
+                        }
+                    }
+                } else {
+                    make_err("ws-send: unknown connection")
+                };
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value,
+                    pid: sched.current_pid,
+                });
+            } else if let Some(target_sched) = owner {
+                // Remote — route to owning scheduler
+                sched.io_parked.insert(sched.current_pid, cont);
+                let _ = shared.scheduler_senders[target_sched].send(SchedulerMessage::WsOp(
+                    WsOp::Send {
+                        ws_id,
+                        data: tokio_tungstenite::tungstenite::Message::Text(text.into()),
+                        fiber_pid: sched.current_pid,
+                        reply_scheduler: sched.id,
+                    },
+                ));
+            } else {
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: make_err("ws-send: unknown connection"),
+                    pid: sched.current_pid,
+                });
+            }
         }
 
         "ws-send-bin" => {
@@ -2109,27 +2214,49 @@ fn handle_effect(
                 .ok_or_else(|| VMError::runtime("ws-send-bin: second arg must be Bytes"))?
                 .to_vec();
 
-            let resume_value = if let Some(ws) = sched.ws_connections.get(&ws_id) {
-                if ws.closed {
-                    make_err("ws-send-bin: connection closed")
-                } else {
-                    match ws
-                        .write_tx
-                        .send(tokio_tungstenite::tungstenite::Message::Binary(data.into()))
-                    {
-                        Ok(()) => make_ok(Value::nil()),
-                        Err(_) => make_err("ws-send-bin: write channel closed"),
-                    }
-                }
-            } else {
-                make_err("ws-send-bin: unknown connection")
+            let owner = {
+                let owners = shared.ws_owners.lock().unwrap();
+                owners.get(&ws_id).copied()
             };
 
-            sched.ready_queue.push_back(Fiber::Suspended {
-                continuation: cont,
-                resume_value,
-                pid: sched.current_pid,
-            });
+            if owner == Some(sched.id) {
+                let resume_value = if let Some(ws) = sched.ws_connections.get(&ws_id) {
+                    if ws.closed {
+                        make_err("ws-send-bin: connection closed")
+                    } else {
+                        match ws
+                            .write_tx
+                            .send(tokio_tungstenite::tungstenite::Message::Binary(data.into()))
+                        {
+                            Ok(()) => make_ok(Value::nil()),
+                            Err(_) => make_err("ws-send-bin: write channel closed"),
+                        }
+                    }
+                } else {
+                    make_err("ws-send-bin: unknown connection")
+                };
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value,
+                    pid: sched.current_pid,
+                });
+            } else if let Some(target_sched) = owner {
+                sched.io_parked.insert(sched.current_pid, cont);
+                let _ = shared.scheduler_senders[target_sched].send(SchedulerMessage::WsOp(
+                    WsOp::Send {
+                        ws_id,
+                        data: tokio_tungstenite::tungstenite::Message::Binary(data.into()),
+                        fiber_pid: sched.current_pid,
+                        reply_scheduler: sched.id,
+                    },
+                ));
+            } else {
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: make_err("ws-send-bin: unknown connection"),
+                    pid: sched.current_pid,
+                });
+            }
         }
 
         "ws-recv" => {
@@ -2141,24 +2268,51 @@ fn handle_effect(
                 })
                 .ok_or_else(|| VMError::runtime("ws-recv: argument must be a WsConnection"))?;
 
-            if let Some(ws) = sched.ws_connections.get_mut(&ws_id) {
-                if let Some(msg) = ws.recv_queue.pop_front() {
-                    let val = ws_msg_to_value(msg);
-                    sched.ready_queue.push_back(Fiber::Suspended {
-                        continuation: cont,
-                        resume_value: make_some(val),
-                        pid: sched.current_pid,
-                    });
-                } else if ws.closed {
+            let owner = {
+                let owners = shared.ws_owners.lock().unwrap();
+                owners.get(&ws_id).copied()
+            };
+
+            if owner == Some(sched.id) {
+                // Local — handle directly
+                if let Some(ws) = sched.ws_connections.get_mut(&ws_id) {
+                    if let Some(msg) = ws.recv_queue.pop_front() {
+                        let val = ws_msg_to_value(msg);
+                        sched.ready_queue.push_back(Fiber::Suspended {
+                            continuation: cont,
+                            resume_value: make_some(val),
+                            pid: sched.current_pid,
+                        });
+                    } else if ws.closed {
+                        sched.ready_queue.push_back(Fiber::Suspended {
+                            continuation: cont,
+                            resume_value: make_none(),
+                            pid: sched.current_pid,
+                        });
+                    } else {
+                        // Park until data arrives
+                        ws.waiting_recv = Some(WsWaiter::Local {
+                            pid: sched.current_pid,
+                            continuation: cont,
+                        });
+                    }
+                } else {
                     sched.ready_queue.push_back(Fiber::Suspended {
                         continuation: cont,
                         resume_value: make_none(),
                         pid: sched.current_pid,
                     });
-                } else {
-                    // Park until data arrives
-                    ws.waiting_recv = Some((sched.current_pid, cont));
                 }
+            } else if let Some(target_sched) = owner {
+                // Remote — route to owning scheduler
+                sched.io_parked.insert(sched.current_pid, cont);
+                let _ = shared.scheduler_senders[target_sched].send(SchedulerMessage::WsOp(
+                    WsOp::Recv {
+                        ws_id,
+                        fiber_pid: sched.current_pid,
+                        reply_scheduler: sched.id,
+                    },
+                ));
             } else {
                 sched.ready_queue.push_back(Fiber::Suspended {
                     continuation: cont,
@@ -2177,28 +2331,47 @@ fn handle_effect(
                 })
                 .ok_or_else(|| VMError::runtime("ws-close: argument must be a WsConnection"))?;
 
-            if let Some(ws) = sched.ws_connections.get_mut(&ws_id) {
-                if !ws.closed {
-                    ws.closed = true;
-                    let _ = ws
-                        .write_tx
-                        .send(tokio_tungstenite::tungstenite::Message::Close(None));
-                }
-                // Wake any waiting recv with None
-                if let Some((wait_pid, wait_cont)) = ws.waiting_recv.take() {
-                    sched.ready_queue.push_back(Fiber::Suspended {
-                        continuation: wait_cont,
-                        resume_value: make_none(),
-                        pid: wait_pid,
-                    });
-                }
-            }
+            let owner = {
+                let owners = shared.ws_owners.lock().unwrap();
+                owners.get(&ws_id).copied()
+            };
 
-            sched.ready_queue.push_back(Fiber::Suspended {
-                continuation: cont,
-                resume_value: Value::nil(),
-                pid: sched.current_pid,
-            });
+            if owner == Some(sched.id) {
+                // Local — close directly
+                if let Some(ws) = sched.ws_connections.get_mut(&ws_id) {
+                    if !ws.closed {
+                        ws.closed = true;
+                        let _ = ws
+                            .write_tx
+                            .send(tokio_tungstenite::tungstenite::Message::Close(None));
+                    }
+                    // Wake any waiting recv with None
+                    if let Some(waiter) = ws.waiting_recv.take() {
+                        ws_wake_waiter(sched, shared, waiter, make_none());
+                    }
+                }
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: Value::nil(),
+                    pid: sched.current_pid,
+                });
+            } else if let Some(target_sched) = owner {
+                // Remote — route to owning scheduler
+                sched.io_parked.insert(sched.current_pid, cont);
+                let _ = shared.scheduler_senders[target_sched].send(SchedulerMessage::WsOp(
+                    WsOp::Close {
+                        ws_id,
+                        fiber_pid: sched.current_pid,
+                        reply_scheduler: sched.id,
+                    },
+                ));
+            } else {
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: Value::nil(),
+                    pid: sched.current_pid,
+                });
+            }
         }
 
         // --- Exception effect (default handler: crash the fiber) ---
@@ -3043,12 +3216,8 @@ fn tcp_close_socket(sched: &mut PerScheduler, shared: &SharedState, socket_id: u
     if let Some(mut socket_state) = sched.tcp_sockets.remove(&socket_id) {
         socket_state.closed = true;
         // Wake any fiber waiting on recv with None
-        if let Some((wait_pid, wait_cont)) = socket_state.waiting_recv.take() {
-            sched.ready_queue.push_back(Fiber::Suspended {
-                continuation: wait_cont,
-                resume_value: make_none(),
-                pid: wait_pid,
-            });
+        if let Some(waiter) = socket_state.waiting_recv.take() {
+            tcp_wake_waiter(sched, shared, waiter, None);
         }
         // Drop write_handle — this closes the write side of the socket.
         // The read task will get EOF and send TcpClosed (which we'll ignore).
@@ -3061,23 +3230,65 @@ fn tcp_close_socket(sched: &mut PerScheduler, shared: &SharedState, socket_id: u
 }
 
 /// Handle incoming TCP data for a local socket.
-fn tcp_handle_data(sched: &mut PerScheduler, socket_id: u64, data: Vec<u8>) {
-    if let Some(socket_state) = sched.tcp_sockets.get_mut(&socket_id) {
-        if let Some((wait_pid, wait_cont)) = socket_state.waiting_recv.take() {
-            // Fiber is waiting — deliver immediately, wrapped in Some
-            let want_bytes = socket_state.waiting_recv_bytes;
-            socket_state.waiting_recv_bytes = false;
-            let resume_value = if want_bytes {
-                make_some(Value::bytes(data))
-            } else {
-                let s = String::from_utf8_lossy(&data).into_owned();
-                make_some(Value::string(&*s))
+/// Wake a TcpWaiter with the given value. Handles both local and remote cases.
+fn tcp_wake_waiter(
+    sched: &mut PerScheduler,
+    shared: &SharedState,
+    waiter: TcpWaiter,
+    data: Option<Vec<u8>>,
+) {
+    match waiter {
+        TcpWaiter::Local {
+            pid,
+            continuation,
+            want_bytes,
+        } => {
+            let resume_value = match data {
+                None => make_none(),
+                Some(d) => {
+                    if want_bytes {
+                        make_some(Value::bytes(d))
+                    } else {
+                        let s = String::from_utf8_lossy(&d).into_owned();
+                        make_some(Value::string(&*s))
+                    }
+                }
             };
             sched.ready_queue.push_back(Fiber::Suspended {
-                continuation: wait_cont,
+                continuation,
                 resume_value,
-                pid: wait_pid,
+                pid,
             });
+        }
+        TcpWaiter::Remote {
+            fiber_pid,
+            reply_scheduler,
+            want_bytes,
+        } => {
+            let result = match data {
+                None => make_none(),
+                Some(d) => {
+                    if want_bytes {
+                        make_some(Value::bytes(d))
+                    } else {
+                        let s = String::from_utf8_lossy(&d).into_owned();
+                        make_some(Value::string(&*s))
+                    }
+                }
+            };
+            let _ = shared.scheduler_senders[reply_scheduler].send(SchedulerMessage::TcpOpResult {
+                fiber_pid,
+                result: Ok(result),
+            });
+        }
+    }
+}
+
+fn tcp_handle_data(sched: &mut PerScheduler, shared: &SharedState, socket_id: u64, data: Vec<u8>) {
+    if let Some(socket_state) = sched.tcp_sockets.get_mut(&socket_id) {
+        if let Some(waiter) = socket_state.waiting_recv.take() {
+            // Fiber is waiting — deliver immediately, wrapped in Some
+            tcp_wake_waiter(sched, shared, waiter, Some(data));
         } else {
             // Buffer the data
             socket_state.recv_queue.push_back(data);
@@ -3087,16 +3298,12 @@ fn tcp_handle_data(sched: &mut PerScheduler, socket_id: u64, data: Vec<u8>) {
 }
 
 /// Handle TCP socket closed notification.
-fn tcp_handle_closed(sched: &mut PerScheduler, socket_id: u64) {
+fn tcp_handle_closed(sched: &mut PerScheduler, shared: &SharedState, socket_id: u64) {
     if let Some(socket_state) = sched.tcp_sockets.get_mut(&socket_id) {
         socket_state.closed = true;
         // Wake any fiber waiting on recv with None
-        if let Some((wait_pid, wait_cont)) = socket_state.waiting_recv.take() {
-            sched.ready_queue.push_back(Fiber::Suspended {
-                continuation: wait_cont,
-                resume_value: make_none(),
-                pid: wait_pid,
-            });
+        if let Some(waiter) = socket_state.waiting_recv.take() {
+            tcp_wake_waiter(sched, shared, waiter, None);
         }
     }
 }
@@ -3122,7 +3329,6 @@ fn tcp_handle_accepted(
             write_handle,
             recv_queue: VecDeque::new(),
             waiting_recv: None,
-            waiting_recv_bytes: false,
             closed: false,
         },
     );
@@ -3190,15 +3396,20 @@ fn tcp_handle_op(sched: &mut PerScheduler, shared: &SharedState, op: TcpOp) {
             socket_id,
             fiber_pid,
             reply_scheduler,
-            ..
+            want_bytes,
         } => {
             if let Some(socket_state) = sched.tcp_sockets.get_mut(&socket_id) {
                 if let Some(data) = socket_state.recv_queue.pop_front() {
-                    let s = String::from_utf8_lossy(&data).into_owned();
+                    let result = if want_bytes {
+                        make_some(Value::bytes(data))
+                    } else {
+                        let s = String::from_utf8_lossy(&data).into_owned();
+                        make_some(Value::string(&*s))
+                    };
                     let _ = shared.scheduler_senders[reply_scheduler].send(
                         SchedulerMessage::TcpOpResult {
                             fiber_pid,
-                            result: Ok(make_some(Value::string(&*s))),
+                            result: Ok(result),
                         },
                     );
                 } else if socket_state.closed {
@@ -3209,14 +3420,12 @@ fn tcp_handle_op(sched: &mut PerScheduler, shared: &SharedState, op: TcpOp) {
                         },
                     );
                 } else {
-                    // Cross-scheduler recv not yet supported when no data is buffered.
-                    // In practice, sockets are used by the fiber that created them.
-                    let _ = shared.scheduler_senders[reply_scheduler].send(
-                        SchedulerMessage::TcpOpResult {
-                            fiber_pid,
-                            result: Ok(make_err("tcp-recv: cross-scheduler recv not yet supported (no data available)")),
-                        }
-                    );
+                    // Park — store waiter info so tcp_handle_data can route the reply
+                    socket_state.waiting_recv = Some(TcpWaiter::Remote {
+                        fiber_pid,
+                        reply_scheduler,
+                        want_bytes,
+                    });
                 }
             } else {
                 // Check if this is actually a listener accept being routed
@@ -3236,7 +3445,7 @@ fn tcp_handle_op(sched: &mut PerScheduler, shared: &SharedState, op: TcpOp) {
                             },
                         );
                     } else {
-                        // Park — same limitation as above for cross-scheduler
+                        // TODO: support cross-scheduler accept parking
                         let _ = shared.scheduler_senders[reply_scheduler].send(
                             SchedulerMessage::TcpOpResult {
                                 fiber_pid,
@@ -3316,16 +3525,34 @@ fn ws_msg_to_value(msg: WsRecvMsg) -> Value {
     }
 }
 
-/// Handle an incoming WebSocket message.
-fn ws_handle_data(sched: &mut PerScheduler, ws_id: u64, msg: WsRecvMsg) {
-    if let Some(ws) = sched.ws_connections.get_mut(&ws_id) {
-        if let Some((wait_pid, wait_cont)) = ws.waiting_recv.take() {
-            let val = ws_msg_to_value(msg);
+/// Wake a WsWaiter with the given value. Handles both local and remote cases.
+fn ws_wake_waiter(sched: &mut PerScheduler, shared: &SharedState, waiter: WsWaiter, value: Value) {
+    match waiter {
+        WsWaiter::Local { pid, continuation } => {
             sched.ready_queue.push_back(Fiber::Suspended {
-                continuation: wait_cont,
-                resume_value: make_some(val),
-                pid: wait_pid,
+                continuation,
+                resume_value: value,
+                pid,
             });
+        }
+        WsWaiter::Remote {
+            fiber_pid,
+            reply_scheduler,
+        } => {
+            let _ = shared.scheduler_senders[reply_scheduler].send(SchedulerMessage::WsOpResult {
+                fiber_pid,
+                result: value,
+            });
+        }
+    }
+}
+
+/// Handle an incoming WebSocket message.
+fn ws_handle_data(sched: &mut PerScheduler, shared: &SharedState, ws_id: u64, msg: WsRecvMsg) {
+    if let Some(ws) = sched.ws_connections.get_mut(&ws_id) {
+        if let Some(waiter) = ws.waiting_recv.take() {
+            let val = ws_msg_to_value(msg);
+            ws_wake_waiter(sched, shared, waiter, make_some(val));
         } else {
             ws.recv_queue.push_back(msg);
         }
@@ -3336,17 +3563,98 @@ fn ws_handle_data(sched: &mut PerScheduler, ws_id: u64, msg: WsRecvMsg) {
 fn ws_handle_closed(sched: &mut PerScheduler, shared: &SharedState, ws_id: u64) {
     if let Some(ws) = sched.ws_connections.get_mut(&ws_id) {
         ws.closed = true;
-        if let Some((wait_pid, wait_cont)) = ws.waiting_recv.take() {
-            sched.ready_queue.push_back(Fiber::Suspended {
-                continuation: wait_cont,
-                resume_value: make_none(),
-                pid: wait_pid,
-            });
+        if let Some(waiter) = ws.waiting_recv.take() {
+            ws_wake_waiter(sched, shared, waiter, make_none());
         }
     }
     {
         let mut owners = shared.ws_owners.lock().unwrap();
         owners.remove(&ws_id);
+    }
+}
+
+/// Handle a cross-scheduler WS operation routed to the owning scheduler.
+fn ws_handle_op(sched: &mut PerScheduler, shared: &SharedState, op: WsOp) {
+    match op {
+        WsOp::Send {
+            ws_id,
+            data,
+            fiber_pid,
+            reply_scheduler,
+        } => {
+            let result = if let Some(ws) = sched.ws_connections.get(&ws_id) {
+                if ws.closed {
+                    make_err("ws-send: connection closed")
+                } else {
+                    match ws.write_tx.send(data) {
+                        Ok(()) => make_ok(Value::nil()),
+                        Err(_) => make_err("ws-send: write channel closed"),
+                    }
+                }
+            } else {
+                make_err("ws-send: unknown connection")
+            };
+            let _ = shared.scheduler_senders[reply_scheduler]
+                .send(SchedulerMessage::WsOpResult { fiber_pid, result });
+        }
+        WsOp::Recv {
+            ws_id,
+            fiber_pid,
+            reply_scheduler,
+        } => {
+            if let Some(ws) = sched.ws_connections.get_mut(&ws_id) {
+                if let Some(msg) = ws.recv_queue.pop_front() {
+                    let val = ws_msg_to_value(msg);
+                    let _ = shared.scheduler_senders[reply_scheduler].send(
+                        SchedulerMessage::WsOpResult {
+                            fiber_pid,
+                            result: make_some(val),
+                        },
+                    );
+                } else if ws.closed {
+                    let _ = shared.scheduler_senders[reply_scheduler].send(
+                        SchedulerMessage::WsOpResult {
+                            fiber_pid,
+                            result: make_none(),
+                        },
+                    );
+                } else {
+                    // Park — store waiter info so ws_handle_data can route the reply
+                    ws.waiting_recv = Some(WsWaiter::Remote {
+                        fiber_pid,
+                        reply_scheduler,
+                    });
+                }
+            } else {
+                let _ =
+                    shared.scheduler_senders[reply_scheduler].send(SchedulerMessage::WsOpResult {
+                        fiber_pid,
+                        result: make_none(),
+                    });
+            }
+        }
+        WsOp::Close {
+            ws_id,
+            fiber_pid,
+            reply_scheduler,
+        } => {
+            if let Some(ws) = sched.ws_connections.get_mut(&ws_id) {
+                if !ws.closed {
+                    ws.closed = true;
+                    let _ = ws
+                        .write_tx
+                        .send(tokio_tungstenite::tungstenite::Message::Close(None));
+                }
+                // Wake any waiting recv with None
+                if let Some(waiter) = ws.waiting_recv.take() {
+                    ws_wake_waiter(sched, shared, waiter, make_none());
+                }
+            }
+            let _ = shared.scheduler_senders[reply_scheduler].send(SchedulerMessage::WsOpResult {
+                fiber_pid,
+                result: Value::nil(),
+            });
+        }
     }
 }
 
@@ -3370,6 +3678,10 @@ fn http_handle_accepted(sched: &mut PerScheduler, server_id: u64, request: Value
 }
 
 fn pick_scheduler(sched: &mut PerScheduler, shared: &SharedState) -> usize {
+    // Don't distribute until workers are running
+    if !shared.workers_ready.load(Ordering::Acquire) {
+        return sched.id;
+    }
     // Local bias: keep fiber local if queue is small
     if sched.ready_queue.len() < 4 {
         return sched.id;
@@ -3475,10 +3787,10 @@ fn process_single_message(
             }
         }
         SchedulerMessage::TcpData { socket_id, data } => {
-            tcp_handle_data(sched, socket_id, data);
+            tcp_handle_data(sched, shared, socket_id, data);
         }
         SchedulerMessage::TcpClosed { socket_id } => {
-            tcp_handle_closed(sched, socket_id);
+            tcp_handle_closed(sched, shared, socket_id);
         }
         SchedulerMessage::TcpAccepted {
             listener_id,
@@ -3544,10 +3856,22 @@ fn process_single_message(
             }
         }
         SchedulerMessage::WsData { ws_id, msg } => {
-            ws_handle_data(sched, ws_id, msg);
+            ws_handle_data(sched, shared, ws_id, msg);
         }
         SchedulerMessage::WsClosed { ws_id } => {
             ws_handle_closed(sched, shared, ws_id);
+        }
+        SchedulerMessage::WsOp(op) => {
+            ws_handle_op(sched, shared, op);
+        }
+        SchedulerMessage::WsOpResult { fiber_pid, result } => {
+            if let Some(cont) = sched.io_parked.remove(&fiber_pid) {
+                sched.ready_queue.push_back(Fiber::Suspended {
+                    continuation: cont,
+                    resume_value: result,
+                    pid: fiber_pid,
+                });
+            }
         }
         SchedulerMessage::Shutdown => {
             return true;
@@ -3584,6 +3908,95 @@ fn try_steal(sched: &mut PerScheduler) -> bool {
         }
     }
     false
+}
+
+// ---------------------------------------------------------------------------
+// Worker thread main loop
+// ---------------------------------------------------------------------------
+
+fn worker_loop(sched: &mut PerScheduler, shared: &SharedState, vm: &mut VM) {
+    loop {
+        drain_inbox(sched, shared, vm);
+
+        while let Some(fiber) = sched.ready_queue.pop_front() {
+            let pid = fiber.pid();
+            sched.current_pid = pid;
+            vm.current_pid = Some(pid);
+
+            let saved_frame_count = vm.frame_count;
+            let saved_stack_top = vm.stack_top;
+
+            install_handler_frame(vm);
+
+            let result = match &fiber {
+                Fiber::New { closure, .. } => call_closure(vm, closure, &[]),
+                Fiber::Suspended {
+                    continuation,
+                    resume_value,
+                    ..
+                } => match continuation.as_object() {
+                    Some(VMObject::Continuation(c)) => {
+                        resume_continuation(vm, c.as_ref(), resume_value.clone())
+                    }
+                    _ => Err(VMSignal::Error(VMError::runtime(
+                        "Invalid continuation in fiber",
+                    ))),
+                },
+            };
+
+            match result {
+                Ok(_) => {
+                    remove_handler_frame(vm);
+                    handle_fiber_exit(sched, shared, vm, pid, ExitReason::Normal);
+                }
+                Err(VMSignal::Effect(signal)) => {
+                    if let Err(e) = handle_effect(sched, shared, vm, signal) {
+                        vm.clear_stack_slots(saved_stack_top);
+                        vm.frame_count = saved_frame_count;
+                        vm.stack_top = saved_stack_top;
+                        if !vm.handler_stack.is_empty() {
+                            remove_handler_frame(vm);
+                        }
+                        handle_fiber_exit(sched, shared, vm, pid, ExitReason::CrashWithTrace(e));
+                    }
+                }
+                Err(VMSignal::Error(e)) => {
+                    vm.clear_stack_slots(saved_stack_top);
+                    vm.frame_count = saved_frame_count;
+                    vm.stack_top = saved_stack_top;
+                    if !vm.handler_stack.is_empty() {
+                        remove_handler_frame(vm);
+                    }
+                    handle_fiber_exit(sched, shared, vm, pid, ExitReason::CrashWithTrace(e));
+                }
+            }
+
+            // Drain inbox between fibers
+            drain_inbox(sched, shared, vm);
+        }
+
+        // Try work stealing
+        if try_steal(sched) {
+            continue;
+        }
+
+        // Check termination
+        if check_termination(shared) {
+            break;
+        }
+
+        // Idle wait
+        match sched
+            .inbox
+            .recv_timeout(std::time::Duration::from_millis(1))
+        {
+            Ok(msg) => {
+                process_single_message(sched, shared, vm, msg);
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3671,9 +4084,7 @@ impl Scheduler {
     /// Create a new always-on scheduler with N threads (one per CPU core).
     /// Scheduler 0 runs on the current thread; workers 1..N-1 are spawned lazily.
     pub fn new(vm: &mut VM) -> Self {
-        let num_threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
+        let num_threads = 1;
 
         // Create per-scheduler channels
         let mut senders = Vec::with_capacity(num_threads);
@@ -3727,6 +4138,7 @@ impl Scheduler {
             http_server_owners: Mutex::new(HashMap::new()),
             http_connections: Arc::new(Mutex::new(HashMap::new())),
             active_http_servers: AtomicUsize::new(0),
+            workers_ready: AtomicBool::new(false),
             ws_owners: Mutex::new(HashMap::new()),
         });
 
@@ -3785,6 +4197,58 @@ impl Scheduler {
         }
     }
 
+    /// Spawn worker threads 1..N-1 (called once, lazily).
+    fn spawn_workers(&mut self, vm: &VM) {
+        if self.workers_spawned || self.num_threads <= 1 {
+            return;
+        }
+        self.workers_spawned = true;
+
+        let receivers = self.worker_receivers.take().unwrap_or_default();
+        let workers = self.worker_deque_workers.take().unwrap_or_default();
+
+        for (i, (rx, worker)) in receivers.into_iter().zip(workers).enumerate() {
+            let sched_id = i + 1; // workers are 1..N-1
+            let shared = Arc::clone(&self.shared);
+            let stealers: Vec<Stealer<Fiber>> = self
+                .all_stealers
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| *idx != sched_id)
+                .map(|(_, s)| s.clone())
+                .collect();
+
+            // Each worker gets its own VM clone (shares the bytecode/constants)
+            let mut worker_vm = vm.clone_for_worker();
+
+            std::thread::Builder::new()
+                .name(format!("sched-{}", sched_id))
+                .spawn(move || {
+                    let mut sched = PerScheduler {
+                        id: sched_id,
+                        ready_queue: VecDeque::new(),
+                        inbox: rx,
+                        parked_fibers: HashMap::new(),
+                        current_pid: 0,
+                        steal_worker: worker,
+                        stealers,
+                        spawn_counter: 0,
+                        io_parked: HashMap::new(),
+                        tcp_sockets: HashMap::new(),
+                        tcp_listeners: HashMap::new(),
+                        http_servers: HashMap::new(),
+                        ws_connections: HashMap::new(),
+                        pending_ws_upgrades: HashMap::new(),
+                    };
+                    worker_loop(&mut sched, &shared, &mut worker_vm);
+                })
+                .expect("failed to spawn worker thread");
+        }
+
+        // Signal that workers are ready — pick_scheduler can now distribute
+        self.shared.workers_ready.store(true, Ordering::Release);
+    }
+
     /// Execute a single top-level closure as a "main fiber" on scheduler 0.
     /// Returns the result value. The main fiber keeps the same PID across all
     /// `execute_main` calls so that actor state (mailbox, links, monitors,
@@ -3834,7 +4298,8 @@ impl Scheduler {
             // Drain inbox
             drain_inbox(&mut self.local, &self.shared, vm);
 
-            // Run all ready fibers
+            // Run all ready fibers, draining inbox between each to pick up
+            // MailboxNotify and IO completion messages promptly.
             while let Some(fiber) = self.local.ready_queue.pop_front() {
                 let pid = fiber.pid();
                 self.local.current_pid = pid;
@@ -3925,6 +4390,11 @@ impl Scheduler {
                 if let Some(result) = main_result {
                     return result;
                 }
+
+                // Drain inbox between fibers to pick up MailboxNotify,
+                // IO completions, etc. Without this, actor message chains
+                // stall until the entire ready queue is exhausted.
+                drain_inbox(&mut self.local, &self.shared, vm);
             }
 
             // If main finished, return
@@ -4037,14 +4507,24 @@ impl Scheduler {
                     );
                 }
             }
+
+            // Drain inbox between fibers
+            drain_inbox(&mut self.local, &self.shared, vm);
         }
 
         vm.current_pid = None;
     }
 
+    /// Notify the scheduler that all modules have been loaded and globals are stable.
+    /// This spawns worker threads so fibers can be distributed across schedulers.
+    pub fn notify_modules_loaded(&mut self, vm: &VM) {
+        self.spawn_workers(vm);
+    }
+
     /// Wait for all background fibers to complete, then shut down workers.
     /// Called after the last top-level expression has been executed.
     pub fn finish(&mut self, vm: &mut VM) {
+        self.spawn_workers(vm);
         // Remove the persistent main PID from alive so check_termination can
         // detect when all background fibers have completed.
         handle_fiber_exit(
@@ -4129,6 +4609,9 @@ impl Scheduler {
                         );
                     }
                 }
+
+                // Drain inbox between fibers
+                drain_inbox(&mut self.local, &self.shared, vm);
             }
 
             // Try work stealing

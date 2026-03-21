@@ -866,6 +866,15 @@ impl<'a> Compiler<'a> {
             .pending_lambda_name
             .take()
             .unwrap_or_else(|| "<lambda>".to_string());
+
+        // Pre-resolve free variables in the lambda body. This forces the
+        // current scope to capture upvalues BEFORE snapshot_scope(), ensuring
+        // deeply nested lambdas (3+ levels) can chain upvalues through
+        // intermediate closures. Without this, variables from grandparent+
+        // scopes are missed and fall through to (broken) global resolution.
+        for body_expr in &elements[2..] {
+            self.pre_resolve_free_vars(body_expr);
+        }
         let parent_scope = self.snapshot_scope();
         let mut fn_compiler = Compiler::new(
             &fn_name,

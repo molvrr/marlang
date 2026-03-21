@@ -7,6 +7,7 @@
 (effect Actor
   (actor-send          (-> Pid a Unit))
   (actor-receive       (-> Unit a))
+  (actor-try-receive   (-> Unit (Option a)))
   (actor-receive-match (-> (-> a Bool) a))
   (actor-monitor       (-> Pid Unit))
   (actor-link          (-> Pid Unit))
@@ -15,6 +16,7 @@
 
 (define send          (lambda (pid msg) (perform actor-send pid msg)))
 (define receive       (lambda () (perform actor-receive)))
+(define try-receive   (lambda () (perform actor-try-receive)))
 (define receive-match (lambda (pred) (perform actor-receive-match pred)))
 (define monitor       (lambda (pid) (perform actor-monitor pid)))
 (define link          (lambda (pid) (perform actor-link pid)))

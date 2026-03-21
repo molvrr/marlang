@@ -22,29 +22,47 @@
 ; md5, sha256, hmac-sha256 are builtins (declared in prelude).
 ; crypto module provides hex encoding.
 
-; --- Minimal buffer cell (avoids depending on std:web) ---
+; --- Buffer cell using channels (avoids actor mailbox interleaving) ---
+; Each buf-cell is a pair of channels: (req-chan, resp-chan).
+; The cell actor reads from req-chan and writes to resp-chan.
+; This keeps buf-cell traffic isolated from the caller's actor mailbox.
 
-(data BufMsg (BufGet Pid) (BufSet Pid))
-
-(define __buf-loop (lambda (value)
-  (let ((msg (actor/receive)))
-    (match msg
-      ((BufGet sender) (begin (actor/send sender value) (__buf-loop value)))
-      ((BufSet sender)
-        (let ((new-val (actor/receive)))
-          (begin (actor/send sender new-val) (__buf-loop new-val))))))))
+(define __buf-loop (lambda (value req resp)
+  (match (conc/chan-recv req)
+    (None nil)
+    ((Some msg)
+      (match msg
+        (None
+          ; Get: send current value
+          (begin (conc/chan-send! resp value) (__buf-loop value req resp)))
+        ((Some new-val)
+          ; Set: update and ack
+          (begin (conc/chan-send! resp new-val) (__buf-loop new-val req resp))))))))
 
 (define buf-new (lambda (initial)
-  (conc/spawn (lambda () (__buf-loop initial)))))
+  (let ((req (conc/chan-new 1))
+        (resp (conc/chan-new 1)))
+    (begin
+      (conc/spawn (lambda () (__buf-loop initial req resp)))
+      (MkPair req resp)))))
 
 (define buf-get (lambda (buf)
-  (actor/send buf (BufGet (conc/self)))
-  (actor/receive)))
+  (match buf
+    ((MkPair req resp)
+      (begin
+        (conc/chan-send! req None)
+        (match (conc/chan-recv resp)
+          ((Some v) v)
+          (None (raise "buf-get: channel closed"))))))))
 
 (define buf-set (lambda (buf val)
-  (actor/send buf (BufSet (conc/self)))
-  (actor/send buf val)
-  (actor/receive)))
+  (match buf
+    ((MkPair req resp)
+      (begin
+        (conc/chan-send! req (Some val))
+        (match (conc/chan-recv resp)
+          ((Some v) v)
+          (None (raise "buf-set: channel closed"))))))))
 
 ; =========================================================================
 ; Byte buffer helpers — big-endian encoding for the Postgres wire protocol
@@ -882,7 +900,6 @@
 (data ListenerMsg
   (ListenerSubscribe String Pid)    ; channel, callback-pid
   (ListenerUnsubscribe String Pid)  ; channel, callback-pid
-  (ListenerNotification String String)  ; channel, payload (from reader fiber)
   (ListenerStop))
 
 ; Internal: find subscribers for a channel in an assoc list.
@@ -910,55 +927,76 @@
         (actor/send pid (MkPair channel payload))
         (__notify-subs rest channel payload))))))
 
-; Listener actor loop — manages subscriptions and dispatches notifications.
-(define __listener-loop (lambda (pg-conn subs)
-  (let ((msg (actor/receive)))
-    (match msg
-      ((ListenerSubscribe channel callback-pid)
-        (let ((current (__find-subs channel subs)))
-          (let ((new-subs (__set-subs channel (Cons callback-pid current) subs)))
-            ; If this is the first subscriber for this channel, LISTEN
-            (begin
-              (if (nil? current)
-                (let ((_ (listen pg-conn channel))) nil)
-                nil)
-              (__listener-loop pg-conn new-subs)))))
-      ((ListenerUnsubscribe channel callback-pid)
-        (let ((current (__find-subs channel subs)))
-          (let ((filtered (__remove-pid callback-pid current)))
-            (let ((new-subs (__set-subs channel filtered subs)))
-              (begin
-                ; If no more subscribers, UNLISTEN
-                (if (nil? filtered)
-                  (let ((_ (unlisten pg-conn channel))) nil)
-                  nil)
-                (__listener-loop pg-conn new-subs))))))
-      ((ListenerNotification channel payload)
-        (let ((pids (__find-subs channel subs)))
+; Internal: process a single mailbox message.
+; Returns the new subscriber list.
+(define __listener-process-msg (lambda (pg-conn subs msg)
+  (match msg
+    ((ListenerSubscribe channel callback-pid)
+      (let ((current (__find-subs channel subs)))
+        (let ((new-subs (__set-subs channel (Cons callback-pid current) subs)))
           (begin
-            (__notify-subs pids channel payload)
-            (__listener-loop pg-conn subs))))
-      ((ListenerStop)
-        (close pg-conn))))))
+            (if (nil? current)
+              (let ((_ (listen pg-conn channel))) nil)
+              nil)
+            new-subs))))
+    ((ListenerUnsubscribe channel callback-pid)
+      (let ((current (__find-subs channel subs)))
+        (let ((filtered (__remove-pid callback-pid current)))
+          (let ((new-subs (__set-subs channel filtered subs)))
+            (begin
+              (if (nil? filtered)
+                (let ((_ (unlisten pg-conn channel))) nil)
+                nil)
+              new-subs)))))
+    ((ListenerStop) subs)
+    (_ subs))))
 
-; Internal: reader fiber that forwards notifications to the listener actor.
-(define __listener-reader (lambda (pg-conn listener-pid)
+; Internal: drain all pending mailbox messages (non-blocking).
+; Returns the updated subscriber list.
+(define __listener-drain-mailbox (lambda (pg-conn subs)
+  (match (actor/try-receive)
+    (None subs)
+    ((Some msg)
+      (__listener-drain-mailbox pg-conn (__listener-process-msg pg-conn subs msg))))))
+
+; Single-fiber listener loop: handles subscribes AND reads notifications.
+;
+; Phase 1 (setup): block on actor/receive to get at least one subscribe.
+; Phase 2 (running): read notifications from TCP, dispatch to subscribers,
+;   and drain any pending subscribe/unsubscribe messages between reads.
+;
+; This avoids the race condition of two fibers sharing one TCP connection.
+(define __listener-read-loop (lambda (pg-conn subs)
+  ; Read one notification (blocks on TCP recv)
   (let ((notification (wait-notification pg-conn)))
     (match notification
       ((MkPair channel payload)
-        (begin
-          (actor/send listener-pid (ListenerNotification channel payload))
-          (__listener-reader pg-conn listener-pid)))))))
+        (let ((pids (__find-subs channel subs)))
+          (begin
+            (__notify-subs pids channel payload)
+            ; Drain any pending subscribe/unsubscribe messages
+            (let ((new-subs (__listener-drain-mailbox pg-conn subs)))
+              (__listener-read-loop pg-conn new-subs)))))))))
+
+(define __listener-setup (lambda (pg-conn subs)
+  ; Block until at least one subscribe arrives
+  (let ((msg (actor/receive)))
+    (match msg
+      ((ListenerStop) (close pg-conn))
+      (_
+        (let ((new-subs (__listener-process-msg pg-conn subs msg)))
+          ; Drain any additional pending messages
+          (let ((final-subs (__listener-drain-mailbox pg-conn new-subs)))
+            ; Transition to notification reading loop
+            (__listener-read-loop pg-conn final-subs))))))))
 
 ; listener-new : create a new notification listener.
 ; Opens a dedicated connection for LISTEN/NOTIFY.
 ; Returns the listener actor Pid.
+; Uses a single fiber for all TCP I/O to avoid race conditions.
 (define listener-new (lambda (host port database user password)
   (let ((conn (connect! host port database user password)))
-    (let ((listener-pid (conc/spawn (lambda () (__listener-loop conn (list))))))
-      (begin
-        (conc/spawn (lambda () (__listener-reader conn listener-pid)))
-        listener-pid)))))
+    (conc/spawn (lambda () (__listener-setup conn (list)))))))
 
 ; listener-subscribe : subscribe to notifications on a channel.
 ; callback-pid will receive (Pair channel payload) messages.
