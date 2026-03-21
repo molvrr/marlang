@@ -2,7 +2,7 @@
 ;
 ; Provides: HTML DSL, routing, request context effect, Response ADT,
 ; state cells (actor-backed observable values), static file serving,
-; and a server runner.
+; DB-backed live deps (via LISTEN/NOTIFY), and a server runner.
 ;
 ; Usage:
 ;   (import "std:web" as w)
@@ -920,23 +920,23 @@
 ;   ; In HTML: (w/live-el "div" users (list))
 ;   ; Whenever: NOTIFY users_changed  =>  query re-runs, clients get updated HTML.
 ; Internal: loop that waits for notifications and re-queries.
-(define __db-live-loop (lambda (query-fn handle)
+(define __db-live-loop (lambda (query-fn lh)
   ; Wait for any message (notification from the listener)
   (let ((_ (actor/receive)))
     (begin
       ; Re-run the query and update the live source
       (handle
         (let ((new-data (query-fn)))
-          (live-set handle new-data))
+          (live-set lh new-data))
         ((throw msg k) -> nil))  ; Silently ignore query errors
-      (__db-live-loop query-fn handle)))))
+      (__db-live-loop query-fn lh)))))
 
 (define db-live (lambda (subscribe-fn query-fn render-fn)
   (let ((initial-data (query-fn)))
-    (let ((handle (live initial-data render-fn)))
+    (let ((lh (live initial-data render-fn)))
       (begin
         (conc/spawn (lambda ()
           (begin
             (subscribe-fn (conc/self))
-            (__db-live-loop query-fn handle))))
-        handle)))))
+            (__db-live-loop query-fn lh))))
+        lh)))))

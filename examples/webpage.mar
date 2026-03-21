@@ -1,52 +1,102 @@
 ; =========================================================================
-; Live Dashboard — web framework with WebSocket + morphdom
+; Live Dashboard — PostgreSQL-backed with real-time LISTEN/NOTIFY
 ;
-; A shared counter + message board. State lives in live sources that
-; auto-push HTML fragments to all connected clients via WebSocket.
-; The client uses morphdom for efficient DOM patching.
+; Same counter + message board as before, but now backed by PostgreSQL.
+; State persists across server restarts. LISTEN/NOTIFY drives live
+; updates — when the DB changes, all connected clients see it instantly.
 ;
-; Run with:
-;   cargo run -p marlang-cli -- run examples/web-mvp.mar
+; Setup:
+;   createdb dashboard
+;   psql dashboard -c "
+;     CREATE TABLE IF NOT EXISTS counter (id INT PRIMARY KEY DEFAULT 1, value INT NOT NULL DEFAULT 0);
+;     INSERT INTO counter (id, value) VALUES (1, 0) ON CONFLICT DO NOTHING;
+;     CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY KEY, author TEXT NOT NULL, body TEXT NOT NULL, created_at TIMESTAMP DEFAULT now());
+;
+;     CREATE OR REPLACE FUNCTION notify_counter() RETURNS TRIGGER AS \$\$
+;     BEGIN PERFORM pg_notify('counter_changed', ''); RETURN NEW; END;
+;     \$\$ LANGUAGE plpgsql;
+;     DROP TRIGGER IF EXISTS counter_notify ON counter;
+;     CREATE TRIGGER counter_notify AFTER UPDATE ON counter FOR EACH ROW EXECUTE FUNCTION notify_counter();
+;
+;     CREATE OR REPLACE FUNCTION notify_messages() RETURNS TRIGGER AS \$\$
+;     BEGIN PERFORM pg_notify('messages_changed', ''); RETURN NEW; END;
+;     \$\$ LANGUAGE plpgsql;
+;     DROP TRIGGER IF EXISTS messages_notify ON messages;
+;     CREATE TRIGGER messages_notify AFTER INSERT ON messages FOR EACH ROW EXECUTE FUNCTION notify_messages();
+;   "
+;
+; Run:
+;   cargo run -p marlang-cli --release -- run examples/webpage.mar
 ;
 ; Then open http://127.0.0.1:3000 in two browser tabs.
 ; =========================================================================
 
 (import "std:web" as w)
 (import "std:io" as io)
+(import "std:pg" as pg)
 
 ; =========================================================================
-; Render helpers (must be defined before live sources that reference them)
+; Database connection
 ; =========================================================================
 
-(define map-msg (lambda (msgs)
-  (match msgs
-    (Nil (list))
-    ((Cons (MkPair author msg-text) rest)
-      (Cons
-        (w/div (list (MkPair "class" "msg"))
-          (string-append
-            (w/span (list (MkPair "class" "msg-author")) (w/text author))
-            " "
-            (w/span (list) (w/text msg-text))))
-        (map-msg rest))))))
+(define db-host "127.0.0.1")
+(define db-port 5432)
+(define db-name "dashboard")
+(define db-user "mateus")
+(define db-pass "")
 
-(define render-messages (lambda (msgs)
-  (if (nil? msgs)
+; Connection pool — up to 5 connections for queries
+(define pool (pg/pool-new db-host db-port db-name db-user db-pass 5))
+
+; LISTEN/NOTIFY listener — dedicated connection for async notifications
+(define listener (pg/listener-new db-host db-port db-name db-user db-pass))
+
+; =========================================================================
+; Render helpers
+; =========================================================================
+
+(define render-counter (lambda (n) (show n)))
+
+(define render-doubled (lambda (n) (show (* n 2))))
+
+(define __col-or (lambda (row col-name fallback)
+  (match (pg/col row col-name)
+    ((Some v) v)
+    (None fallback))))
+
+(define render-messages (lambda (rows)
+  (if (nil? rows)
     (w/p (list (MkPair "class" "empty")) "No messages yet.")
-    (w/join (map-msg msgs)))))
+    (w/join (pg/map-rows rows (lambda (row)
+      (w/div (list (MkPair "class" "msg"))
+        (string-append
+          (w/span (list (MkPair "class" "msg-author")) (w/text (__col-or row "author" "?")))
+          " "
+          (w/span (list) (w/text (__col-or row "body" "")))))))))))
 
 ; =========================================================================
-; Live sources — auto-push to all WebSocket clients on change
+; DB-backed live sources — auto-refresh on LISTEN/NOTIFY
 ; =========================================================================
 
-(define counter (w/live 0
-  (lambda (n) (show n))))
+; Counter: re-queries on 'counter_changed' notifications
+(define counter (w/db-live
+  (lambda (pid) (pg/listener-subscribe listener "counter_changed" pid))
+  (lambda ()
+    (let ((rows (pg/pool-query pool "SELECT value FROM counter WHERE id = 1" (list))))
+      (match rows
+        ((Cons row _) (pg/as-int row "value"))
+        (Nil 0))))
+  render-counter))
 
+; Counter doubled: derived from counter
 (define doubled (w/live-map counter
   (lambda (n) (* n 2))
-  (lambda (n) (show n))))
+  render-doubled))
 
-(define messages (w/live (list)
+; Messages: re-queries on 'messages_changed' notifications
+(define messages (w/db-live
+  (lambda (pid) (pg/listener-subscribe listener "messages_changed" pid))
+  (lambda () (pg/pool-query pool "SELECT author, body FROM messages ORDER BY created_at DESC LIMIT 50" (list)))
   render-messages))
 
 ; =========================================================================
@@ -71,6 +121,7 @@
   .msg:last-child { border-bottom: none; }
   .msg-author { font-weight: 600; }
   .empty { color: #999; font-style: italic; }
+  .db-badge { display: inline-block; background: #e8f5e9; color: #2e7d32; font-size: 0.7rem; padding: 0.15rem 0.4rem; border-radius: 3px; margin-left: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em; }
   .status { font-size: 0.75rem; text-align: right; margin-top: 2rem; }
   .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; background: #ccc; }
   .status .dot.live { background: #4a4; }
@@ -101,7 +152,9 @@
   (w/ok
     (layout "Live Dashboard"
       (string-append
-        (w/h1 (list) "Live Dashboard")
+        (w/h1 (list)
+          (string-append "Live Dashboard"
+            (w/span (list (MkPair "class" "db-badge")) "PostgreSQL")))
 
         ; --- Counter section ---
         (w/div (list (MkPair "class" "card"))
@@ -139,7 +192,7 @@
         (w/p (list (MkPair "class" "status"))
           (string-append
             (w/span (list (MkPair "class" "dot ws-dot")) "")
-            " Live via WebSocket")))))))
+            " Live via WebSocket + LISTEN/NOTIFY")))))))
 
 (define handle-about (lambda ()
   (w/ok
@@ -147,29 +200,31 @@
       (w/div (list (MkPair "class" "card"))
         (string-append
           (w/h1 (list) "About")
-          (w/p (list) "Live Dashboard &mdash; a real-time collaborative app powered by Marlang.")
+          (w/p (list) "Live Dashboard &mdash; a real-time collaborative app powered by Marlang + PostgreSQL.")
           (w/p (list (MkPair "style" "margin-top:0.75rem;color:#666"))
-            "State is shared across all connected clients via WebSocket. Navigation happens over WebSocket too &mdash; no full page reloads.")))))))
+            "State is persisted in PostgreSQL. LISTEN/NOTIFY triggers push live updates to all connected clients via WebSocket. Navigation happens over WebSocket &mdash; no full page reloads.")))))))
 
-; --- API endpoints ---
+; --- API endpoints — write to DB, NOTIFY triggers live refresh ---
 
 (define handle-increment (lambda ()
-  (w/live-update counter (lambda (n) (+ n 1)))
-  (w/ok "")))
+  (let ((_ (pg/pool-execute pool "UPDATE counter SET value = value + 1 WHERE id = 1" (list))))
+    (w/ok ""))))
 
 (define handle-decrement (lambda ()
-  (w/live-update counter (lambda (n) (- n 1)))
-  (w/ok "")))
+  (let ((_ (pg/pool-execute pool "UPDATE counter SET value = value - 1 WHERE id = 1" (list))))
+    (w/ok ""))))
 
 (define handle-reset (lambda ()
-  (w/live-set counter 0)
-  (w/ok "")))
+  (let ((_ (pg/pool-execute pool "UPDATE counter SET value = 0 WHERE id = 1" (list))))
+    (w/ok ""))))
 
 (define handle-post-message (lambda ()
   (let ((author (match (w/form-val "author") ((Some a) a) (None "Anon")))
         (msg-text (match (w/form-val "text") ((Some t) t) (None ""))))
-    (w/live-update messages (lambda (msgs) (Cons (MkPair author msg-text) msgs)))
-    (w/ok ""))))
+    (let ((_ (pg/pool-execute pool
+              "INSERT INTO messages (author, body) VALUES ($1, $2)"
+              (list author msg-text))))
+      (w/ok "")))))
 
 ; =========================================================================
 ; Routes & Start
@@ -183,4 +238,5 @@
   (w/POST "/api/reset"     handle-reset)
   (w/POST "/api/message"   handle-post-message)))
 
+(io/println "Connecting to PostgreSQL...")
 (w/run-live! 3000 routes)
