@@ -920,15 +920,19 @@
 ;   ; In HTML: (w/live-el "div" users (list))
 ;   ; Whenever: NOTIFY users_changed  =>  query re-runs, clients get updated HTML.
 ; Internal: loop that waits for notifications and re-queries.
+; Each re-query runs in a fresh child fiber to avoid mailbox interference —
+; the watcher's mailbox receives notifications from the listener, so
+; pool-checkout's actor/receive would pick up a notification instead of
+; the connection if we queried directly.
 (define __db-live-loop (lambda (query-fn lh)
   ; Wait for any message (notification from the listener)
   (let ((_ (actor/receive)))
     (begin
-      ; Re-run the query and update the live source
-      (handle
-        (let ((new-data (query-fn)))
-          (live-set lh new-data))
-        ((throw msg k) -> nil))  ; Silently ignore query errors
+      ; Spawn a child fiber for the re-query — isolates pool mailbox traffic
+      (conc/spawn (lambda ()
+        (handle
+          (live-set lh (query-fn))
+          ((throw msg k) -> nil))))  ; Silently ignore query errors
       (__db-live-loop query-fn lh)))))
 
 (define db-live (lambda (subscribe-fn query-fn render-fn)

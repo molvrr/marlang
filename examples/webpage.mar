@@ -42,8 +42,8 @@
 (define db-host "127.0.0.1")
 (define db-port 5432)
 (define db-name "dashboard")
-(define db-user "mateus")
-(define db-pass "")
+(define db-user "postgres")
+(define db-pass "postgres")
 
 ; Connection pool — up to 5 connections for queries
 (define pool (pg/pool-new db-host db-port db-name db-user db-pass 5))
