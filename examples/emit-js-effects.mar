@@ -1,0 +1,146 @@
+; Test the enhanced emit-js macro with effects, generators, and ADTs
+
+(import "std:io" as io)
+(import "std:js" as js)
+
+; === Basic tests (regression) ===
+
+(io/println "=== Literals ===")
+(io/println (js/emit-js 42))
+(io/println (js/emit-js "hello"))
+(io/println (js/emit-js #t))
+(io/println (js/emit-js #f))
+
+(io/println "\n=== Arithmetic ===")
+(io/println (js/emit-js (+ 1 2)))
+(io/println (js/emit-js (* (+ a 1) (- b 2))))
+
+(io/println "\n=== Lambda ===")
+(io/println (js/emit-js (lambda (x) (+ x 1))))
+(io/println (js/emit-js (lambda () 42)))
+
+(io/println "\n=== Let ===")
+(io/println (js/emit-js (let ((x 10) (y 20)) (+ x y))))
+
+(io/println "\n=== If ===")
+(io/println (js/emit-js (if (> x 0) "pos" "neg")))
+
+(io/println "\n=== Define ===")
+(io/println (js/emit-js (define double (lambda (x) (* x 2)))))
+
+(io/println "\n=== List / Pair ===")
+(io/println (js/emit-js (list 1 2 3)))
+(io/println (js/emit-js (MkPair "key" "val")))
+
+(io/println "\n=== Match ===")
+(io/println (js/emit-js (match x ((Some v) (show v)) (None "nothing"))))
+
+; === New: ADT constructors ===
+
+(io/println "\n=== ADT Constructors ===")
+(io/println (js/emit-js (Foo 1 2 3)))
+(io/println (js/emit-js (Ok "hello")))
+(io/println (js/emit-js (Err "bad")))
+(io/println (js/emit-js Loading))
+(io/println (js/emit-js (HttpRequest "GET" "/api" (list) (list))))
+
+; === New: perform (effect → yield) ===
+
+(io/println "\n=== Perform ===")
+(io/println (js/emit-js (perform print "hello")))
+(io/println (js/emit-js (perform atom-new 0)))
+(io/println (js/emit-js (perform atom-read count)))
+(io/println (js/emit-js (perform atom-swap count (lambda (n) (+ n 1)))))
+(io/println (js/emit-js (perform db-query "SELECT * FROM users" (list "42"))))
+
+; === New: lambda* (generator function) ===
+
+(io/println "\n=== Generator Lambda ===")
+(io/println (js/emit-js (lambda* (x) (perform atom-new x))))
+(io/println (js/emit-js (lambda* () (perform print "hello"))))
+(io/println (js/emit-js (lambda* (a b)
+  (let ((x (perform atom-new a))
+        (y (perform atom-new b)))
+    (+ (perform atom-read x) (perform atom-read y))))))
+
+; === New: call* (yield* delegation) ===
+
+(io/println "\n=== Call* (generator delegation) ===")
+(io/println (js/emit-js (call* (my-component 42))))
+(io/println (js/emit-js (call* (render-widget state props))))
+
+; === New: handle* (local effect handling) ===
+
+(io/println "\n=== Handle* ===")
+; Handler body evaluates to the resume value — no continuation variable
+(io/println (js/emit-js (handle* (my-gen 42)
+  ((atom-new val) -> (create-atom val)))))
+
+; Multiple handlers
+(io/println (js/emit-js (handle* (my-gen 42)
+  ((atom-new val) -> (create-atom val))
+  ((atom-read ref) -> (deref ref)))))
+
+; === Combined: realistic component ===
+
+(io/println "\n=== Realistic Component ===")
+(io/println (js/emit-js
+  (define counter-widget (lambda* (initial)
+    (let ((count (perform atom-new initial)))
+      (string-append
+        (show (perform atom-read count))
+        " clicks"))))))
+
+; === Match with ADT patterns ===
+
+(io/println "\n=== Match with general ADTs ===")
+(io/println (js/emit-js (match result
+  ((Ok val) (show val))
+  ((Err msg) (string-append "Error: " msg)))))
+
+(io/println "\n=== Match with variable binding ===")
+(io/println (js/emit-js (match x
+  ((Cons head tail) head)
+  (other (show other)))))
+
+; === Float operators ===
+
+(io/println "\n=== Float Operators ===")
+(io/println (js/emit-js (+. 1.5 2.5)))
+(io/println (js/emit-js (*. x y)))
+
+; === Generator body flattening ===
+
+(io/println "\n=== Generator body: nested let ===")
+(io/println (js/emit-js (lambda* (x)
+  (let ((a (perform atom-new x)))
+    (let ((b (perform atom-read a)))
+      (+ b 1))))))
+
+(io/println "\n=== Generator body: begin ===")
+(io/println (js/emit-js (lambda* ()
+  (begin
+    (perform print "hello")
+    (perform print "world")
+    42))))
+
+(io/println "\n=== Generator body: if with let ===")
+(io/println (js/emit-js (lambda* (x)
+  (if (> x 0)
+    (let ((a (perform atom-new x)))
+      (perform atom-read a))
+    0))))
+
+(io/println "\n=== Generator body: match ===")
+(io/println (js/emit-js (lambda* (opt)
+  (match opt
+    ((Some v) (perform print (show v)))
+    (None (perform print "nothing"))))))
+
+(io/println "\n=== Generator body: complex ===")
+(io/println (js/emit-js (lambda* (mode initial)
+  (let ((ref (perform atom-new initial))
+        (label (if (= mode 1) "counter" "gauge")))
+    (begin
+      (perform print label)
+      (string-append label (string-append ": " (show (perform atom-read ref)))))))))

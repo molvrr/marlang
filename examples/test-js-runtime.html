@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Marlang JS Runtime Test</title>
+  <style>
+    body { font-family: monospace; padding: 2rem; background: #1a1a2e; color: #e0e0e0; }
+    .pass { color: #4caf50; }
+    .fail { color: #f44336; }
+    h1 { color: #7b68ee; }
+    pre { background: #16213e; padding: 1rem; border-radius: 4px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>Marlang JS Runtime Tests</h1>
+  <div id="results"></div>
+  <script>
+    // === Marlang Client Runtime (inline for testing) ===
+    const marlang = (() => {
+      let _nextId = 1;
+      const _pending = new Map();
+      let _ws = null;
+
+      function run(gen, handlers) {
+        return new Promise((resolve, reject) => {
+          function step(value) {
+            try {
+              const result = gen.next(value);
+              if (result.done) { resolve(result.value); return; }
+              const eff = result.value;
+              if (!eff || !eff.effect) {
+                reject(new Error('Non-effect yield: ' + JSON.stringify(eff)));
+                return;
+              }
+              if (handlers && handlers[eff.effect]) {
+                handlers[eff.effect](eff.args, step);
+              } else {
+                reject(new Error('Unhandled effect: ' + eff.effect));
+              }
+            } catch (e) { reject(e); }
+          }
+          step(undefined);
+        });
+      }
+
+      const atoms = new Map();
+      let atomId = 0;
+      const atomHandlers = {
+        atom_new(args, resume) { const id = ++atomId; atoms.set(id, args[0]); resume(id); },
+        atom_read(args, resume) { resume(atoms.get(args[0])); },
+        atom_swap(args, resume) {
+          const ref = args[0], fn = args[1];
+          const nv = fn(atoms.get(ref));
+          atoms.set(ref, nv);
+          resume(nv);
+        },
+        atom_set(args, resume) { atoms.set(args[0], args[1]); resume(args[1]); }
+      };
+
+      function withAtoms(h) { return Object.assign({}, atomHandlers, h || {}); }
+      return { run, withAtoms, atomHandlers };
+    })();
+
+    // === Test Harness ===
+    const results = document.getElementById('results');
+    let passed = 0, failed = 0;
+
+    function log(msg, ok) {
+      const div = document.createElement('div');
+      div.className = ok ? 'pass' : 'fail';
+      div.textContent = (ok ? '✓ ' : '✗ ') + msg;
+      results.appendChild(div);
+      if (ok) passed++; else failed++;
+    }
+
+    function assert(name, actual, expected) {
+      if (actual === expected) {
+        log(`${name}: ${JSON.stringify(actual)}`, true);
+      } else {
+        log(`${name}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`, false);
+      }
+    }
+
+    async function runTests() {
+      // Test 1: Basic perform + atom
+      // Generated from: (lambda* (initial) (let ((count (perform atom-new initial))) (perform atom-read count)))
+      const test1 = (function*(initial) {
+        return (() => {
+          const count = (yield {effect:"atom_new",args:[initial]});
+          return (yield {effect:"atom_read",args:[count]});
+        })();
+      });
+      // Wait, this won't work because the inner IIFE returns a generator...
+      // Actually no, the inner (() => { ... })() is just scoping, the yields propagate
+      // because the outer function* is the generator. yield inside an IIFE doesn't work!
+
+      // Let me test the simpler case first:
+      const simpleAtom = (function*(initial) {
+        const count = (yield {effect:"atom_new",args:[initial]});
+        return (yield {effect:"atom_read",args:[count]});
+      });
+
+      const r1 = await marlang.run(simpleAtom(42), marlang.atomHandlers);
+      assert('atom new + read', r1, 42);
+
+      // Test 2: atom swap
+      const swapTest = (function*(initial) {
+        const ref = (yield {effect:"atom_new",args:[initial]});
+        (yield {effect:"atom_swap",args:[ref, ((n) => (n + 1))]});
+        (yield {effect:"atom_swap",args:[ref, ((n) => (n * 3))]});
+        return (yield {effect:"atom_read",args:[ref]});
+      });
+
+      const r2 = await marlang.run(swapTest(10), marlang.atomHandlers);
+      assert('atom swap', r2, 33);
+
+      // Test 3: ADT constructors
+      const ok = {tag:"Ok",fields:["hello"]};
+      assert('ADT Ok tag', ok.tag, "Ok");
+      assert('ADT Ok field', ok.fields[0], "hello");
+
+      const loading = {tag:"Loading",fields:[]};
+      assert('ADT nullary', loading.tag, "Loading");
+      assert('ADT nullary fields', loading.fields.length, 0);
+
+      // Test 4: Match compilation
+      const matchTest = (val) => {
+        return (() => {
+          const __m = val;
+          if (__m && __m.tag === "Ok") { const v = __m.fields[0]; return "ok:" + v; }
+          if (__m && __m.tag === "Err") { const msg = __m.fields[0]; return "err:" + msg; }
+          throw new Error('no match');
+        })();
+      };
+      assert('match Ok', matchTest({tag:"Ok",fields:["yes"]}), "ok:yes");
+      assert('match Err', matchTest({tag:"Err",fields:["no"]}), "err:no");
+
+      // Test 5: handle* (local effect handling)
+      // Generated from: (handle* (gen) ((print msg) -> nil))
+      const printLog = [];
+      const genWithPrint = (function*(msg) {
+        (yield {effect:"print",args:[msg]});
+        return "done";
+      });
+
+      // Use handle* pattern: drive generator, handle print locally, re-yield others
+      const r5 = await marlang.run(
+        genWithPrint("hello"),
+        { print(args, resume) { printLog.push(args[0]); resume(null); } }
+      );
+      assert('handle print effect', r5, "done");
+      assert('print side effect', printLog[0], "hello");
+
+      // Test 6: generator delegation (yield*)
+      const inner = (function*(x) {
+        const ref = (yield {effect:"atom_new",args:[x]});
+        return (yield {effect:"atom_read",args:[ref]});
+      });
+      const outer = (function*(a, b) {
+        const x = (yield* inner(a));
+        const y = (yield* inner(b));
+        return (x + y);
+      });
+      const r6 = await marlang.run(outer(10, 20), marlang.atomHandlers);
+      assert('yield* delegation', r6, 30);
+
+      // Test 7: handle* as generator (with yield* and pass-through)
+      const innerGen = (function*(x) {
+        (yield {effect:"log",args:["before"]});
+        const ref = (yield {effect:"atom_new",args:[x]});
+        (yield {effect:"log",args:["after"]});
+        return (yield {effect:"atom_read",args:[ref]});
+      });
+
+      // handle* wraps innerGen, handles log locally, passes atom effects through
+      const handleGen = (function*() {
+        const logs = [];
+        const result = (yield* (function*() {
+          const __gen = innerGen(99);
+          let __r = __gen.next();
+          while (!__r.done) {
+            const __e = __r.value;
+            let __v;
+            if (__e.effect === "log") {
+              const msg = __e.args[0];
+              __v = logs.push(msg);
+            } else {
+              __v = yield __e;
+            }
+            __r = __gen.next(__v);
+          }
+          return __r.value;
+        })());
+        return [result, logs];
+      });
+
+      const r7 = await marlang.run(handleGen(), marlang.atomHandlers);
+      assert('handle* with pass-through: value', r7[0], 99);
+      assert('handle* with pass-through: logs', r7[1].join(','), 'before,after');
+
+      // Summary
+      const summary = document.createElement('h2');
+      summary.textContent = `Results: ${passed} passed, ${failed} failed`;
+      summary.className = failed === 0 ? 'pass' : 'fail';
+      results.appendChild(summary);
+    }
+
+    runTests().catch(e => {
+      log('FATAL: ' + e.message + '\n' + e.stack, false);
+    });
+  </script>
+</body>
+</html>

@@ -1,4 +1,5 @@
-- [ ] cross platform effects: if some effect is unhandled in client-side, it sends the effect to the server
+- [ ] stdlib: expose parser and typechecker
+- [ ] cross platform effects: if some effect is unhandled in client-side, it sends the effect to the server : we should have a way of sandboxing these
 - [ ] stdlib: random
 - [ ] add cli subcommand `profile`: Shows time spent on macro expansion, typechecking, function calls
 - [ ] parse error filename, line number and column

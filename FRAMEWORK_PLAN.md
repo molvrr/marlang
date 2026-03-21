@@ -19,7 +19,7 @@ These are runtime capabilities the framework needs that must be built first:
 | Gap | Needed for | Difficulty |
 |-----|-----------|------------|
 | **File watching** | Live reload | Medium — FFI to notify/kqueue |
-| **JavaScript target** | Client-side components | Medium — `emit-js` macro compiles Marlang S-expressions to JS strings at expansion time (no Rust backend needed, proven working) |
+| **JavaScript target** | Client-side components with effect proxying | Medium — `emit-js` macro compiles Marlang S-expressions to JS strings at expansion time (no Rust backend needed, proven working). `perform` compiles to generator yields; unhandled effects proxy to server over WebSocket. |
 
 **Resolved:**
 - ~~Database driver~~ — `stdlib/pg.mar`, pure Marlang PostgreSQL wire protocol over TCP
@@ -42,7 +42,7 @@ Marlang's macro system applies hygiene marks to symbols introduced by macros. Ty
 - The server renders HTML and sends it to the client
 - For interactivity, the framework uses **WebSocket + morphdom** — the server pushes HTML fragments over WebSocket, and the client uses morphdom to efficiently patch the DOM
 - When a dependency changes, the server re-renders the affected fragment and pushes it
-- Later phases add a JS compilation target for rich client components
+- Later phases add a JS compilation target where **unhandled effects on the client automatically proxy to the server** — the effect system is the client/server boundary
 
 ---
 
@@ -271,15 +271,87 @@ Route handlers that perform `DB` effects are distinguishable from pure handlers 
 
 ---
 
-## Phase 4: Client Components (future)
+## Phase 4: Client Components — Cross-Platform Effects
 
 **Requires: expanding the `emit-js` macro coverage**
 
 JavaScript compilation is achieved via a macro (`emit-js`) that walks Marlang S-expressions at expansion time and produces JS strings — no Rust compiler backend needed. This has been prototyped and proven to work for: literals, lambda, let, if, begin, define, function calls, list/pair constructors, match/ADT destructuring, binary operators, and nested expressions.
 
-Remaining JS coverage needed: `perform`/effects (compile to generator yields), tail-call trampolining, multi-statement bodies, and the client-side runtime (atom, event delegation, morphdom glue).
+### Core idea: effects as the client/server boundary
+
+Instead of requiring explicit RPC stubs (`server-fn`) or closed effect rows, the framework uses **effects themselves** as the natural client/server boundary. The rule is simple:
+
+> If a `perform` has a local (client-side) handler, it runs locally. If it doesn't, the runtime serializes the effect and sends it to the server over WebSocket, suspends, and resumes when the server responds.
+
+This means the same Marlang code can run on either side. Effects are already "I need something from my environment" — on the client, the environment for `DB`, `IO`, etc. is the server.
+
+### How it works
+
+**Client (JS):** `emit-js` compiles `perform` to generator `yield` points. The client runtime wraps each component in a driver that steps the generator. When a `yield` produces an effect the client can't handle, the runtime sends it over WebSocket and parks the generator until the response arrives.
+
+```javascript
+// Generated JS (conceptual)
+function* counterWidget(userId) {
+  // Local effect — handled by client runtime
+  const count = yield { effect: "atom", args: [0] };
+
+  // Remote effect — no local handler, auto-proxied to server
+  const user = yield { effect: "db-query",
+    args: ["SELECT name FROM users WHERE id = $1", [userId]] };
+
+  return div({},
+    span({}, user[0]),
+    button({ onclick: () => runtime.perform("atom-swap", count, n => n + 1) }, "+1"));
+}
+```
+
+**Server:** Receives effect requests over the existing WebSocket connection, runs them in a real handler (with the connection's security context), serializes the result, sends it back.
+
+```scheme
+; Server-side effect proxy handler (inside ConnectionActor)
+; Receives: { "effect": "db-query", "args": [...], "id": 42 }
+; Runs the effect in the server's handler stack
+; Responds: { "id": 42, "result": [...] }
+```
+
+**Client-handled effects** run entirely in the browser with no round-trip:
+- **Dom** — DOM manipulation, morphdom patching
+- **Atom** — local reactive state (read/write/swap)
+- **Timer** — setTimeout/setInterval wrappers
+- **Event** — event listeners, delegation
+
+**Server-proxied effects** are anything the client doesn't have a handler for:
+- **DB** — queries, mutations
+- **IO** — file reads, writes, print
+- **Exception** — thrown errors propagate back to the client
+- Any custom effects defined by the application
+
+### Security: effect allowlists
+
+The server can't blindly execute any effect the client requests. Each route/component declares which effects may be proxied:
+
+```scheme
+(define-client user-profile (user-id)
+  #:allow (DB Exception)    ; only these effects can be proxied
+  (let ((user (perform db-query "SELECT * FROM users WHERE id = $1"
+                (list (show user-id)))))
+    ...))
+```
+
+The server validates incoming effect requests against the allowlist. Unauthorized effects are rejected with an error. The allowlist is signed (HMAC) and embedded in the page, so clients can't forge it.
+
+### Latency mitigation
+
+Each proxied effect is a WebSocket round-trip. Strategies to keep this fast:
+
+1. **Prefetching** — the `depends-on`/`combined` system already declares data deps upfront. The server can inline initial data in the page, so the first render is instant.
+2. **Batching** — collect multiple `perform`s that don't depend on each other and send them in a single WebSocket message. The server runs them concurrently.
+3. **Optimistic updates** — for mutations, update the local atom immediately and reconcile when the server responds.
+4. **Selective client components** — most of the app is still server-rendered (Phase 2). Only interactive islands need client components, and most interactions are a single action → one server effect → re-render.
 
 ### `define-client`
+
+Defines a component that compiles to both server-side (for initial SSR) and client-side JS (for interactivity). Effect rows are open — unhandled effects proxy to the server automatically.
 
 ```scheme
 (define-client counter-widget (initial-count)
@@ -294,36 +366,42 @@ Remaining JS coverage needed: `perform`/effects (compile to generator yields), t
 
 ### `define-shared`
 
-Pure functions emitted to both server and JS:
+Pure functions emitted to both server and JS. These run identically on both sides with no proxying:
 
 ```scheme
 (define-shared format-price (cents)
   (string-append "$" (show (/ cents 100)) "." (show (rem cents 100))))
 ```
 
-### `server-fn`
+### ADT serialization
 
-Inline server-side callbacks callable from client code:
+ADTs need a wire format for effect proxying (args and return values cross the WebSocket boundary). Convention:
 
-```scheme
-(server-fn (item-id)
-  (perform db-execute "DELETE FROM items WHERE id = $1" (list item-id)))
+```javascript
+// Marlang: (Some 42)     → JS: { tag: "Some", fields: [42] }
+// Marlang: None           → JS: { tag: "None", fields: [] }
+// Marlang: (Cons 1 Nil)   → JS: { tag: "Cons", fields: [1, { tag: "Nil", fields: [] }] }
 ```
 
-Compiles to:
-- Server: an RPC handler keyed by a signed token
-- Client: a stub that sends the token + args over WebSocket
+The `emit-js` macro already handles ADT construction and destructuring. The serialization format extends this to JSON for the wire protocol. The existing `stdlib/json.mar` codec handles encoding/decoding.
 
-### Effect boundary enforcement
+### Effect proxy protocol
 
-The type checker enforces boundaries via closed effect rows:
+Messages over WebSocket between client runtime and server:
 
-```scheme
-; (define (counter-widget : (-> Int {Dom} Html)) ...)
-; If the body tries to perform DB or IO, the type checker rejects it.
+```javascript
+// Client → Server (effect request)
+{ "type": "effect", "id": 1, "effect": "db-query",
+  "args": ["SELECT * FROM users WHERE id = $1", ["42"]] }
+
+// Server → Client (effect response)
+{ "type": "result", "id": 1, "value": [["42", "alice", "alice@example.com"]] }
+
+// Server → Client (effect error)
+{ "type": "error", "id": 1, "message": "relation \"users\" does not exist" }
 ```
 
-**Note:** Due to macro hygiene (see above), the macro must either receive the effect row from the user or the compiler's immune set must be extended to include type/effect names.
+The `id` field correlates requests with responses, allowing multiple in-flight effects (from batching or concurrent components).
 
 ---
 
@@ -365,7 +443,7 @@ AppActor
 (data ConnectionMsg
   (DepUpdate String String)
   (Navigate String)
-  (RpcCall String Bytes)
+  (EffectProxy EffectRequest)   ; Phase 4: proxied effect from client
   (Disconnect))
 
 (data DisconnectReason
@@ -373,12 +451,22 @@ AppActor
   (Timeout)
   (Error String))
 
-; --- Render tree analysis (Phase 4) ---
+; --- Effect proxy protocol (Phase 4) ---
 
-(data RenderNode
-  (Static String)
-  (Dynamic (List String) String)
-  (ClientBoundary String (List String)))
+(data EffectRequest
+  (EffectRequest Int String (List String)))   ; id, effect-name, args (JSON-encoded)
+
+(data EffectResponse
+  (EffectResult Int String)                   ; id, value (JSON-encoded)
+  (EffectError Int String))                   ; id, error message
+
+; --- Client effects (Phase 4) ---
+
+(data ClientEffect
+  (AtomNew a)
+  (AtomRead a)
+  (AtomSwap a (-> a a))
+  (DomPatch String String))                   ; target-id, html-fragment
 ```
 
 ---
@@ -429,18 +517,22 @@ AppActor
 - [x] LISTEN/NOTIFY integration — `listener-new`, `listener-subscribe`/`unsubscribe`, `listen`/`unlisten`/`notify`/`wait-notification`
 - [x] SCRAM-SHA-256 authentication — full RFC 5802 implementation with PBKDF2, new builtins: `pbkdf2-sha256`, `bytes-xor`, `base64-encode`, `base64-decode`, `random-bytes`
 
-### Phase 4 — Client Components (extends `emit-js` macro)
+### Phase 4 — Client Components (cross-platform effects)
 - [x] `emit-js` macro — compiles Marlang to JS strings at expansion time (literals, lambda, let, if, begin, define, match, ADTs, operators)
-- [ ] `emit-js` — effects via generator yields
-- [ ] ADT representation in JS
-- [ ] Trampolining for tail calls
-- [ ] `define-client` macro — closed effect row, JS emit
-- [ ] `define-shared` — dual emit (server + JS)
-- [ ] `server-fn` — RPC stubs + signed tokens
-- [ ] Atom implementation in JS
-- [ ] morphdom integration
-- [ ] Event delegation
-- [ ] Bundle manifest per route
+- [x] `emit-js` — `perform` compiled to generator `yield` points
+- [x] ADT wire format — `{ tag, fields }` JSON serialization for effect args/results
+- [x] Client effect runtime — generator driver that steps yields, routes to local or remote handlers
+- [x] Local effect handlers — Atom (reactive state) in `stdlib/js.mar` client runtime
+- [ ] Trampolining for tail calls in JS
+- [ ] Local effect handlers — Dom (morphdom patches), Timer, Event
+- [ ] Effect proxy — unhandled effects serialized and sent to server over WebSocket
+- [ ] Server-side effect dispatcher — receives effect requests, runs in handler stack, sends results back
+- [ ] Effect allowlists — `#:allow` on `define-client`, HMAC-signed, server-validated
+- [ ] Batching — collect independent `perform`s into single WebSocket messages
+- [ ] `define-client` macro — dual emit (SSR + JS), open effect rows, allowlist declaration
+- [ ] `define-shared` — dual emit for pure functions (server + JS)
+- [ ] Prefetching — inline `depends-on` data in initial page to avoid first-render round-trips
+- [ ] Event delegation — client-side event handling wired to `perform` calls
 
 ---
 

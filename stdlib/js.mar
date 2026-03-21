@@ -1,0 +1,533 @@
+; JavaScript code generation — enhanced emit-js macro
+;
+; Compiles Marlang S-expressions to JavaScript strings at macro expansion time.
+; Supports: literals, lambda, let, if, begin, define, match, ADTs, operators,
+; perform (→ yield), lambda* (→ generator function), call* (→ yield*),
+; and handle* (→ local effect driver).
+;
+; Usage:
+;   (import "std:js" as js)
+;   (js/emit-js (+ 1 2))              ; => "(1 + 2)"
+;   (js/emit-js (perform print "hi")) ; => '(yield {effect:"print",args:["hi"]})'
+;   (js/emit-js (lambda* (x) (perform atom-new x)))
+;     ; => '(function*(x) { return (yield {effect:"atom_new",args:[x]}); })'
+
+; =========================================================================
+; emit-js macro — compiles a single Marlang expression to a JS string
+; =========================================================================
+
+(defmacro emit-js (body)
+  ((lambda ()
+
+    ; --- Identifier translation ---
+
+    (define js-ident (lambda (name)
+      (match name
+        ("#t" "true") ("#f" "false") ("nil" "null")
+        (_ (string-replace-all (string-replace-all name "-" "_") "?" "_p")))))
+
+    ; --- Binary operator support ---
+
+    (define js-op (lambda (op)
+      (match op
+        ("+" "+") ("-" "-") ("*" "*") ("/" "/") ("rem" "%")
+        ("+." "+") ("-." "-") ("*." "*") ("/." "/") ("rem." "%")
+        ("=" "===") ("<" "<") (">" ">") ("<=" "<=") (">=" ">=")
+        ("=." "===") ("<." "<") (">." ">") ("<=." "<=") (">=." ">=")
+        ("string=" "===") ("string-append" "+")
+        ("and" "&&") ("or" "||")
+        (_ op))))
+
+    (define js-binop? (lambda (op)
+      (match op
+        ("+" #t) ("-" #t) ("*" #t) ("/" #t) ("rem" #t)
+        ("+." #t) ("-." #t) ("*." #t) ("/." #t) ("rem." #t)
+        ("=" #t) ("<" #t) (">" #t) ("<=" #t) (">=" #t)
+        ("=." #t) ("<." #t) (">." #t) ("<=." #t) (">=." #t)
+        ("string=" #t) ("string-append" #t)
+        ("and" #t) ("or" #t)
+        (_ #f))))
+
+    ; --- Detect uppercase (ADT constructor names) ---
+
+    (define upper? (lambda (s)
+      (if (string-is-empty s) #f
+        (match (string-char-at s 0)
+          (None #f)
+          ((Some c)
+            (let ((code (char-code c)))
+              (if (>= code 65) (<= code 90) #f)))))))
+
+    ; --- Core expression compiler ---
+
+    (define js-expr (lambda (e)
+      (if (number? e) (show e)
+      (if (string? e) (string-append "\"" (js-escape-string e) "\"")
+      (if (symbol? e)
+        (let ((name (symbol->string e)))
+          (if (upper? name)
+            ; Bare uppercase symbol = nullary ADT constructor
+            (string-append "{tag:\"" name "\",fields:[]}")
+            (js-ident name)))
+      (if (nil? e) "null"
+      (if (pair? e)
+        (let ((head (car e)) (args (cdr e)))
+          (if (symbol? head)
+            (js-special (symbol->string head) args)
+            ; Function call with computed function
+            (string-append (js-expr head) "(" (js-args args) ")")))
+      "/* ?? */")))))))
+
+    ; --- String escaping for JS string literals ---
+
+    (define js-escape-string (lambda (s)
+      (string-replace-all
+        (string-replace-all
+          (string-replace-all s "\\" "\\\\")
+          "\"" "\\\"")
+        "\n" "\\n")))
+
+    ; --- Special forms ---
+
+    (define js-special (lambda (name args)
+      (match name
+        ; --- Lambda (regular arrow function) ---
+        ("lambda"
+          (let ((params (car args))
+                (body (car (cdr args))))
+            (if (nil? params)
+              ; Zero-arg lambda: () => body
+              (string-append "(() => " (js-expr body) ")")
+              (string-append "((" (js-params params) ") => " (js-expr body) ")"))))
+
+        ; --- Lambda* (generator function) ---
+        ; Uses statement-based body compilation to avoid IIFE problems with yield.
+        ("lambda*"
+          (let ((params (car args))
+                (body (car (cdr args))))
+            (if (nil? params)
+              (string-append "(function*() { " (js-gen-body body) "})")
+              (string-append "(function*(" (js-params params) ") { " (js-gen-body body) "})"))))
+
+        ; --- Let binding ---
+        ("let"
+          (string-append "(() => { " (js-binds (car args)) "return " (js-expr (car (cdr args))) "; })()"))
+
+        ; --- Conditionals ---
+        ("if"
+          (string-append "(" (js-expr (car args)) " ? " (js-expr (car (cdr args))) " : " (js-expr (car (cdr (cdr args)))) ")"))
+
+        ("when"
+          (string-append "(" (js-expr (car args)) " ? " (js-expr (car (cdr args))) " : null)"))
+
+        ; --- Sequencing ---
+        ("begin" (js-begin args))
+
+        ; --- Definitions ---
+        ("define"
+          (string-append "const " (js-ident (symbol->string (car args))) " = " (js-expr (car (cdr args)))))
+
+        ; --- Data structures ---
+        ("list" (string-append "[" (js-args args) "]"))
+        ("MkPair" (string-append "[" (js-expr (car args)) ", " (js-expr (car (cdr args))) "]"))
+
+        ; --- Show (toString) ---
+        ("show" (string-append "String(" (js-expr (car args)) ")"))
+
+        ; --- Pattern matching ---
+        ("match"
+          (string-append "(() => { const __m = " (js-expr (car args)) "; " (js-branches (cdr args)) "throw new Error('no match'); })()"))
+
+        ; --- Option constructors (special-cased for null representation) ---
+        ("Some" (string-append "{tag:\"Some\",fields:[" (js-expr (car args)) "]}" ))
+        ("None" "{tag:\"None\",fields:[]}")
+
+        ; --- Perform (effect operation → generator yield) ---
+        ("perform"
+          (let ((op-name (js-ident (symbol->string (car args))))
+                (op-args (cdr args)))
+            (string-append "(yield {effect:\"" op-name "\",args:[" (js-args op-args) "]})")))
+
+        ; --- Call* (delegate to another generator via yield*) ---
+        ("call*"
+          (let ((call-expr (car args)))
+            (if (pair? call-expr)
+              (let ((fn (car call-expr))
+                    (fn-args (cdr call-expr)))
+                (if (symbol? fn)
+                  (string-append "(yield* " (js-ident (symbol->string fn)) "(" (js-args fn-args) "))")
+                  (string-append "(yield* " (js-expr fn) "(" (js-args fn-args) "))")))
+              (string-append "(yield* " (js-expr call-expr) ")"))))
+
+        ; --- Handle* (local effect handling — generator driver) ---
+        ; (handle* gen-expr ((effect-name arg1 arg2 ...) -> resume-value-expr) ...)
+        ; Handlers don't take a continuation — they just evaluate to the resume value.
+        ; Unhandled effects are re-yielded to the outer generator (must be in lambda* context).
+        ("handle*"
+          (let ((gen-expr (car args))
+                (clauses (cdr args)))
+            (string-append
+              "(yield* (function*() { const __gen = " (js-expr gen-expr)
+              "; let __r = __gen.next(); while (!__r.done) { const __e = __r.value; let __v; "
+              (js-handle-clauses clauses)
+              " else { __v = yield __e; } __r = __gen.next(__v); } return __r.value; })())")))
+
+        ; --- Default: function call or ADT constructor ---
+        (_
+          (if (upper? name)
+            ; ADT constructor: (Foo a b c) → {tag:"Foo",fields:[a,b,c]}
+            (string-append "{tag:\"" name "\",fields:[" (js-args args) "]}")
+            (if (js-binop? name)
+              (string-append "(" (js-expr (car args)) " " (js-op name) " " (js-expr (car (cdr args))) ")")
+              (string-append (js-ident name) "(" (js-args args) ")")))))))
+
+    ; --- Handle* clause compilation ---
+
+    (define js-handle-clauses (lambda (clauses)
+      (if (nil? clauses) ""
+        (let ((clause (car clauses))
+              (rest (cdr clauses)))
+          (string-append (js-one-handle-clause clause)
+            (if (nil? rest) ""
+              (string-append " else " (js-handle-clauses rest))))))))
+
+    (define js-one-handle-clause (lambda (clause)
+      ; clause is ((effect-name arg1 arg2 ...) -> handler-body)
+      ; or ((effect-name arg1 arg2 ...) handler-body) without ->
+      ; Handler body evaluates to the resume value (no explicit continuation).
+      (let ((pattern (car clause))
+            (rest-after-pattern (cdr clause)))
+        ; Skip the -> arrow if present
+        (let ((handler-body
+                (if (pair? rest-after-pattern)
+                  (let ((maybe-arrow (car rest-after-pattern)))
+                    (if (symbol? maybe-arrow)
+                      (if (string= (symbol->string maybe-arrow) "->")
+                        (car (cdr rest-after-pattern))
+                        (car rest-after-pattern))
+                      (car rest-after-pattern)))
+                  (car rest-after-pattern))))
+          ; pattern is (effect-name arg1 arg2 ...)
+          (let ((effect-name (symbol->string (car pattern)))
+                (param-vars (cdr pattern)))
+            (string-append
+              "if (__e.effect === \"" (js-ident effect-name) "\") { "
+              (js-destructure-args param-vars 0)
+              "__v = " (js-expr handler-body) "; }"))))))
+
+    ; Destructure effect args: const arg0 = __e.args[0]; const arg1 = __e.args[1]; ...
+    (define js-destructure-args (lambda (vars idx)
+      (if (nil? vars) ""
+        (string-append "const " (js-ident (symbol->string (car vars)))
+          " = __e.args[" (show idx) "]; "
+          (js-destructure-args (cdr vars) (+ idx 1))))))
+
+    ; --- Generator body compilation ---
+    ; Compiles expressions as statements for use inside function* bodies.
+    ; Flattens let bindings into const declarations and begin into sequential
+    ; statements, so that yield works correctly (no IIFE wrapping).
+
+    (define js-gen-body (lambda (e)
+      (if (pair? e)
+        (let ((head (car e)))
+          (if (symbol? head)
+            (let ((name (symbol->string head)))
+              (match name
+                ; Flatten let: const x = ...; const y = ...; <body>
+                ("let"
+                  (let ((bindings (car (cdr e)))
+                        (body (car (cdr (cdr e)))))
+                    (string-append (js-gen-binds bindings) (js-gen-body body))))
+                ; Flatten begin: stmt; stmt; ...; return last;
+                ("begin" (js-gen-stmts (cdr e)))
+                ; Flatten if: if (cond) { ... } else { ... }
+                ("if"
+                  (let ((cond-e (car (cdr e)))
+                        (then-e (car (cdr (cdr e))))
+                        (else-e (car (cdr (cdr (cdr e))))))
+                    (string-append "if (" (js-expr cond-e) ") { "
+                      (js-gen-body then-e) "} else { "
+                      (js-gen-body else-e) "} ")))
+                ; Flatten match: rewrite as if/else chain in statement form
+                ("match"
+                  (string-append "const __m = " (js-expr (car (cdr e))) "; "
+                    (js-gen-match-branches (cdr (cdr e)))))
+                ; Flatten define: const name = expr;
+                ("define"
+                  (string-append "const " (js-ident (symbol->string (car (cdr e)))) " = "
+                    (js-expr (car (cdr (cdr e)))) "; "))
+                ; Anything else: return as expression
+                (_ (string-append "return " (js-expr e) "; "))))
+            (string-append "return " (js-expr e) "; ")))
+        (string-append "return " (js-expr e) "; "))))
+
+    ; Compile let bindings as const declarations for generator bodies.
+    ; Each binding's value is compiled as a regular expression (supports yield).
+    (define js-gen-binds (lambda (bindings)
+      (if (nil? bindings) ""
+        (let ((b (car bindings)))
+          (string-append "const " (js-ident (symbol->string (car b)))
+            " = " (js-expr (car (cdr b))) "; "
+            (js-gen-binds (cdr bindings)))))))
+
+    ; Compile a begin sequence as statements for generator bodies.
+    ; All but the last are compiled as expression statements; last is returned.
+    (define js-gen-stmts (lambda (stmts)
+      (if (nil? (cdr stmts))
+        (js-gen-body (car stmts))
+        (string-append (js-expr (car stmts)) "; " (js-gen-stmts (cdr stmts))))))
+
+    ; Compile match branches in statement form for generator bodies.
+    (define js-gen-match-branches (lambda (branches)
+      (if (nil? branches) "throw new Error('no match'); "
+        (let ((br (car branches)))
+          (string-append (js-gen-one-match (car br) (car (cdr br))) " "
+            (js-gen-match-branches (cdr branches)))))))
+
+    (define js-gen-one-match (lambda (pattern body)
+      (if (symbol? pattern)
+        (let ((name (symbol->string pattern)))
+          (match name
+            ("_" (js-gen-body body))
+            ("None"
+              (string-append "if (__m === null || (__m && __m.tag === \"None\")) { "
+                (js-gen-body body) "}"))
+            (_
+              (if (upper? name)
+                (string-append "if (__m && __m.tag === \"" name "\") { "
+                  (js-gen-body body) "}")
+                (string-append "{ const " (js-ident name) " = __m; "
+                  (js-gen-body body) "}")))))
+        (let ((tag (symbol->string (car pattern))))
+          (string-append "if (__m && __m.tag === \"" tag "\") { "
+            (js-destr (cdr pattern) 0)
+            (js-gen-body body) "}")))))
+
+    ; --- Begin (sequencing, expression mode) ---
+
+    (define js-begin (lambda (args)
+      (if (nil? (cdr args)) (js-expr (car args))
+        (string-append "(" (js-expr (car args)) ", " (js-begin (cdr args)) ")"))))
+
+    ; --- Parameter list ---
+
+    (define js-params (lambda (ps)
+      (if (nil? ps) ""
+      (if (nil? (cdr ps)) (js-ident (symbol->string (car ps)))
+        (string-append (js-ident (symbol->string (car ps))) ", " (js-params (cdr ps)))))))
+
+    ; --- Argument list ---
+
+    (define js-args (lambda (args)
+      (if (nil? args) ""
+      (if (nil? (cdr args)) (js-expr (car args))
+        (string-append (js-expr (car args)) ", " (js-args (cdr args)))))))
+
+    ; --- Let bindings ---
+
+    (define js-binds (lambda (bindings)
+      (if (nil? bindings) ""
+        (let ((b (car bindings)))
+          (string-append "const " (js-ident (symbol->string (car b)))
+            " = " (js-expr (car (cdr b))) "; "
+            (js-binds (cdr bindings)))))))
+
+    ; --- Match branches ---
+
+    (define js-branches (lambda (branches)
+      (if (nil? branches) ""
+        (let ((br (car branches)))
+          (string-append (js-one-branch (car br) (car (cdr br))) " "
+            (js-branches (cdr branches)))))))
+
+    (define js-one-branch (lambda (pattern b)
+      (if (symbol? pattern)
+        (let ((name (symbol->string pattern)))
+          (match name
+            ("_"    (string-append "return " (js-expr b) ";"))
+            ("None" (string-append "if (__m === null || (__m && __m.tag === \"None\")) { return " (js-expr b) "; }"))
+            (_
+              (if (upper? name)
+                (string-append "if (__m && __m.tag === \"" name "\") { return " (js-expr b) "; }")
+                ; Variable binding (lowercase) — binds the whole match value
+                (string-append "{ const " (js-ident name) " = __m; return " (js-expr b) "; }")))))
+        ; Destructuring pattern: (Tag arg1 arg2 ...)
+        (let ((tag (symbol->string (car pattern))))
+          (string-append "if (__m && __m.tag === \"" tag "\") { "
+            (js-destr (cdr pattern) 0)
+            "return " (js-expr b) "; }")))))
+
+    (define js-destr (lambda (vars idx)
+      (if (nil? vars) ""
+        (string-append "const " (js-ident (symbol->string (car vars)))
+          " = __m.fields[" (show idx) "]; "
+          (js-destr (cdr vars) (+ idx 1))))))
+
+    ; --- Entry point ---
+
+    (js-expr body))))
+
+; =========================================================================
+; emit-js-block — compile multiple top-level forms to JS statements
+; =========================================================================
+
+(defmacro emit-js-block forms
+  ((lambda ()
+
+    ; Reuse emit-js for single expressions (by re-expanding)
+    (define compile-one (lambda (form)
+      (list 'emit-js form)))
+
+    ; Join multiple compiled forms with ";\n"
+    (define compile-all (lambda (fs)
+      (if (nil? fs) "\"\""
+      (if (nil? (cdr fs)) (compile-one (car fs))
+        (list 'string-append (compile-one (car fs))
+          (list 'string-append "\";\n\""
+            (compile-all (cdr fs))))))))
+
+    (compile-all forms))))
+
+; =========================================================================
+; Client-side effect runtime (JS source as Marlang string)
+;
+; Provides:
+;   marlang.run(gen, handlers)  — drive a generator, handle effects
+;   marlang.mount(el, genFn, args, handlers, ws)  — mount a component
+;   marlang.connect(url)  — establish WebSocket for effect proxying
+;
+; Local effect handlers are objects: { effectName: (args, resume) => ... }
+; Unhandled effects are proxied to the server over WebSocket.
+; =========================================================================
+
+(define client-runtime "
+const marlang = (() => {
+  let _nextId = 1;
+  const _pending = new Map();
+  let _ws = null;
+
+  // Drive a generator to completion, handling effects locally or via proxy.
+  // handlers: { effectName: (args, resume) => void }
+  //   - resume(value) continues the generator with the given value
+  //   - If handler doesn't call resume synchronously, the generator suspends
+  // Returns a Promise that resolves with the generator's return value.
+  function run(gen, handlers) {
+    return new Promise((resolve, reject) => {
+      function step(value) {
+        try {
+          const result = gen.next(value);
+          if (result.done) {
+            resolve(result.value);
+            return;
+          }
+          const eff = result.value;
+          if (!eff || !eff.effect) {
+            reject(new Error('Generator yielded non-effect: ' + JSON.stringify(eff)));
+            return;
+          }
+          // Check local handlers first
+          if (handlers && handlers[eff.effect]) {
+            handlers[eff.effect](eff.args, step);
+          } else if (_ws && _ws.readyState === 1) {
+            // Proxy to server
+            const id = _nextId++;
+            _pending.set(id, { resolve: step, reject });
+            _ws.send(JSON.stringify({ type: 'effect', id, effect: eff.effect, args: eff.args }));
+          } else {
+            reject(new Error('Unhandled effect: ' + eff.effect + ' (no local handler, no WebSocket)'));
+          }
+        } catch (e) {
+          reject(e);
+        }
+      }
+      step(undefined);
+    });
+  }
+
+  // Handle incoming WebSocket messages (effect responses from server)
+  function handleMessage(data) {
+    try {
+      const msg = JSON.parse(data);
+      if (msg.type === 'result' && _pending.has(msg.id)) {
+        const { resolve } = _pending.get(msg.id);
+        _pending.delete(msg.id);
+        resolve(msg.value);
+      } else if (msg.type === 'error' && _pending.has(msg.id)) {
+        const { reject } = _pending.get(msg.id);
+        _pending.delete(msg.id);
+        reject(new Error(msg.message));
+      }
+    } catch (e) {
+      // Not JSON — might be a morphdom update, ignore
+    }
+  }
+
+  // Connect WebSocket for effect proxying
+  function connect(url) {
+    _ws = new WebSocket(url || ('ws://' + location.host + '/'));
+    _ws.onmessage = (e) => handleMessage(e.data);
+    _ws.onclose = () => setTimeout(() => connect(url), 1000);
+    return _ws;
+  }
+
+  // Mount a generator component into a DOM element
+  // genFn: generator function, args: array of arguments
+  // handlers: local effect handlers, ws: WebSocket (optional)
+  function mount(el, genFn, args, handlers) {
+    const gen = genFn.apply(null, args || []);
+    return run(gen, handlers || {}).then(html => {
+      if (typeof html === 'string') {
+        el.innerHTML = html;
+      }
+      return html;
+    });
+  }
+
+  // Built-in local effect handlers
+
+  // Atom: reactive state cell
+  // atom-new(initialValue) → atomRef
+  // atom-read(atomRef) → currentValue
+  // atom-swap(atomRef, fn) → newValue
+  // atom-set(atomRef, value) → newValue
+  const atoms = new Map();
+  let atomId = 0;
+
+  const atomHandlers = {
+    atom_new(args, resume) {
+      const id = ++atomId;
+      atoms.set(id, args[0]);
+      resume(id);
+    },
+    atom_read(args, resume) {
+      resume(atoms.get(args[0]));
+    },
+    atom_swap(args, resume) {
+      const ref = args[0];
+      const fn = args[1];
+      const oldVal = atoms.get(ref);
+      const newVal = fn(oldVal);
+      atoms.set(ref, newVal);
+      resume(newVal);
+    },
+    atom_set(args, resume) {
+      atoms.set(args[0], args[1]);
+      resume(args[1]);
+    }
+  };
+
+  // Merge user handlers with built-in atom handlers
+  function withAtoms(userHandlers) {
+    return Object.assign({}, atomHandlers, userHandlers || {});
+  }
+
+  return { run, connect, mount, handleMessage, withAtoms, atomHandlers };
+})();
+")
+
+; =========================================================================
+; Helper: wrap client JS in a <script> tag
+; =========================================================================
+
+(define runtime-script (lambda ()
+  (string-append "<script>" client-runtime "</script>")))
