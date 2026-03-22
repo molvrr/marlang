@@ -207,12 +207,11 @@ pub fn expand_macros(
         expander = expander.with_virtual_modules(loader.virtual_modules.clone());
     }
 
-    // Load prelude (data types, macros, utility functions)
+    // Load prelude (data types, macros, utility functions).
+    // expand_all (called inside load_prelude) now runs each expression in the
+    // expansion VM automatically, so a separate run_prelude_in_vm is not needed.
     let prelude_exprs = expander.load_prelude();
     let prelude_count = prelude_exprs.len();
-
-    // Run prelude in expansion VM so quasiquote has access to Nil, Cons, etc.
-    expander.run_prelude_in_vm(&prelude_exprs);
 
     // Expand user expressions
     let user_exprs = expander
@@ -571,7 +570,7 @@ fn merge_exports(
     Ok(())
 }
 
-fn is_constructor_value(value: &Value) -> bool {
+pub(crate) fn is_constructor_value(value: &Value) -> bool {
     if let Some(obj) = value.as_object() {
         match obj {
             crate::object::VMObject::AdtConstructor { .. } => true,

@@ -1,6 +1,7 @@
 use crate::builtins::register_builtins;
 use crate::bytecode::ROOT_MODULE;
 use crate::compiler::compile_expr_with_context;
+use crate::modules::is_constructor_value;
 use crate::object::VMObject;
 use crate::value::Value;
 use crate::vm::{VM, call_value, interpret};
@@ -56,22 +57,28 @@ pub struct MacroExpander<'a> {
     expansion_depth: u32,
     file_path: Option<PathBuf>,
     stdlib_dir: Option<PathBuf>,
-    module_macro_cache: HashMap<PathBuf, MacroExports>,
+    module_export_cache: HashMap<PathBuf, ModuleExports>,
     expanding_paths: HashSet<PathBuf>,
     virtual_modules: HashMap<PathBuf, String>,
     /// Accumulated constructor knowledge across compilations in the expansion VM.
     known_constructors: HashSet<Symbol>,
     /// Accumulated effect-op knowledge across compilations in the expansion VM.
     known_effect_ops: HashMap<Symbol, Symbol>,
+    /// When true, run each expression in the expansion VM during expand_all.
+    /// Set by expand_import (to capture module globals) or when expand_all detects
+    /// defmacros that may reference preceding definitions.
+    force_vm_execution: bool,
 }
 
-/// Cached macro exports for a module
+/// Cached exports for a module (macros + globals for compile-time use)
 #[derive(Clone)]
-struct MacroExports {
+struct ModuleExports {
     /// Macros defined by this module itself
-    own: HashMap<Symbol, Value>,
+    own_macros: HashMap<Symbol, Value>,
     /// All macros visible in this module (own + imported)
-    all: HashMap<Symbol, Value>,
+    all_macros: HashMap<Symbol, Value>,
+    /// Global names exported by this module (for qualified import aliasing)
+    global_names: Vec<String>,
 }
 
 impl<'a> MacroExpander<'a> {
@@ -97,11 +104,12 @@ impl<'a> MacroExpander<'a> {
             expansion_depth: 0,
             file_path: None,
             stdlib_dir: None,
-            module_macro_cache: HashMap::new(),
+            module_export_cache: HashMap::new(),
             expanding_paths: HashSet::new(),
             virtual_modules: HashMap::new(),
             known_constructors: HashSet::new(),
             known_effect_ops: HashMap::new(),
+            force_vm_execution: false,
         }
     }
 
@@ -129,25 +137,21 @@ impl<'a> MacroExpander<'a> {
         self.expand_all(exprs).unwrap_or_default()
     }
 
-    /// Run prelude expressions in the expansion VM so it has access to
-    /// data constructors (Nil, Cons, etc.) and utility functions for quasiquote.
-    ///
-    /// Uses `compile_expr_with_context` to accumulate constructor and effect-op
-    /// knowledge across expressions, so that `match` patterns in later expressions
-    /// (and in macro bodies) correctly recognise ADT constructors.
-    pub fn run_prelude_in_vm(&mut self, exprs: &[Expr]) {
-        for expr in exprs {
-            if let Ok(result) = compile_expr_with_context(
-                expr,
-                self.interner,
-                &self.known_constructors,
-                &self.known_effect_ops,
-                ROOT_MODULE,
-            ) {
-                self.known_constructors = result.known_constructors;
-                self.known_effect_ops = result.known_effect_ops;
-                let _ = interpret(&mut self.vm, &result.chunk);
-            }
+    /// Run a single expression in the expansion VM.
+    /// Errors are silently ignored — the expression is still passed through to
+    /// the runtime. This allows pure definitions to be available at compile time
+    /// while effectful code gracefully degrades.
+    fn run_expr_in_vm(&mut self, expr: &Expr) {
+        if let Ok(result) = compile_expr_with_context(
+            expr,
+            self.interner,
+            &self.known_constructors,
+            &self.known_effect_ops,
+            ROOT_MODULE,
+        ) {
+            self.known_constructors = result.known_constructors;
+            self.known_effect_ops = result.known_effect_ops;
+            let _ = interpret(&mut self.vm, &result.chunk);
         }
     }
 
@@ -175,10 +179,20 @@ impl<'a> MacroExpander<'a> {
     /// Expand all top-level expressions.
     /// Returns the expanded expressions and any macro definitions found (for cross-module use).
     ///
+    /// Every expression is also compiled and executed in the expansion VM so that
+    /// definitions (functions, data types, etc.) are available to subsequent macros.
+    /// This enables macros to run arbitrary Marlang code at compile time.
+    ///
     /// Per R5RS §5.1, top-level `(begin ...)` is a splicing form: its children
     /// are flattened into the enclosing sequence of top-level forms. This allows
     /// macros to expand into multiple top-level definitions.
     pub fn expand_all(&mut self, exprs: Vec<Expr>) -> Result<Vec<Expr>, MacroError> {
+        // Run expressions in the expansion VM if:
+        // 1. force_vm_execution is set (e.g., inside an import), OR
+        // 2. This expression list contains defmacros that may reference
+        //    preceding definitions
+        let run_in_vm = self.force_vm_execution || exprs.iter().any(|e| self.is_defmacro(e));
+
         let mut result = Vec::new();
 
         for expr in exprs {
@@ -190,7 +204,11 @@ impl<'a> MacroExpander<'a> {
                 result.push(expr);
             } else {
                 let expanded = self.expand_expr(expr)?;
-                self.splice_top_level(expanded, &mut result)?;
+                // Run in expansion VM so later macros can use this definition
+                if run_in_vm {
+                    self.run_expr_in_vm(&expanded);
+                }
+                self.splice_top_level(expanded, &mut result, run_in_vm)?;
             }
         }
 
@@ -199,7 +217,13 @@ impl<'a> MacroExpander<'a> {
 
     /// If `expr` is a top-level `(begin ...)`, recursively splice its children
     /// into `out`. Otherwise push the expression as-is.
-    fn splice_top_level(&mut self, expr: Expr, out: &mut Vec<Expr>) -> Result<(), MacroError> {
+    /// When `run_in_vm` is true, each non-macro expression is also run in the expansion VM.
+    fn splice_top_level(
+        &mut self,
+        expr: Expr,
+        out: &mut Vec<Expr>,
+        run_in_vm: bool,
+    ) -> Result<(), MacroError> {
         if self.is_begin(&expr) {
             let children: Vec<Expr> = ast::list_to_array(&expr)
                 .into_iter()
@@ -210,7 +234,10 @@ impl<'a> MacroExpander<'a> {
                 if self.is_defmacro(&child) {
                     self.register_macro(&child)?;
                 } else {
-                    self.splice_top_level(child, out)?;
+                    if run_in_vm {
+                        self.run_expr_in_vm(&child);
+                    }
+                    self.splice_top_level(child, out, run_in_vm)?;
                 }
             }
         } else {
@@ -527,9 +554,16 @@ impl<'a> MacroExpander<'a> {
         };
 
         // Check cache
-        if let Some(cached) = self.module_macro_cache.get(&resolved) {
-            let cached = cached.clone();
-            self.register_imported_macros(&cached.own, &cached.all, qualifier.as_deref());
+        if let Some(cached) = self.module_export_cache.get(&resolved).cloned() {
+            self.register_imported_macros(
+                &cached.own_macros,
+                &cached.all_macros,
+                qualifier.as_deref(),
+            );
+            // Module already loaded in expansion VM — add qualified aliases if needed
+            if let Some(ref q) = qualifier {
+                self.add_qualified_vm_aliases(q, &cached.global_names);
+            }
             return Ok(());
         }
 
@@ -567,7 +601,19 @@ impl<'a> MacroExpander<'a> {
         self.file_path = Some(resolved.clone());
         self.expansion_depth = 0;
 
-        // Expand the module (we don't need the expanded expressions, just the macros)
+        // Force VM execution for imported modules so their globals are available
+        // for qualified aliases and compile-time access.
+        let saved_force = self.force_vm_execution;
+        self.force_vm_execution = true;
+
+        // Enable dirty_globals tracking so we know exactly which names this
+        // module wrote, even if they overwrite existing globals (e.g., both
+        // list.mar and string.mar define `concat`).
+        let saved_dirty = self.vm.dirty_globals.take();
+        self.vm.dirty_globals = Some(HashSet::new());
+
+        // Expand and execute the module in the expansion VM.
+        // expand_all now runs each expression in the VM automatically.
         let expand_result = self.expand_all(exprs);
         let module_all_macros = self.macros.clone();
         let module_own_macros: HashMap<Symbol, Value> = self
@@ -576,11 +622,22 @@ impl<'a> MacroExpander<'a> {
             .filter_map(|sym| self.macros.get(sym).map(|v| (*sym, v.clone())))
             .collect();
 
+        // Collect the module's global exports from dirty_globals tracking
+        let module_global_names: Vec<String> = self
+            .vm
+            .dirty_globals
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        self.vm.dirty_globals = saved_dirty;
+
         // Restore state
         self.macros = saved_macros;
         self.own_macros = saved_own;
         self.expansion_depth = saved_depth;
         self.file_path = saved_file;
+        self.force_vm_execution = saved_force;
         self.expanding_paths.remove(&resolved);
 
         // If expansion failed, skip (let runtime handle)
@@ -588,17 +645,43 @@ impl<'a> MacroExpander<'a> {
             return Ok(());
         }
 
-        // Cache module exports
-        let exports = MacroExports {
-            own: module_own_macros.clone(),
-            all: module_all_macros.clone(),
-        };
-        self.module_macro_cache.insert(resolved, exports);
+        // For qualified imports, add qualifier/name aliases in the expansion VM
+        if let Some(ref q) = qualifier {
+            self.add_qualified_vm_aliases(q, &module_global_names);
+        }
 
-        // Register with qualifier
+        // Cache module exports (macros + global names for re-aliasing on cache hit)
+        let exports = ModuleExports {
+            own_macros: module_own_macros.clone(),
+            all_macros: module_all_macros.clone(),
+            global_names: module_global_names,
+        };
+        self.module_export_cache.insert(resolved, exports);
+
+        // Register macros with qualifier
         self.register_imported_macros(&module_own_macros, &module_all_macros, qualifier.as_deref());
 
         Ok(())
+    }
+
+    /// Add qualified aliases (e.g., `list/map`, `list/filter`) in the expansion VM
+    /// for a module's exported globals.
+    fn add_qualified_vm_aliases(&mut self, qualifier: &str, global_names: &[String]) {
+        let aliases: Vec<(String, Value)> = global_names
+            .iter()
+            .filter_map(|name| {
+                let qualified = format!("{}/{}", qualifier, name);
+                self.vm.globals().get(name).cloned().map(|v| (qualified, v))
+            })
+            .collect();
+        for (qualified_name, value) in aliases {
+            // Also register constructor knowledge for qualified names
+            if is_constructor_value(&value) {
+                let sym = self.interner.intern(&qualified_name);
+                self.known_constructors.insert(sym);
+            }
+            self.vm.globals_mut().insert(qualified_name, value);
+        }
     }
 
     fn register_imported_macros(

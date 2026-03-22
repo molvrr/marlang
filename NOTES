@@ -1,5 +1,6 @@
 - [ ] stdlib: expose parser and typechecker
 - [ ] cross platform effects: if some effect is unhandled in client-side, it sends the effect to the server : we should have a way of sandboxing these
+- [ ] revamp macro system so we can run arbitrary functions in it? maybe running a scheduler for each macro definition
 - [ ] stdlib: random
 - [ ] add cli subcommand `profile`: Shows time spent on macro expansion, typechecking, function calls
 - [ ] parse error filename, line number and column

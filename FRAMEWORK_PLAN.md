@@ -522,17 +522,16 @@ AppActor
 - [x] `emit-js` — `perform` compiled to generator `yield` points
 - [x] ADT wire format — `{ tag, fields }` JSON serialization for effect args/results
 - [x] Client effect runtime — generator driver that steps yields, routes to local or remote handlers
-- [x] Local effect handlers — Atom (reactive state) in `stdlib/js.mar` client runtime
-- [ ] Trampolining for tail calls in JS
-- [ ] Local effect handlers — Dom (morphdom patches), Timer, Event
-- [ ] Effect proxy — unhandled effects serialized and sent to server over WebSocket
-- [ ] Server-side effect dispatcher — receives effect requests, runs in handler stack, sends results back
+- [x] Local effect handlers — Atom (reactive state), Dom (morphdom), Timer, Event in `stdlib/js.mar` client runtime
+- [x] Trampolining for tail calls in JS — `recur` form + `marlang.trampoline/bounce` in runtime
+- [x] Effect proxy — unhandled effects auto-proxied to server over WebSocket in client runtime
+- [x] Server-side effect dispatcher — `web.mar` parses JSON effect requests, dispatches to handler map, sends results back
+- [x] `define-client` macro — server renders mount-point div + mount script; JS is a generator component
+- [x] `define-shared` — dual emit for pure functions (server + JS), JS code collected via `shared-js`
+- [x] Event delegation — `event_delegate` handler in client runtime; `dom_morph` for morphdom patches
 - [ ] Effect allowlists — `#:allow` on `define-client`, HMAC-signed, server-validated
 - [ ] Batching — collect independent `perform`s into single WebSocket messages
-- [ ] `define-client` macro — dual emit (SSR + JS), open effect rows, allowlist declaration
-- [ ] `define-shared` — dual emit for pure functions (server + JS)
 - [ ] Prefetching — inline `depends-on` data in initial page to avoid first-render round-trips
-- [ ] Event delegation — client-side event handling wired to `perform` calls
 
 ---
 

@@ -3,7 +3,7 @@
 ; Compiles Marlang S-expressions to JavaScript strings at macro expansion time.
 ; Supports: literals, lambda, let, if, begin, define, match, ADTs, operators,
 ; perform (→ yield), lambda* (→ generator function), call* (→ yield*),
-; and handle* (→ local effect driver).
+; handle* (→ local effect driver), and recur (→ trampoline bounce).
 ;
 ; Usage:
 ;   (import "std:js" as js)
@@ -11,6 +11,37 @@
 ;   (js/emit-js (perform print "hi")) ; => '(yield {effect:"print",args:["hi"]})'
 ;   (js/emit-js (lambda* (x) (perform atom-new x)))
 ;     ; => '(function*(x) { return (yield {effect:"atom_new",args:[x]}); })'
+;
+;   ; define-shared — dual emit: Marlang function + JS code
+;   (js/define-shared double (x) (* x 2))
+;   (double 21)       ; => 42  (Marlang)
+;   (js/shared-js)    ; => "const double = ((x) => (x * 2));"
+;
+;   ; define-client — dual emit: Marlang handler + JS generator component
+;   (js/define-client counter (initial)
+;     (let ((count (perform atom-new initial)))
+;       (string-append (show (perform atom-read count)) " clicks")))
+
+(import "std:concurrent" as conc)
+
+; =========================================================================
+; Client effect declarations
+;
+; These enable standard (perform ...) syntax in define-client bodies,
+; type-checked by the Marlang type checker. At runtime on the client,
+; the JS runtime handles these effects (atom effects locally, unknown
+; effects proxied to the server over WebSocket).
+;
+; Types are intentionally loose (a -> a) because atom refs are opaque
+; IDs at the JS level. The type checker still verifies effect names,
+; arities, and that effects are declared.
+; =========================================================================
+
+(effect Atom
+  (atom-new  (-> a a))
+  (atom-read (-> a a))
+  (atom-set  (-> a a a))
+  (atom-swap (-> a (-> a a) a)))
 
 ; =========================================================================
 ; emit-js macro — compiles a single Marlang expression to a JS string
@@ -134,6 +165,9 @@
         ; --- Show (toString) ---
         ("show" (string-append "String(" (js-expr (car args)) ")"))
 
+        ; --- Not ---
+        ("not" (string-append "(!" (js-expr (car args)) ")"))
+
         ; --- Pattern matching ---
         ("match"
           (string-append "(() => { const __m = " (js-expr (car args)) "; " (js-branches (cdr args)) "throw new Error('no match'); })()"))
@@ -158,6 +192,19 @@
                   (string-append "(yield* " (js-ident (symbol->string fn)) "(" (js-args fn-args) "))")
                   (string-append "(yield* " (js-expr fn) "(" (js-args fn-args) "))")))
               (string-append "(yield* " (js-expr call-expr) ")"))))
+
+        ; --- Recur (trampoline tail call) ---
+        ; (recur (f arg1 arg2)) → marlang.bounce(() => f(arg1, arg2))
+        ; Used inside functions wrapped with marlang.trampoline() for TCO.
+        ("recur"
+          (let ((call-expr (car args)))
+            (if (pair? call-expr)
+              (let ((fn (car call-expr))
+                    (fn-args (cdr call-expr)))
+                (if (symbol? fn)
+                  (string-append "marlang.bounce(() => " (js-ident (symbol->string fn)) "(" (js-args fn-args) "))")
+                  (string-append "marlang.bounce(() => " (js-expr fn) "(" (js-args fn-args) "))")))
+              (string-append "marlang.bounce(() => " (js-expr call-expr) ")"))))
 
         ; --- Handle* (local effect handling — generator driver) ---
         ; (handle* gen-expr ((effect-name arg1 arg2 ...) -> resume-value-expr) ...)
@@ -270,12 +317,43 @@
             " = " (js-expr (car (cdr b))) "; "
             (js-gen-binds (cdr bindings)))))))
 
+    ; Compile an expression as a void statement (no return).
+    ; Handles if/let/begin/match in statement form, just like js-gen-body
+    ; but without the implicit return on the final expression.
+    (define js-gen-void (lambda (e)
+      (if (pair? e)
+        (let ((head (car e)))
+          (if (symbol? head)
+            (let ((name (symbol->string head)))
+              (match name
+                ("let"
+                  (let ((bindings (car (cdr e)))
+                        (body (car (cdr (cdr e)))))
+                    (string-append (js-gen-binds bindings) (js-gen-void body))))
+                ("begin" (js-gen-void-stmts (cdr e)))
+                ("if"
+                  (let ((cond-e (car (cdr e)))
+                        (then-e (car (cdr (cdr e))))
+                        (else-e (car (cdr (cdr (cdr e))))))
+                    (string-append "if (" (js-expr cond-e) ") { "
+                      (js-gen-void then-e) "} else { "
+                      (js-gen-void else-e) "} ")))
+                (_ (string-append (js-expr e) "; "))))
+            (string-append (js-expr e) "; ")))
+        (string-append (js-expr e) "; "))))
+
+    ; All statements as void (no return on any).
+    (define js-gen-void-stmts (lambda (stmts)
+      (if (nil? (cdr stmts))
+        (js-gen-void (car stmts))
+        (string-append (js-gen-void (car stmts)) (js-gen-void-stmts (cdr stmts))))))
+
     ; Compile a begin sequence as statements for generator bodies.
-    ; All but the last are compiled as expression statements; last is returned.
+    ; All but the last are compiled as void statements; last gets return.
     (define js-gen-stmts (lambda (stmts)
       (if (nil? (cdr stmts))
         (js-gen-body (car stmts))
-        (string-append (js-expr (car stmts)) "; " (js-gen-stmts (cdr stmts))))))
+        (string-append (js-gen-void (car stmts)) (js-gen-stmts (cdr stmts))))))
 
     ; Compile match branches in statement form for generator bodies.
     (define js-gen-match-branches (lambda (branches)
@@ -405,29 +483,39 @@ const marlang = (() => {
   let _nextId = 1;
   const _pending = new Map();
   let _ws = null;
+  let _handlers = {};
 
+  // ---- Trampoline for tail-call optimization ----
+  // Functions compiled with (recur ...) return Bounce thunks.
+  // trampoline() steps until a non-thunk value is reached.
+  class Bounce { constructor(fn) { this.fn = fn; } }
+  function trampoline(val) {
+    while (val instanceof Bounce) val = val.fn();
+    return val;
+  }
+  function bounce(fn) { return new Bounce(fn); }
+
+  // ---- Generator driver ----
   // Drive a generator to completion, handling effects locally or via proxy.
   // handlers: { effectName: (args, resume) => void }
   //   - resume(value) continues the generator with the given value
-  //   - If handler doesn't call resume synchronously, the generator suspends
+  //   - If handler doesn't call resume synchronously, the generator pauses
   // Returns a Promise that resolves with the generator's return value.
   function run(gen, handlers) {
+    const h = handlers || _handlers;
     return new Promise((resolve, reject) => {
       function step(value) {
         try {
           const result = gen.next(value);
-          if (result.done) {
-            resolve(result.value);
-            return;
-          }
+          if (result.done) { resolve(result.value); return; }
           const eff = result.value;
           if (!eff || !eff.effect) {
             reject(new Error('Generator yielded non-effect: ' + JSON.stringify(eff)));
             return;
           }
           // Check local handlers first
-          if (handlers && handlers[eff.effect]) {
-            handlers[eff.effect](eff.args, step);
+          if (h[eff.effect]) {
+            h[eff.effect](eff.args, step);
           } else if (_ws && _ws.readyState === 1) {
             // Proxy to server
             const id = _nextId++;
@@ -436,15 +524,13 @@ const marlang = (() => {
           } else {
             reject(new Error('Unhandled effect: ' + eff.effect + ' (no local handler, no WebSocket)'));
           }
-        } catch (e) {
-          reject(e);
-        }
+        } catch (e) { reject(e); }
       }
       step(undefined);
     });
   }
 
-  // Handle incoming WebSocket messages (effect responses from server)
+  // Handle incoming WebSocket messages (effect responses + morphdom updates)
   function handleMessage(data) {
     try {
       const msg = JSON.parse(data);
@@ -458,70 +544,234 @@ const marlang = (() => {
         reject(new Error(msg.message));
       }
     } catch (e) {
-      // Not JSON — might be a morphdom update, ignore
+      // Not JSON — might be a morphdom/nav update from the live framework
     }
   }
 
-  // Connect WebSocket for effect proxying
+  // Connect WebSocket for effect proxying + live updates.
+  // Returns a Promise that resolves when the connection is open.
+  let _connectPromise = null;
   function connect(url) {
-    _ws = new WebSocket(url || ('ws://' + location.host + '/'));
-    _ws.onmessage = (e) => handleMessage(e.data);
-    _ws.onclose = () => setTimeout(() => connect(url), 1000);
-    return _ws;
-  }
-
-  // Mount a generator component into a DOM element
-  // genFn: generator function, args: array of arguments
-  // handlers: local effect handlers, ws: WebSocket (optional)
-  function mount(el, genFn, args, handlers) {
-    const gen = genFn.apply(null, args || []);
-    return run(gen, handlers || {}).then(html => {
-      if (typeof html === 'string') {
-        el.innerHTML = html;
-      }
-      return html;
+    if (_connectPromise) return _connectPromise;
+    _connectPromise = new Promise((resolve) => {
+      _ws = new WebSocket(url || ('ws://' + location.host + '/'));
+      _ws.onopen = () => resolve(_ws);
+      _ws.onmessage = (e) => handleMessage(e.data);
+      _ws.onclose = () => {
+        _connectPromise = null;
+        setTimeout(() => connect(url), 1000);
+      };
     });
+    return _connectPromise;
   }
 
-  // Built-in local effect handlers
+  // Connect WebSocket, then mount a component.
+  function connectAndMount(el, genFn, args) {
+    connect().then(() => mount(el, genFn, args));
+  }
 
-  // Atom: reactive state cell
-  // atom-new(initialValue) → atomRef
-  // atom-read(atomRef) → currentValue
-  // atom-swap(atomRef, fn) → newValue
-  // atom-set(atomRef, value) → newValue
+  // ---- Mounting & reactive re-rendering ----
+  const _mounts = [];
+
+  // Mount a generator component into a DOM element.
+  // Uses a hooks pattern: atom_new creates atoms on first render,
+  // reuses them on subsequent re-renders (like React hooks).
+  function mount(el, genFn, args, handlers) {
+    const m = { el, genFn, args: args || [], hooks: [], hookIndex: 0 };
+
+    function render() {
+      m.hookIndex = 0;
+      const gen = m.genFn.apply(null, m.args);
+      return run(gen, Object.assign({}, handlers || builtinHandlers, {
+        atom_new(effArgs, resume) {
+          const idx = m.hookIndex++;
+          if (idx < m.hooks.length) {
+            // Re-render: reuse existing atom
+            resume(m.hooks[idx]);
+          } else {
+            // First render: create new atom
+            const id = ++atomId;
+            atoms.set(id, { value: effArgs[0] });
+            m.hooks.push(id);
+            resume(id);
+          }
+        }
+      })).then(html => {
+        if (typeof html === 'string') {
+          if (typeof morphdom !== 'undefined') {
+            const wrapper = document.createElement('div');
+            wrapper.innerHTML = html;
+            const newEl = wrapper.firstElementChild;
+            if (newEl && el.firstElementChild) {
+              morphdom(el.firstElementChild, newEl);
+            } else {
+              el.innerHTML = html;
+            }
+          } else {
+            el.innerHTML = html;
+          }
+        }
+        return html;
+      });
+    }
+
+    m.render = render;
+    _mounts.push(m);
+    return render();
+  }
+
+  // Update an atom and re-render all mounted components.
+  // Called from onclick handlers embedded in component HTML.
+  function updateAtom(ref, fn) {
+    const atom = atoms.get(ref);
+    if (atom) atom.value = fn(atom.value);
+    _mounts.forEach(m => m.render());
+  }
+
+  // Run a one-off generator action (e.g. from a button click).
+  // Handles local effects + proxies unknown effects to the server.
+  // Re-renders all mounted components when done.
+  function action(genFn) {
+    const gen = typeof genFn === 'function' ? genFn() : genFn;
+    return run(gen, builtinHandlers).then(() => {
+      _mounts.forEach(m => m.render());
+    }).catch(e => console.error('action error:', e));
+  }
+
+  // Register global handlers (merged into all run() calls)
+  function registerHandlers(h) {
+    Object.assign(_handlers, h);
+  }
+
+  // ---- Built-in local effect handlers ----
+
+  // -- Atom: reactive state cell --
   const atoms = new Map();
   let atomId = 0;
-
   const atomHandlers = {
     atom_new(args, resume) {
       const id = ++atomId;
-      atoms.set(id, args[0]);
+      atoms.set(id, { value: args[0] });
       resume(id);
     },
     atom_read(args, resume) {
-      resume(atoms.get(args[0]));
+      resume(atoms.get(args[0]).value);
     },
     atom_swap(args, resume) {
-      const ref = args[0];
-      const fn = args[1];
-      const oldVal = atoms.get(ref);
-      const newVal = fn(oldVal);
-      atoms.set(ref, newVal);
-      resume(newVal);
+      const ref = args[0], fn = args[1];
+      const atom = atoms.get(ref);
+      atom.value = fn(atom.value);
+      resume(atom.value);
     },
     atom_set(args, resume) {
-      atoms.set(args[0], args[1]);
+      const atom = atoms.get(args[0]);
+      atom.value = args[1];
       resume(args[1]);
+    },
+    parse_int(args, resume) {
+      resume(parseInt(args[0], 10) || 0);
     }
   };
 
-  // Merge user handlers with built-in atom handlers
-  function withAtoms(userHandlers) {
-    return Object.assign({}, atomHandlers, userHandlers || {});
+  // -- Dom: DOM manipulation --
+  const domHandlers = {
+    dom_set_html(args, resume) {
+      const el = document.getElementById(args[0]);
+      if (el) el.innerHTML = args[1];
+      resume(null);
+    },
+    dom_get_value(args, resume) {
+      const el = document.getElementById(args[0]);
+      resume(el ? el.value : '');
+    },
+    dom_set_attr(args, resume) {
+      const el = document.getElementById(args[0]);
+      if (el) el.setAttribute(args[1], args[2]);
+      resume(null);
+    },
+    dom_add_class(args, resume) {
+      const el = document.getElementById(args[0]);
+      if (el) el.classList.add(args[1]);
+      resume(null);
+    },
+    dom_remove_class(args, resume) {
+      const el = document.getElementById(args[0]);
+      if (el) el.classList.remove(args[1]);
+      resume(null);
+    },
+    dom_morph(args, resume) {
+      const target = document.getElementById(args[0]);
+      if (target && typeof morphdom !== 'undefined') {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = args[1];
+        morphdom(target, tmp.firstElementChild || tmp);
+      }
+      resume(null);
+    }
+  };
+
+  // -- Timer: timeouts and intervals --
+  const timerHandlers = {
+    timer_delay(args, resume) {
+      setTimeout(() => resume(null), args[0]);
+    },
+    timer_interval(args, resume) {
+      const id = setInterval(() => args[1](null), args[0]);
+      resume(id);
+    },
+    timer_clear(args, resume) {
+      clearInterval(args[0]);
+      resume(null);
+    }
+  };
+
+  // -- Event: DOM event listeners --
+  const eventHandlers = {
+    event_listen(args, resume) {
+      const el = args[0] === 'document' ? document
+               : args[0] === 'window' ? window
+               : document.getElementById(args[0]);
+      if (el) el.addEventListener(args[1], args[2]);
+      resume(null);
+    },
+    event_unlisten(args, resume) {
+      const el = args[0] === 'document' ? document
+               : args[0] === 'window' ? window
+               : document.getElementById(args[0]);
+      if (el) el.removeEventListener(args[1], args[2]);
+      resume(null);
+    },
+    event_delegate(args, resume) {
+      // args: [parentId, selector, eventType, callback]
+      const parent = args[0] === 'document' ? document
+                   : document.getElementById(args[0]);
+      if (parent) {
+        parent.addEventListener(args[2], (e) => {
+          if (e.target.matches(args[1]) || e.target.closest(args[1])) {
+            args[3](e);
+          }
+        });
+      }
+      resume(null);
+    }
+  };
+
+  // All built-in handlers combined
+  const builtinHandlers = Object.assign({},
+    atomHandlers, domHandlers, timerHandlers, eventHandlers);
+
+  // Merge user handlers with all built-in handlers
+  function withBuiltins(userHandlers) {
+    return Object.assign({}, builtinHandlers, userHandlers || {});
   }
 
-  return { run, connect, mount, handleMessage, withAtoms, atomHandlers };
+  return {
+    run, connect, connectAndMount, mount, updateAtom, action,
+    handleMessage, registerHandlers,
+    withBuiltins, builtinHandlers,
+    atomHandlers, domHandlers, timerHandlers, eventHandlers,
+    trampoline, bounce, Bounce
+  };
 })();
 ")
 
@@ -531,3 +781,170 @@ const marlang = (() => {
 
 (define runtime-script (lambda ()
   (string-append "<script>" client-runtime "</script>")))
+
+; =========================================================================
+; JS fragment registry — collects JS code from define-shared / define-client
+;
+; Uses a channel as a mutable box (single-element buffered channel).
+; =========================================================================
+
+(define __js-store-ch (conc/chan-new 1))
+(conc/chan-send! __js-store-ch (MkPair (list) (list)))
+; Store is a Pair: (shared-fragments, client-fragments)
+
+(define __js-store-get (lambda ()
+  (match (conc/chan-recv __js-store-ch)
+    ((Some v) (begin (conc/chan-send! __js-store-ch v) v))
+    (None (MkPair (list) (list))))))
+
+(define __js-store-update (lambda (f)
+  (match (conc/chan-recv __js-store-ch)
+    ((Some v) (let ((new-val (f v))) (begin (conc/chan-send! __js-store-ch new-val) new-val)))
+    (None nil))))
+
+; register-shared-js : (-> String Unit) — push a shared JS fragment
+(define register-shared-js (lambda (js-code)
+  (__js-store-update (lambda (store)
+    (match store
+      ((MkPair shared client)
+        (MkPair (append shared (list js-code)) client)))))))
+
+; register-client-js : (-> String Unit) — push a client component JS fragment
+(define register-client-js (lambda (js-code)
+  (__js-store-update (lambda (store)
+    (match store
+      ((MkPair shared client)
+        (MkPair shared (append client (list js-code)))))))))
+
+(define __join-newlines (lambda (lst)
+  (match lst
+    (Nil "")
+    ((Cons h Nil) h)
+    ((Cons h rest) (string-append h ";\n" (__join-newlines rest))))))
+
+; shared-js : (-> String) — all shared JS fragments joined with newlines
+(define shared-js (lambda ()
+  (match (__js-store-get)
+    ((MkPair shared _) (__join-newlines shared)))))
+
+; client-js : (-> String) — all client component JS fragments joined with newlines
+(define client-js (lambda ()
+  (match (__js-store-get)
+    ((MkPair _ client) (__join-newlines client)))))
+
+; client-bundle : (-> String) — complete JS bundle: runtime + shared + client code
+(define client-bundle (lambda ()
+  (string-append client-runtime "\n"
+    (string-append (shared-js) "\n"
+      (client-js)))))
+
+; client-bundle-script : (-> String) — client-bundle wrapped in <script> tag
+(define client-bundle-script (lambda ()
+  (string-append "<script>\n" (client-bundle) "\n</script>")))
+
+; =========================================================================
+; Runtime helpers for serializing Marlang values to JS
+; =========================================================================
+
+; Convert a Marlang value to a JS literal string (for embedding in scripts).
+; Uses the polymorphic `show` builtin and transforms the result.
+; show 42     → "42"       → "42"       (number, pass through)
+; show "hi"   → "\"hi\""   → "\"hi\""   (string, already quoted)
+; show #t     → "#t"       → "true"
+; show #f     → "#f"       → "false"
+; show nil    → "nil"      → "null"
+(define val-to-js (lambda (v)
+  (let ((s (show v)))
+    (if (string= s "#t") "true"
+    (if (string= s "#f") "false"
+    (if (string= s "nil") "null"
+      s))))))
+
+; Convert a list of Marlang values to a JS array body string.
+(define args-to-js (lambda (args)
+  (match args
+    (Nil "")
+    ((Cons h Nil) (val-to-js h))
+    ((Cons h rest) (string-append (val-to-js h) "," (args-to-js rest))))))
+
+; Render a mount-point div + a script that mounts a client component.
+; div-id: unique DOM id for the mount div
+; js-name: JS variable name of the component (must match define-client name)
+; args: list of Marlang values to pass as component arguments
+; The script connects the WebSocket (if not already connected) and waits
+; for it to open before mounting, so server-proxied effects work.
+(define __mount-component (lambda (div-id js-name args)
+  (string-append
+    (string-append "<div id=\"" (string-append div-id "\"></div>"))
+    (string-append "<script>marlang.connectAndMount(document.getElementById('"
+      (string-append div-id (string-append "'),"
+        (string-append js-name (string-append ",["
+          (string-append (args-to-js args) "]);</script>")))))))))
+
+; =========================================================================
+; define-shared — define a pure function in both Marlang and JS
+;
+; Usage:
+;   (js/define-shared double (x) (* x 2))
+;
+; Expands to:
+;   (begin
+;     (define double (lambda (x) (* x 2)))
+;     (js/register-shared-js "const double = ((x) => (x * 2))"))
+; =========================================================================
+
+(defmacro define-shared (name params body)
+  (list 'begin
+    (list 'define name (list 'lambda params body))
+    (list 'js/register-shared-js
+      (list 'js/emit-js (list 'define name (list 'lambda params body))))))
+
+; =========================================================================
+; define-client — define a component in both Marlang (server) and JS (client)
+;
+; Usage:
+;   (js/define-client counter (initial)
+;     (let ((count (perform atom-new initial)))
+;       (string-append (show (perform atom-read count)) " clicks")))
+;
+; The body is type-checked by the Marlang type checker using the declared
+; Atom effect and any user-declared server effects. Type errors in the
+; body (wrong arities, undeclared effects, type mismatches) are caught
+; at compile time.
+;
+; At runtime on the server, the function renders a mount-point div + a
+; <script> tag. The effectful body never runs server-side.
+;
+; On the client, the same body is compiled to a JS generator function
+; driven by the client runtime. Atom effects are handled locally;
+; unknown effects (server effects) are proxied over WebSocket.
+; =========================================================================
+
+(defmacro define-client (name params body)
+  (let ((name-str (symbol->string name))
+        (div-id (string-append "__mc_" (symbol->string name))))
+    (list 'begin
+      ; Type-check the effectful body (never executed server-side).
+      ; The let binding ensures the type checker sees the lambda with
+      ; its effects, catching type errors at compile time.
+      (list 'let (list (list '__tc (list 'lambda params body))) 'nil)
+      ; Server-side: mount-point function (no effects, just HTML + script)
+      (list 'define name (list 'lambda params
+        (list 'js/__mount-component div-id name-str (cons 'list params))))
+      ; Client-side: register JS generator component
+      (list 'js/register-client-js
+        (list 'js/emit-js (list 'define name (list 'lambda* params body)))))))
+
+; =========================================================================
+; mount-script — generate JS to mount a client component on a DOM element
+;
+; Usage (in an HTML template):
+;   (js/mount-script "app" "counter" (list 0))
+;   => "<script>marlang.mount(document.getElementById('app'),
+;       counter, [0], marlang.builtinHandlers);</script>"
+; =========================================================================
+
+(define mount-script (lambda (element-id component-name args-js)
+  (string-append "<script>marlang.mount(document.getElementById('"
+    element-id "'), " component-name ", "
+    args-js ", marlang.builtinHandlers);</script>")))

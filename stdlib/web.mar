@@ -17,6 +17,7 @@
 (import "std:ws" as ws)
 (import "std:concurrent" as conc)
 (import "std:actor" as actor)
+(import "std:json" as json)
 
 ; =========================================================================
 ; Response ADT
@@ -815,27 +816,137 @@
                         (send-nav ws-conn post-path (error-page-500 err-msg)))))
                   (None nil)))))))))))
 
+; =========================================================================
+; Effect proxy — server-side dispatcher for client effect requests
+;
+; When a client component performs an effect that isn't handled locally
+; (e.g. DB queries), the client runtime sends a JSON message over WebSocket.
+; The server dispatches it to a registered handler and sends the result back.
+;
+; Protocol:
+;   Client → Server: {"type":"effect","id":1,"effect":"db_query","args":[...]}
+;   Server → Client: {"type":"result","id":1,"value":...}
+;   Server → Client: {"type":"error","id":1,"message":"..."}
+; =========================================================================
+
+; Try to parse a WebSocket message as an effect proxy request.
+; Returns (Some (MkPair id (MkPair effect-name args-json))) or None.
+; Convert a Json value to a Marlang string for handler consumption.
+; Uses accessor functions since pattern matching on imported constructors
+; doesn't work across module boundaries.
+(define __json-to-string (lambda (j)
+  (match (json/json-string j)
+    ((Some s) s)
+    (None (match (json/json-int j)
+      ((Some n) (show n))
+      (None (match (json/json-float j)
+        ((Some f) (show f))
+        (None (match (json/json-bool j)
+          ((Some b) (show b))
+          (None (if (json/json-null? j) ""
+            (json/encode j))))))))))))
+
+(define __json-items-to-strings (lambda (items)
+  (match items
+    (Nil (list))
+    ((Cons h rest) (Cons (__json-to-string h) (__json-items-to-strings rest))))))
+
+; Convert a Json array to a list of strings.
+; Takes the Json value (should be a JsonArray) and extracts items.
+(define __json-array-to-strings (lambda (arr)
+  (match (json/json-array-items arr)
+    ((Some items) (__json-items-to-strings items))
+    (None (list)))))
+
+; Parse a WebSocket message as an effect proxy request.
+; Returns (Some (MkPair id (MkPair effect-name (List String)))) or None.
+; Args are converted from JSON to strings so handlers don't need Json types.
+; Uses json accessor functions instead of pattern matching on imported
+; constructors (which doesn't work across module boundaries).
+(define parse-effect-request (lambda (text)
+  (match (json/decode text)
+    ((Ok j)
+      (let ((type-opt (match (json/json-get "type" j)
+                        ((Some v) (json/json-string v))
+                        (None None)))
+            (id-opt (match (json/json-get "id" j)
+                      ((Some v) (json/json-int v))
+                      (None None)))
+            (effect-opt (match (json/json-get "effect" j)
+                          ((Some v) (json/json-string v))
+                          (None None)))
+            (args-opt (json/json-get "args" j)))
+        (match (MkPair type-opt (MkPair id-opt effect-opt))
+          ((MkPair (Some "effect") (MkPair (Some id) (Some effect-name)))
+            (let ((args (match args-opt
+                          ((Some arr) (__json-array-to-strings arr))
+                          (None (list)))))
+              (Some (MkPair id (MkPair effect-name args)))))
+          (_ None))))
+    (_ None))))
+
+; Send an effect result back to the client.
+; The value is always a String (handler return type), sent as a JSON string.
+(define send-effect-result (lambda (ws-conn id value)
+  (ws/send ws-conn
+    (json/encode (json/JsonObject (list
+      (MkPair "type" (json/JsonString "result"))
+      (MkPair "id" (json/JsonInt id))
+      (MkPair "value" (json/JsonString value))))))))
+
+; Send an effect error back to the client.
+(define send-effect-error (lambda (ws-conn id msg)
+  (ws/send ws-conn
+    (json/encode (json/JsonObject (list
+      (MkPair "type" (json/JsonString "error"))
+      (MkPair "id" (json/JsonInt id))
+      (MkPair "message" (json/JsonString msg))))))))
+
+; Dispatch a proxied effect request using a handler function.
+; handler-fn: (-> String (List String) String)
+;   Takes effect name and string args, returns string result.
+;   Use match to dispatch by effect name.
+(define dispatch-effect (lambda (ws-conn id effect-name args handler-fn)
+  (handle
+    (begin (send-effect-result ws-conn id (handler-fn effect-name args)) nil)
+    ((throw msg k) ->
+      (begin (send-effect-error ws-conn id msg) nil)))))
+
+; Handle a WebSocket text message that might be an effect proxy request.
+(define try-handle-effect (lambda (ws-conn ws-text handler-fn)
+  (match (parse-effect-request ws-text)
+    ((Some (MkPair id (MkPair effect-name args)))
+      (begin
+        (dispatch-effect ws-conn id effect-name args handler-fn)
+        #t))
+    (None #f))))
+
 ; The ConnectionActor main loop.
 ; POST/navigation handlers are spawned in separate fibers so their
 ; cell operations (actor/receive) don't conflict with ConnUpdate messages.
-(define conn-loop (lambda (ws-conn routes)
+; handler-fn: (-> String (List String) String) dispatches proxied effects.
+(define conn-loop (lambda (ws-conn routes handler-fn)
   (let ((msg (actor/receive)))
     (match msg
       ((ConnUpdate target-id frag-html)
         (begin
           (ws/send ws-conn (el "div" (list (MkPair "id" target-id)) frag-html))
-          (conn-loop ws-conn routes)))
+          (conn-loop ws-conn routes handler-fn)))
       ((ConnWsText ws-text)
         (begin
           (conc/spawn (lambda ()
             (handle
-              (if (string-starts-with ws-text "POST ")
-                (handle-ws-post ws-conn (string-substring ws-text 5 (string-length ws-text)) routes)
-                (if (string-starts-with ws-text "/")
-                  (handle-ws-nav ws-conn ws-text routes)
-                  nil))
-              ((throw msg k) -> nil))))
-          (conn-loop ws-conn routes)))
+              (if (string-starts-with ws-text "{")
+                ; Try effect proxy first
+                (begin (try-handle-effect ws-conn ws-text handler-fn) nil)
+                (if (string-starts-with ws-text "POST ")
+                  (handle-ws-post ws-conn (string-substring ws-text 5 (string-length ws-text)) routes)
+                  (if (string-starts-with ws-text "/")
+                    (handle-ws-nav ws-conn ws-text routes)
+                    nil)))
+              ((throw msg k) ->
+                (io/println (string-append "WebSocket handler error: " msg))))))
+          (conn-loop ws-conn routes handler-fn)))
       ((ConnWsClosed)
         nil)))))
 
@@ -853,8 +964,8 @@
 
 ; --- Per-client lifecycle ---
 
-(define handle-live-client (lambda (ws-conn routes)
-  (let ((conn-pid (conc/spawn (lambda () (conn-loop ws-conn routes)))))
+(define handle-live-client (lambda (ws-conn routes handler-fn)
+  (let ((conn-pid (conc/spawn (lambda () (conn-loop ws-conn routes handler-fn)))))
     (begin
       (actor/send __router (RouterConnect conn-pid))
       (ws-reader ws-conn conn-pid)
@@ -863,7 +974,7 @@
 
 ; --- Server with live update support ---
 
-(define accept-loop-live (lambda (server routes)
+(define accept-loop-live (lambda (server routes handler-fn)
   (match (http/accept server)
     (None nil)
     ((Some (HttpRequest method path headers body conn))
@@ -873,7 +984,7 @@
             (match (ws/upgrade conn)
               ((Ok ws-conn)
                 (begin
-                  (conc/spawn (lambda () (handle-live-client ws-conn routes)))
+                  (conc/spawn (lambda () (handle-live-client ws-conn routes handler-fn)))
                   nil))
               ((Err msg) nil))
             (begin
@@ -881,14 +992,32 @@
               (dispatch method path headers body conn routes)))
           ((throw msg k) ->
             (io/println (string-append "Unhandled error: " msg))))
-        (accept-loop-live server routes))))))
+        (accept-loop-live server routes handler-fn))))))
 
-; run-live! : start server with WebSocket live updates and navigation.
+; run-live! : start server with WebSocket live updates, navigation, and
+; optional effect proxy handlers for client components.
+; handler-fn: (-> String (List String) String)
+;   Dispatches proxied effects from client components.
+;   Takes effect name and string args, returns string result.
+;   Example: (lambda (name args) (match name ("server_time" "just now")))
+; Backwards compatible: pass just (port routes) for no effect proxy.
+; Default handler that rejects all effects (no client components).
+(define __no-effects (lambda (name args)
+  (perform throw (string-append "No effect handler for: " name))))
+
 (define run-live! (lambda (port routes)
   (let ((server (serve! port)))
     (begin
       (io/println (string-append "Listening on http://127.0.0.1:" (show port)))
-      (accept-loop-live server routes)))))
+      (accept-loop-live server routes __no-effects)))))
+
+; run-live-with-effects! : start server with effect proxy dispatch.
+; handler-fn: (-> String (List String) String) — match on effect name.
+(define run-live-with-effects! (lambda (port routes handler-fn)
+  (let ((server (serve! port)))
+    (begin
+      (io/println (string-append "Listening on http://127.0.0.1:" (show port)))
+      (accept-loop-live server routes handler-fn)))))
 
 ; =========================================================================
 ; DB-backed live deps — live sources driven by PostgreSQL LISTEN/NOTIFY
