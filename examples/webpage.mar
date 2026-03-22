@@ -1,9 +1,21 @@
 ; =========================================================================
-; Live Dashboard — PostgreSQL-backed with real-time LISTEN/NOTIFY
+; Live Dashboard — PostgreSQL + Client Components
 ;
-; Same counter + message board as before, but now backed by PostgreSQL.
-; State persists across server restarts. LISTEN/NOTIFY drives live
-; updates — when the DB changes, all connected clients see it instantly.
+; Demonstrates all framework phases working together:
+;   Phase 2: WebSocket + morphdom live updates (message board)
+;   Phase 3: PostgreSQL via LISTEN/NOTIFY (db-live sources)
+;   Phase 4: Client components with effect proxying (counter widget)
+;            - define-client with typed effect rows
+;            - define-shared for dual-emit functions
+;            - Prefetch for zero-latency first render
+;            - HMAC-signed effect allowlists
+;
+; The counter is a client component: +/- are instant (Atom effects),
+; save/load go through effect proxying to the server (Server effects).
+; The type checker enforces that only js/Atom and Server effects are used.
+;
+; The message board stays server-rendered with db-live: all clients see
+; new messages pushed instantly via LISTEN/NOTIFY.
 ;
 ; Setup:
 ;   createdb dashboard
@@ -27,12 +39,12 @@
 ;
 ; Run:
 ;   cargo run -p marlang-cli --release -- run examples/webpage.mar
-;
-; Then open http://127.0.0.1:3000 in two browser tabs.
+;   Open http://127.0.0.1:3000 in two browser tabs.
 ; =========================================================================
 
 (import "std:web" as w)
 (import "std:io" as io)
+(import "std:js" as js)
 (import "std:pg" as pg)
 
 ; =========================================================================
@@ -45,19 +57,94 @@
 (define db-user "postgres")
 (define db-pass "postgres")
 
-; Connection pool — up to 5 connections for queries
 (define pool (pg/pool-new db-host db-port db-name db-user db-pass 5))
-
-; LISTEN/NOTIFY listener — dedicated connection for async notifications
 (define listener (pg/listener-new db-host db-port db-name db-user db-pass))
 
 ; =========================================================================
-; Render helpers
+; Server effects — proxied from client components over WebSocket
+;
+; These declare what client components can ask the server to do.
+; The type checker verifies arities and types at compile time.
+; At runtime, atom effects run locally in the browser; server effects
+; are proxied over WebSocket with HMAC-signed allowlists.
 ; =========================================================================
 
-(define render-counter (lambda (n) (show n)))
+(effect Server
+  (load-time   (-> Unit String))
+  (save-note   (-> String String)))
 
-(define render-doubled (lambda (n) (show (* n 2))))
+; =========================================================================
+; Shared functions — compiled to both Marlang and JS
+;
+; define-shared emits the function as both a Marlang define and a JS
+; const. On the server it runs as Marlang; on the client it runs as
+; native JS. No round-trip for pure computation.
+; =========================================================================
+
+(js/define-shared pluralize (n word)
+  (if (= n 1) (string-append "1 " word)
+    (string-append (show n) (string-append " " (string-append word "s")))))
+
+; str-cat: join a list of strings (needs different impls per platform)
+(define str-cat (lambda (parts)
+  (match parts
+    (Nil "")
+    ((Cons h Nil) h)
+    ((Cons h rest) (string-append h (str-cat rest))))))
+(js/register-shared-js "const str_cat = (parts) => parts.join('')")
+
+; parse-int: string → int
+(define parse-int (lambda (s) (string->int s)))
+(js/register-shared-js "const parse_int = (s) => parseInt(s, 10) || 0")
+
+; =========================================================================
+; Client component — counter with instant UI + server persistence
+;
+; The (js/Atom Server) annotation creates a closed effect row:
+;   - js/Atom: atom-new, atom-read, atom-set — handled locally in browser
+;   - Server: load-count, save-count — proxied to server over WebSocket
+;
+; If the body performs any other effect, the type checker rejects it.
+; The extracted server effect names are HMAC-signed and embedded in the
+; page; the server validates them before dispatching.
+; =========================================================================
+
+; Client component — purely local counter + server effect demos.
+;
+; +/- use Atom effects: instant, no round-trip.
+; "Server Time" and "Save Note" use Server effects: proxied over WebSocket.
+; The type checker enforces (js/Atom Server) — no other effects allowed.
+(js/define-client counter-widget (initial) (js/Atom Server)
+  (let ((ref (perform atom-new initial))
+        (msg-ref (perform atom-new "Click + or - (instant), or try server effects"))
+        (count (perform atom-read ref))
+        (msg (perform atom-read msg-ref)))
+    (str-cat (list
+      "<div class=\"counter-display\">"
+      (pluralize count "click")
+      "</div>"
+      "<div class=\"counter-buttons\">"
+      "<button onclick=\"marlang.updateAtom(" (show ref) ",function(n){return n+1})\">+</button>"
+      "<button onclick=\"marlang.updateAtom(" (show ref) ",function(n){return n-1})\">-</button>"
+      "<button onclick=\"marlang.action(function*(){"
+        "var t=yield{effect:'load_time',args:[]};"
+        "marlang.updateAtom(" (show msg-ref) ",function(){return t})"
+      "})\">Server Time</button>"
+      "<button onclick=\"marlang.action(function*(){"
+        "var c=yield{effect:'atom_read',args:[" (show ref) "]};"
+        "var r=yield{effect:'save_note',args:['count='+c]};"
+        "marlang.updateAtom(" (show msg-ref) ",function(){return r})"
+      "})\">Save Note</button>"
+      "</div>"
+      "<div class=\"status-msg\">" msg "</div>"))))
+
+; =========================================================================
+; DB-backed live source — message board (server-rendered, LISTEN/NOTIFY)
+;
+; This stays Phase 2: the server re-renders on DB changes and pushes
+; HTML fragments to all connected clients via WebSocket + morphdom.
+; No client JS needed — the server does all the work.
+; =========================================================================
 
 (define __col-or (lambda (row col-name fallback)
   (match (pg/col row col-name)
@@ -74,33 +161,14 @@
           " "
           (w/span (list) (w/text (__col-or row "body" "")))))))))))
 
-; =========================================================================
-; DB-backed live sources — auto-refresh on LISTEN/NOTIFY
-; =========================================================================
-
-; Counter: re-queries on 'counter_changed' notifications
-(define counter (w/db-live
-  (lambda (pid) (pg/listener-subscribe listener "counter_changed" pid))
-  (lambda ()
-    (let ((rows (pg/pool-query pool "SELECT value FROM counter WHERE id = 1" (list))))
-      (match rows
-        ((Cons row _) (pg/as-int row "value"))
-        (Nil 0))))
-  render-counter))
-
-; Counter doubled: derived from counter
-(define doubled (w/live-map counter
-  (lambda (n) (* n 2))
-  render-doubled))
-
-; Messages: re-queries on 'messages_changed' notifications
 (define messages (w/db-live
   (lambda (pid) (pg/listener-subscribe listener "messages_changed" pid))
-  (lambda () (pg/pool-query pool "SELECT author, body FROM messages ORDER BY created_at DESC LIMIT 50" (list)))
+  (lambda () (pg/pool-query pool
+    "SELECT author, body FROM messages ORDER BY created_at DESC LIMIT 50" (list)))
   render-messages))
 
 ; =========================================================================
-; Layout
+; Layout & CSS
 ; =========================================================================
 
 (define css "
@@ -109,10 +177,11 @@
   h1 { margin-bottom: 1.5rem; }
   h2 { margin-bottom: 0.75rem; font-size: 1.1rem; text-transform: uppercase; letter-spacing: 0.05em; color: #666; }
   .card { background: #f8f8f8; border-radius: 8px; padding: 1.25rem; margin-bottom: 1.5rem; }
-  .counter-display { font-size: 3rem; font-weight: bold; text-align: center; padding: 1rem 0; font-variant-numeric: tabular-nums; }
+  .counter-display { font-size: 2.5rem; font-weight: bold; text-align: center; padding: 1rem 0; font-variant-numeric: tabular-nums; color: #333; }
   .counter-buttons { display: flex; gap: 0.5rem; justify-content: center; }
   .counter-buttons button { font-size: 1.1rem; padding: 0.5rem 1.5rem; border: 1px solid #ccc; border-radius: 6px; background: white; cursor: pointer; }
   .counter-buttons button:hover { background: #eee; }
+  .status-msg { text-align: center; color: #666; font-size: 0.85rem; margin-top: 0.5rem; min-height: 1.25rem; }
   .msg-form { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
   .msg-form input { flex: 1; padding: 0.5rem; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; }
   .msg-form button { padding: 0.5rem 1rem; border: none; border-radius: 6px; background: #333; color: white; cursor: pointer; font-size: 1rem; }
@@ -121,11 +190,37 @@
   .msg:last-child { border-bottom: none; }
   .msg-author { font-weight: 600; }
   .empty { color: #999; font-style: italic; }
-  .db-badge { display: inline-block; background: #e8f5e9; color: #2e7d32; font-size: 0.7rem; padding: 0.15rem 0.4rem; border-radius: 3px; margin-left: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em; }
-  .status { font-size: 0.75rem; text-align: right; margin-top: 2rem; }
+  .badge { display: inline-block; font-size: 0.65rem; padding: 0.15rem 0.4rem; border-radius: 3px; margin-left: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em; }
+  .badge-db { background: #e8f5e9; color: #2e7d32; }
+  .badge-client { background: #e3f2fd; color: #1565c0; }
+  .badge-server { background: #fce4ec; color: #c62828; }
+  .status { font-size: 0.75rem; text-align: right; margin-top: 2rem; color: #999; }
   .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; background: #ccc; }
   .status .dot.live { background: #4a4; }
+  .tag-row { display: flex; gap: 0.4rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
 ")
+
+; Load the current counter value from DB
+(define load-counter-value (lambda ()
+  (let ((rows (pg/pool-query pool "SELECT value FROM counter WHERE id = 1" (list))))
+    (match rows
+      ((Cons row _) (pg/as-int row "value"))
+      (Nil 0)))))
+
+; =========================================================================
+; DB-backed live counter — server-rendered, pushed via LISTEN/NOTIFY
+;
+; This is the Phase 2 approach: the server re-renders on DB changes and
+; pushes HTML fragments to all clients. No client JS needed.
+; Both approaches (live + client component) coexist on the same page.
+; =========================================================================
+
+(define render-counter (lambda (n) (show n)))
+
+(define counter-live (w/db-live
+  (lambda (pid) (pg/listener-subscribe listener "counter_changed" pid))
+  (lambda () (load-counter-value))
+  render-counter))
 
 (define layout (lambda (title-text body-html)
   (w/html (list (MkPair "lang" "en"))
@@ -135,7 +230,11 @@
         (w/meta (list (MkPair "charset" "utf-8")))
         (w/meta (list (MkPair "name" "viewport") (MkPair "content" "width=device-width,initial-scale=1")))
         (w/style css)
-        (w/live-scripts)))
+        ; morphdom + WebSocket live-update client (for message board)
+        (w/live-scripts)
+        ; Client component runtime + shared/client JS bundle
+        (js/client-bundle-script)
+))
       (w/body (list)
         (string-append
           (w/nav (list (MkPair "style" "margin-bottom:1.5rem;display:flex;gap:1rem"))
@@ -152,28 +251,39 @@
   (w/ok
     (layout "Live Dashboard"
       (string-append
-        (w/h1 (list)
-          (string-append "Live Dashboard"
-            (w/span (list (MkPair "class" "db-badge")) "PostgreSQL")))
+        (w/h1 (list) "Live Dashboard")
 
-        ; --- Counter section ---
+        ; --- Live counter: server-rendered, all clients stay in sync ---
         (w/div (list (MkPair "class" "card"))
           (string-append
-            (w/h2 (list) "Shared Counter")
-            (w/live-el "div" counter (list (MkPair "class" "counter-display")))
-            (w/p (list (MkPair "style" "text-align:center;color:#666;font-size:0.9rem"))
-              (string-append "doubled: "
-                (w/live-el "span" doubled (list))))
+            (w/h2 (list)
+              (string-append "Shared Counter"
+                (w/span (list (MkPair "class" "badge badge-db")) "LISTEN/NOTIFY")))
+            (w/live-el "div" counter-live (list (MkPair "class" "counter-display")))
             (w/div (list (MkPair "class" "counter-buttons"))
               (string-append
                 (w/button (list (MkPair "onclick" "post('/api/decrement')")) "-")
                 (w/button (list (MkPair "onclick" "post('/api/increment')")) "+")
                 (w/button (list (MkPair "onclick" "post('/api/reset')")) "Reset")))))
 
-        ; --- Messages section ---
+        ; --- Client counter: effect-proxied, instant UI ---
         (w/div (list (MkPair "class" "card"))
           (string-append
-            (w/h2 (list) "Message Board")
+            (w/h2 (list)
+              (string-append "Client Counter"
+                (w/span (list (MkPair "class" "badge badge-client")) "client component")))
+            (w/div (list (MkPair "class" "tag-row"))
+              (string-append
+                (w/span (list (MkPair "class" "badge badge-client")) "Atom: instant +/-")
+                (w/span (list (MkPair "class" "badge badge-server")) "Server: time/note")))
+            (counter-widget 0)))
+
+        ; --- Messages: server-rendered live with db-live ---
+        (w/div (list (MkPair "class" "card"))
+          (string-append
+            (w/h2 (list)
+              (string-append "Message Board"
+                (w/span (list (MkPair "class" "badge badge-db")) "LISTEN/NOTIFY")))
             (w/form (list (MkPair "class" "msg-form")
                           (MkPair "onsubmit" "return submitForm(this,'/api/message')"))
               (string-append
@@ -188,11 +298,11 @@
                 (w/button (list (MkPair "type" "submit")) "Send")))
             (w/live-el "div" messages (list))))
 
-        ; Status indicator
+        ; Status
         (w/p (list (MkPair "class" "status"))
           (string-append
             (w/span (list (MkPair "class" "dot ws-dot")) "")
-            " Live via WebSocket + LISTEN/NOTIFY")))))))
+            " WebSocket &mdash; live updates + effect proxying")))))))
 
 (define handle-about (lambda ()
   (w/ok
@@ -200,11 +310,26 @@
       (w/div (list (MkPair "class" "card"))
         (string-append
           (w/h1 (list) "About")
-          (w/p (list) "Live Dashboard &mdash; a real-time collaborative app powered by Marlang + PostgreSQL.")
-          (w/p (list (MkPair "style" "margin-top:0.75rem;color:#666"))
-            "State is persisted in PostgreSQL. LISTEN/NOTIFY triggers push live updates to all connected clients via WebSocket. Navigation happens over WebSocket &mdash; no full page reloads.")))))))
+          (w/p (list) "Live Dashboard &mdash; Marlang fullstack framework demo.")
+          (w/p (list (MkPair "style" "margin-top:0.75rem"))
+            (string-append
+              (w/strong "Shared Counter") " is server-rendered (Phase 2). "
+              "+/- POST to the server, DB updates trigger LISTEN/NOTIFY, "
+              "all clients see the new value pushed via WebSocket + morphdom."))
+          (w/p (list (MkPair "style" "margin-top:0.75rem"))
+            (string-append
+              (w/strong "Client Counter") " is a client component (Phase 4). "
+              "+/- use Atom effects (instant, no server round-trip). "
+              "Server Time and Save Note use Server effects (proxied over WebSocket). "
+              "The type checker enforces a closed effect row {js/Atom, Server} "
+              "&mdash; only declared effects are allowed."))
+          (w/p (list (MkPair "style" "margin-top:0.75rem"))
+            (string-append
+              (w/strong "Message Board") " is server-rendered with live updates. "
+              "PostgreSQL LISTEN/NOTIFY triggers push new messages to all "
+              "connected clients via WebSocket + morphdom. No client JS needed."))))))))
 
-; --- API endpoints — write to DB, NOTIFY triggers live refresh ---
+; --- API: counter + message board ---
 
 (define handle-increment (lambda ()
   (let ((_ (pg/pool-execute pool "UPDATE counter SET value = value + 1 WHERE id = 1" (list))))
@@ -227,6 +352,27 @@
       (w/ok "")))))
 
 ; =========================================================================
+; Effect proxy dispatch — handles server effects from client components
+;
+; When the counter widget performs load-count or save-count, the client
+; runtime sends a JSON message over WebSocket. This function dispatches
+; them to the actual DB operations.
+; =========================================================================
+
+(define handle-effects (lambda (name args)
+  (match name
+    ("load_time"
+      (begin
+        (io/println "Effect proxy: load_time")
+        "Server says: just now"))
+    ("save_note"
+      (let ((note (match args ((Cons s _) s) (_ ""))))
+        (begin
+          (io/println (string-append "Effect proxy: save_note " note))
+          (string-append "Saved note: " note))))
+    (_ (perform throw (string-append "Unknown effect: " name))))))
+
+; =========================================================================
 ; Routes & Start
 ; =========================================================================
 
@@ -239,4 +385,4 @@
   (w/POST "/api/message"   handle-post-message)))
 
 (io/println "Connecting to PostgreSQL...")
-(w/run-live! 3000 routes)
+(w/run-live-with-effects! 3000 routes handle-effects)

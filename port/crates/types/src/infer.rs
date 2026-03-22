@@ -568,7 +568,14 @@ fn is_effect_row_expr(expr: &Expr, interner: &Interner) -> bool {
 /// `(__effect_row IO Exception)` → Closed(["IO", "Exception"])
 /// `(__effect_row IO __row_var:e)` → Open { effects: ["IO"], row_var: "e" }
 /// `(__effect_row __row_var:e)` → Open { effects: [], row_var: "e" }
-fn parse_effect_row_expr(expr: &Expr, interner: &Interner) -> Result<EffectRow, TypeError> {
+///
+/// Effect names are used as-is from the annotation. For imported effects,
+/// use the qualified form (e.g. `{js/Atom}` not `{Atom}`).
+fn parse_effect_row_expr(
+    expr: &Expr,
+    interner: &Interner,
+    _env: &TypeEnv,
+) -> Result<EffectRow, TypeError> {
     let elements = ast::list_to_array(expr);
     // elements[0] is "__effect_row"
     let mut effects = Vec::new();
@@ -656,7 +663,7 @@ pub fn parse_type_expr(expr: &Expr, env: &TypeEnv, interner: &Interner) -> Resul
                                 span: Some(expr.span()),
                             });
                         }
-                        effect_row = Some(parse_effect_row_expr(e, interner)?);
+                        effect_row = Some(parse_effect_row_expr(e, interner, env)?);
                         continue;
                     }
                     // Check for (... T) rest type syntax
@@ -2054,12 +2061,31 @@ fn infer_perform(
     )?;
 
     let op_name_str = op_name.to_string();
-    let (effect, op) = if let Some((effect_name, op_name_only)) = op_name_str.rsplit_once('/') {
-        let effect_decl = lookup_effect(env, effect_name).ok_or(TypeError::UndefinedVariable {
-            name: format!("effect '{effect_name}' (not found)"),
-            span: Some(elements[1].span()),
-        })?;
-        let op = lookup_effect_op_in_effect(env, effect_name, op_name_only).ok_or(
+    let (effect, op) = if let Some((prefix, op_name_only)) = op_name_str.rsplit_once('/') {
+        // Qualified perform: io/println, js/atom-new, etc.
+        // First try the prefix as a direct effect name (e.g. MyEffect/op).
+        // If not found, search for effects whose key starts with "prefix/"
+        // (e.g. prefix "io" matches effect key "io/IO").
+        let (effect_name, effect_decl) = if let Some(decl) = lookup_effect(env, prefix) {
+            (prefix.to_string(), decl)
+        } else {
+            // Search for qualified effect: prefix "io" → effect key "io/IO"
+            let prefix_slash = format!("{}/", prefix);
+            let mut found = None;
+            for (key, eff) in &env.all_effects() {
+                if key.starts_with(&prefix_slash)
+                    && lookup_effect_op_in_effect(env, key, op_name_only).is_some()
+                {
+                    found = Some((key.clone(), eff.clone()));
+                    break;
+                }
+            }
+            found.ok_or(TypeError::UndefinedVariable {
+                name: format!("effect '{prefix}' (not found)"),
+                span: Some(elements[1].span()),
+            })?
+        };
+        let op = lookup_effect_op_in_effect(env, &effect_name, op_name_only).ok_or(
             TypeError::UndefinedVariable {
                 name: format!("effect operation '{op_name}' in effect '{effect_name}'"),
                 span: Some(elements[1].span()),
@@ -2145,8 +2171,19 @@ fn resolve_effect_op(
     op_name: &str,
     span: Span,
 ) -> Result<(String, String), TypeError> {
-    if let Some((e, o)) = op_name.rsplit_once('/') {
-        return Ok((e.to_string(), o.to_string()));
+    if let Some((prefix, o)) = op_name.rsplit_once('/') {
+        // Try direct effect name first
+        if lookup_effect(env, prefix).is_some() {
+            return Ok((prefix.to_string(), o.to_string()));
+        }
+        // Search for qualified effect: prefix "io" → effect key "io/IO"
+        let prefix_slash = format!("{}/", prefix);
+        for key in env.all_effects().keys() {
+            if key.starts_with(&prefix_slash) && lookup_effect_op_in_effect(env, key, o).is_some() {
+                return Ok((key.clone(), o.to_string()));
+            }
+        }
+        return Ok((prefix.to_string(), o.to_string()));
     }
     let possible_effects = find_effects_with_op(env, op_name);
     if possible_effects.len() > 1 {

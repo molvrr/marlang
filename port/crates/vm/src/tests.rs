@@ -5698,3 +5698,325 @@ fn http_server_client_roundtrip() {
         lines
     );
 }
+
+// ===== Effect Allowlist Tests =====
+// These tests use the CLI with timeout because importing std:web spawns
+// a background router actor that prevents clean in-process shutdown.
+
+/// Run a .mar source string via the pre-built CLI binary, return (stdout, stderr, success).
+/// Requires `cargo build --release -p marlang-cli` to have been run first.
+/// Uses a unique temp file per call to avoid parallel test conflicts.
+fn run_cli(source: &str, subcommand: &str) -> (String, String, bool) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let binary = workspace.join("port").join("target/release/mar");
+    if !binary.exists() {
+        panic!(
+            "Pre-built CLI not found at {:?}. Run `cargo build --release -p marlang-cli` first.",
+            binary
+        );
+    }
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tid = std::thread::current().id();
+    let filename = format!("_cli_test_{:?}_{}.mar", tid, id);
+    let test_file = workspace.join("examples").join(&filename);
+    std::fs::write(&test_file, source).expect("write test file");
+    let output = std::process::Command::new("timeout")
+        .arg("5")
+        .arg(&binary)
+        .arg(subcommand)
+        .arg(&test_file)
+        .output()
+        .expect("run CLI");
+    let _ = std::fs::remove_file(&test_file);
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.success(),
+    )
+}
+
+#[test]
+fn define_client_auto_extracts_server_effects() {
+    let (stdout, stderr, _) = run_cli(
+        r#"
+(import "std:js" as js)
+(import "std:web" as w)
+(import "std:io" as io)
+(effect Server
+  (load-data  (-> String String))
+  (save-data  (-> String String String)))
+(js/define-client my-widget (x)
+  (let ((d (perform load-data "key"))
+        (s (perform save-data "k" "v")))
+    (string-append d s)))
+(io/println (my-widget 0))
+"#,
+        "run",
+    );
+    let combined = format!("{}{}", stdout, stderr);
+    assert!(
+        combined.contains("connectAndMountGuarded"),
+        "expected guarded mount for server effects, got: {}",
+        combined
+    );
+    assert!(
+        combined.contains("load_data") && combined.contains("save_data"),
+        "expected extracted effects in allowlist, got: {}",
+        combined
+    );
+}
+
+#[test]
+fn define_client_pure_uses_unguarded_mount() {
+    let (stdout, stderr, _) = run_cli(
+        r#"
+(import "std:js" as js)
+(import "std:web" as w)
+(import "std:io" as io)
+(js/define-client pure-widget (x)
+  (let ((ref (perform atom-new x)))
+    (show (perform atom-read ref))))
+(io/println (pure-widget 0))
+"#,
+        "run",
+    );
+    let combined = format!("{}{}", stdout, stderr);
+    assert!(
+        combined.contains("connectAndMount("),
+        "expected unguarded mount for pure client, got: {}",
+        combined
+    );
+    assert!(
+        !combined.contains("connectAndMountGuarded"),
+        "should NOT use guarded mount for pure client, got: {}",
+        combined
+    );
+}
+
+#[test]
+fn define_client_guarded_rejects_undeclared_effect() {
+    let (_stdout, stderr, success) = run_cli(
+        r#"
+(import "std:js" as js)
+(import "std:web" as w)
+(effect Server
+  (load-data  (-> String String))
+  (secret-op  (-> Unit String)))
+(js/define-client-guarded bad-widget (x) (load-data)
+  (let ((d (perform load-data "key"))
+        (s (perform secret-op)))
+    (string-append d s)))
+"#,
+        "typecheck",
+    );
+    assert!(!success, "should fail at compile time");
+    assert!(
+        stderr.contains("secret_op") && stderr.contains("not in the allowlist"),
+        "expected allowlist error mentioning secret_op, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn define_client_guarded_accepts_matching_allowlist() {
+    let (stdout, stderr, _) = run_cli(
+        r#"
+(import "std:js" as js)
+(import "std:web" as w)
+(import "std:io" as io)
+(effect Server
+  (load-data  (-> String String))
+  (secret-op  (-> Unit String)))
+(js/define-client-guarded good-widget (x) (load-data secret-op)
+  (let ((d (perform load-data "key"))
+        (s (perform secret-op)))
+    (string-append d s)))
+(io/println (good-widget 0))
+"#,
+        "run",
+    );
+    let combined = format!("{}{}", stdout, stderr);
+    assert!(
+        combined.contains("connectAndMountGuarded"),
+        "expected guarded mount, got: {}",
+        combined
+    );
+    assert!(
+        combined.contains("load_data") && combined.contains("secret_op"),
+        "expected both effects in allowlist, got: {}",
+        combined
+    );
+}
+
+#[test]
+fn prefetch_generates_script_tag() {
+    let (stdout, stderr, success) = run_cli(
+        r#"
+(import "std:js" as js)
+(import "std:io" as io)
+(io/println (js/prefetch (list
+  (MkPair "load_user" "alice")
+  (MkPair "load_posts" "3 posts"))))
+"#,
+        "run",
+    );
+    assert!(success, "prefetch should succeed, stderr: {}", stderr);
+    assert!(
+        stdout.contains("window.__prefetch"),
+        "expected __prefetch, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("load_user") && stdout.contains("alice"),
+        "expected prefetch data, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn sign_verify_allowlist_roundtrip() {
+    let (stdout, stderr, _) = run_cli(
+        r#"
+(import "std:web" as w)
+(import "std:io" as io)
+(let ((token (w/sign-allowlist (list "db_query" "db_execute")))
+      (valid (w/verify-allowlist (list "db_query" "db_execute") token))
+      (invalid (w/verify-allowlist (list "db_query" "SNEAKY") token)))
+  (begin
+    (io/println (show valid))
+    (io/println (show invalid))))
+"#,
+        "run",
+    );
+    let combined = format!("{}{}", stdout, stderr);
+    let lines: Vec<&str> = combined.trim().lines().collect();
+    assert!(
+        lines.contains(&"#t"),
+        "valid token should verify, got: {}",
+        combined
+    );
+    assert!(
+        lines.contains(&"#f"),
+        "tampered allowlist should fail, got: {}",
+        combined
+    );
+}
+
+#[test]
+fn hygiene_immune_types_in_macros() {
+    // The macro synthesizes a type annotation (-> Int Int) using immune type names.
+    // The function name comes from the call site so it doesn't get a hygiene mark.
+    let (stdout, stderr, success) = run_cli(
+        r#"
+(import "std:io" as io)
+(defmacro make-typed (name)
+  (list 'define (list name ': (list '-> 'Int 'Int))
+    (list 'lambda (list 'x) (list '+ 'x 1))))
+(make-typed add1)
+(io/println (show (add1 41)))
+"#,
+        "run",
+    );
+    assert!(
+        success,
+        "macro with type annotation should work, stderr: {}",
+        stderr
+    );
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn hygiene_immune_adt_constructors_in_macros() {
+    let (stdout, stderr, success) = run_cli(
+        r#"
+(import "std:io" as io)
+(defmacro wrap-some (val)
+  (list 'Some val))
+(defmacro match-option (expr)
+  (list 'match expr
+    (list (list 'Some 'v) 'v)
+    (list 'None 0)))
+(io/println (show (match-option (wrap-some 42))))
+"#,
+        "run",
+    );
+    assert!(
+        success,
+        "macro with ADT constructors should work, stderr: {}",
+        stderr
+    );
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn define_client_typed_effect_row_passes() {
+    let (stdout, stderr, _) = run_cli(
+        r#"
+(import "std:web" as w)
+(import "std:js" as js)
+(import "std:io" as io)
+(effect Server (load-data (-> String String)))
+(js/define-client widget (x) (js/Atom Server)
+  (let ((ref (perform atom-new x))
+        (d (perform load-data "key")))
+    (string-append (show (perform atom-read ref)) d)))
+(io/println (widget 0))
+"#,
+        "run",
+    );
+    let combined = format!("{}{}", stdout, stderr);
+    assert!(
+        combined.contains("connectAndMountGuarded"),
+        "expected guarded mount with typed effect row, got: {}",
+        combined
+    );
+}
+
+#[test]
+fn define_client_typed_effect_row_rejects_unauthorized() {
+    let (_stdout, stderr, success) = run_cli(
+        r#"
+(import "std:web" as w)
+(import "std:js" as js)
+(effect Server (load-data (-> String String)))
+(effect Secret (secret-op (-> Unit String)))
+(js/define-client bad (x) (js/Atom Server)
+  (let ((d (perform load-data "key"))
+        (s (perform secret-op)))
+    (string-append d s)))
+"#,
+        "typecheck",
+    );
+    assert!(!success, "should reject unauthorized Secret effect");
+    assert!(
+        stderr.contains("Secret"),
+        "error should mention Secret, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn qualified_effect_names_in_annotations() {
+    let (_stdout, stderr, success) = run_cli(
+        r#"
+(import "std:io" as io)
+(define (f : (-> Unit {io/IO} Unit))
+  (lambda () (perform io/println "hi")))
+"#,
+        "typecheck",
+    );
+    assert!(
+        success,
+        "qualified effect in annotation should work, stderr: {}",
+        stderr
+    );
+}

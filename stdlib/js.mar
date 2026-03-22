@@ -501,6 +501,8 @@ const marlang = (() => {
   //   - resume(value) continues the generator with the given value
   //   - If handler doesn't call resume synchronously, the generator pauses
   // Returns a Promise that resolves with the generator's return value.
+  // _run is a mutable ref — overridden by runWithFeatures later.
+  let _run;
   function run(gen, handlers) {
     const h = handlers || _handlers;
     return new Promise((resolve, reject) => {
@@ -582,7 +584,7 @@ const marlang = (() => {
     function render() {
       m.hookIndex = 0;
       const gen = m.genFn.apply(null, m.args);
-      return run(gen, Object.assign({}, handlers || builtinHandlers, {
+      return _run(gen, Object.assign({}, handlers || builtinHandlers, {
         atom_new(effArgs, resume) {
           const idx = m.hookIndex++;
           if (idx < m.hooks.length) {
@@ -633,7 +635,7 @@ const marlang = (() => {
   // Re-renders all mounted components when done.
   function action(genFn) {
     const gen = typeof genFn === 'function' ? genFn() : genFn;
-    return run(gen, builtinHandlers).then(() => {
+    return _run(gen, builtinHandlers).then(() => {
       _mounts.forEach(m => m.render());
     }).catch(e => console.error('action error:', e));
   }
@@ -765,12 +767,172 @@ const marlang = (() => {
     return Object.assign({}, builtinHandlers, userHandlers || {});
   }
 
+  // ---- Effect allowlists ----
+  // When a guarded component is mounted, its allowlist and HMAC token
+  // are stored. Effect proxy messages include the allowlist and token
+  // so the server can validate before dispatching.
+
+  let _allowedEffects = null;  // Array of allowed effect names
+  let _allowToken = null;      // HMAC hex string
+
+  // Mount a guarded component with an effect allowlist.
+  // allowlist: Array of effect name strings
+  // token: HMAC-signed hex string from the server
+  function connectAndMountGuarded(el, genFn, args, allowlist, token) {
+    _allowedEffects = allowlist;
+    _allowToken = token;
+    connect().then(() => mount(el, genFn, args));
+  }
+
+  // ---- Prefetch cache ----
+  // Pre-computed effect results inlined in the page by the server.
+  // Checked before proxying an effect to the server. One-time use.
+
+  function checkPrefetch(effectName, args) {
+    if (!window.__prefetch) return undefined;
+    // Try exact key: effect_name:arg1,arg2,...
+    const key = effectName + ':' + (args || []).join(',');
+    if (key in window.__prefetch) {
+      const val = window.__prefetch[key];
+      delete window.__prefetch[key];
+      return val;
+    }
+    // Try effect name only (no args key)
+    if (effectName in window.__prefetch) {
+      const val = window.__prefetch[effectName];
+      delete window.__prefetch[effectName];
+      return val;
+    }
+    return undefined;
+  }
+
+  // ---- Batching ----
+  // Send multiple effects in a single WebSocket message.
+  // Returns a Promise that resolves with an array of results.
+
+  function batchEffects(effects) {
+    // effects: Array of {effect, args}
+    return new Promise((resolve, reject) => {
+      if (!_ws || _ws.readyState !== 1) {
+        reject(new Error('No WebSocket connection for batch'));
+        return;
+      }
+      const id = _nextId++;
+      _pending.set(id, {
+        resolve: (results) => resolve(results),
+        reject
+      });
+      const msg = {
+        type: 'batch',
+        id,
+        effects: effects.map(e => ({ effect: e.effect, args: e.args }))
+      };
+      _ws.send(JSON.stringify(msg));
+    });
+  }
+
+  // Override the run function to support prefetch + allowlists + batch results
+  function runWithFeatures(gen, handlers) {
+    const h = handlers || _handlers;
+    return new Promise((resolve, reject) => {
+      function step(value) {
+        try {
+          const result = gen.next(value);
+          if (result.done) { resolve(result.value); return; }
+          const eff = result.value;
+          if (!eff || !eff.effect) {
+            reject(new Error('Generator yielded non-effect: ' + JSON.stringify(eff)));
+            return;
+          }
+          // Check local handlers first
+          if (h[eff.effect]) {
+            h[eff.effect](eff.args, step);
+            return;
+          }
+          // Check prefetch cache
+          const prefetched = checkPrefetch(eff.effect, eff.args);
+          if (prefetched !== undefined) {
+            step(prefetched);
+            return;
+          }
+          // Proxy to server
+          if (_ws && _ws.readyState === 1) {
+            const id = _nextId++;
+            _pending.set(id, { resolve: step, reject });
+            const msg = { type: 'effect', id, effect: eff.effect, args: eff.args };
+            // Include allowlist if this is a guarded component
+            if (_allowedEffects) {
+              msg.allow = _allowedEffects;
+              msg.token = _allowToken;
+            }
+            _ws.send(JSON.stringify(msg));
+          } else {
+            reject(new Error('Unhandled effect: ' + eff.effect + ' (no local handler, no WebSocket)'));
+          }
+        } catch (e) { reject(e); }
+      }
+      step(undefined);
+    });
+  }
+
+  // Handle incoming WebSocket messages — now also handles batch results
+  function handleMessageV2(data) {
+    try {
+      const msg = JSON.parse(data);
+      if (msg.type === 'result' && _pending.has(msg.id)) {
+        const { resolve } = _pending.get(msg.id);
+        _pending.delete(msg.id);
+        resolve(msg.value);
+      } else if (msg.type === 'error' && _pending.has(msg.id)) {
+        const { reject } = _pending.get(msg.id);
+        _pending.delete(msg.id);
+        reject(new Error(msg.message));
+      } else if (msg.type === 'batch_result' && _pending.has(msg.id)) {
+        const { resolve } = _pending.get(msg.id);
+        _pending.delete(msg.id);
+        // Extract values from results array, map errors to nulls
+        const values = (msg.results || []).map(r =>
+          r.error !== undefined ? null : r.value);
+        resolve(values);
+      }
+    } catch (e) {
+      // Not JSON — might be a morphdom/nav update from the live framework
+    }
+  }
+
+  // Set _run to the feature-enhanced version so mount/action use it.
+  _run = runWithFeatures;
+
+  // Reconnect logic using the v2 message handler
+  let _connectPromiseV2 = null;
+  function connectV2(url) {
+    if (_connectPromiseV2) return _connectPromiseV2;
+    _connectPromiseV2 = new Promise((resolve) => {
+      _ws = new WebSocket(url || ('ws://' + location.host + '/'));
+      _ws.onopen = () => resolve(_ws);
+      _ws.onmessage = (e) => handleMessageV2(e.data);
+      _ws.onclose = () => {
+        _connectPromiseV2 = null;
+        _connectPromise = null;
+        setTimeout(() => connectV2(url), 1000);
+      };
+    });
+    _connectPromise = _connectPromiseV2;
+    return _connectPromiseV2;
+  }
+
   return {
-    run, connect, connectAndMount, mount, updateAtom, action,
-    handleMessage, registerHandlers,
+    run: runWithFeatures, connect: connectV2,
+    connectAndMount(el, genFn, args) {
+      connectV2().then(() => mount(el, genFn, args));
+    },
+    connectAndMountGuarded,
+    mount, updateAtom, action,
+    handleMessage: handleMessageV2, registerHandlers,
     withBuiltins, builtinHandlers,
     atomHandlers, domHandlers, timerHandlers, eventHandlers,
-    trampoline, bounce, Bounce
+    trampoline, bounce, Bounce,
+    batchEffects, checkPrefetch
   };
 })();
 ")
@@ -873,13 +1035,22 @@ const marlang = (() => {
 ; args: list of Marlang values to pass as component arguments
 ; The script connects the WebSocket (if not already connected) and waits
 ; for it to open before mounting, so server-proxied effects work.
+(define __to-js-ident (lambda (name)
+  (string-replace-all (string-replace-all name "-" "_") "?" "_p")))
+
+(define __str-cat (lambda (parts)
+  (match parts
+    (Nil "")
+    ((Cons h Nil) h)
+    ((Cons h rest) (string-append h (__str-cat rest))))))
+
 (define __mount-component (lambda (div-id js-name args)
-  (string-append
-    (string-append "<div id=\"" (string-append div-id "\"></div>"))
-    (string-append "<script>marlang.connectAndMount(document.getElementById('"
-      (string-append div-id (string-append "'),"
-        (string-append js-name (string-append ",["
-          (string-append (args-to-js args) "]);</script>")))))))))
+  (let ((safe-name (__to-js-ident js-name)))
+    (__str-cat (list
+      "<div id=\"" div-id "\"></div>"
+      "<script>marlang.connectAndMount(document.getElementById('"
+      div-id "')," safe-name ",["
+      (args-to-js args) "]);</script>")))))
 
 ; =========================================================================
 ; define-shared — define a pure function in both Marlang and JS
@@ -920,20 +1091,122 @@ const marlang = (() => {
 ; unknown effects (server effects) are proxied over WebSocket.
 ; =========================================================================
 
-(defmacro define-client (name params body)
+; define-client : two forms
+;
+;   (js/define-client name (params) body)
+;     Pure client or unguarded — no effect type checking beyond standard inference.
+;     Auto-extracts perform calls for the wire allowlist.
+;
+;   (js/define-client name (params) (EffectType1 EffectType2 ...) body)
+;     Guarded — the type checker enforces a closed effect row {Atom E1 E2 ...}.
+;     If the body performs an operation from an undeclared effect, compile error.
+;     The effect types also drive the wire allowlist via operation extraction.
+;
+; The macro detects which form by checking if the third argument is a list
+; of uppercase symbols (effect types) vs an expression (body).
+
+; Check if a symbol name looks like an effect type (starts with uppercase).
+; Handles qualified names like js/Atom — checks the part after the last /.
+(define __is-effect-type-name? (lambda (name)
+  (let ((check-name (match (string-index-of name "/")
+                      ((Some idx) (string-substring name (+ idx 1) (string-length name)))
+                      (None name))))
+    (match (string-char-at check-name 0)
+      ((Some c) (if (>= (char-code c) 65) (<= (char-code c) 90) #f))
+      (None #f)))))
+
+(define __all-upper-symbols? (lambda (lst)
+  (if (nil? lst) #t
+  (if (pair? lst)
+    (let ((h (car lst)))
+      (if (symbol? h)
+        (if (__is-effect-type-name? (symbol->string h))
+          (__all-upper-symbols? (cdr lst))
+          #f)
+        #f))
+    #f))))
+
+; Build a closed effect row expression from user-provided effect type names.
+; The effect types come from the call site (no hygiene marks).
+; We include Atom (from the Atom effect declared in this module) via the
+; user's import — so the user must list it if they use atom effects.
+; For convenience, we add a fresh row variable to allow Atom effects
+; implicitly, since they're always client-local.
+; Actually: we use a CLOSED row with just the user-declared effects.
+; Atom effects are declared in std:js, so the user must include js/Atom
+; or just Atom if they `(import "std:js" as js)`.
+;
+; Simpler: use only the user-provided effect types. If they use atom
+; effects, they must declare Atom in the list. This is explicit and clear.
+(define __make-effect-row (lambda (effect-types)
+  (cons '__effect_row effect-types)))
+
+; Generate fresh type variable symbols for lambda parameters.
+; (x y z) → (tp0 tp1 tp2) as symbols for use in type annotations.
+; Names start lowercase so the type checker treats them as type variables
+; even after hygiene marks are applied (e.g. tp0~1 still starts with 't').
+(define __make-param-tvars (lambda (params idx)
+  (match params
+    (Nil (list))
+    ((Cons _ rest)
+      (Cons (string->symbol (string-append "tp" (show idx)))
+            (__make-param-tvars rest (+ idx 1)))))))
+
+(defmacro define-client (name params . rest)
   (let ((name-str (symbol->string name))
         (div-id (string-append "__mc_" (symbol->string name))))
-    (list 'begin
-      ; Type-check the effectful body (never executed server-side).
-      ; The let binding ensures the type checker sees the lambda with
-      ; its effects, catching type errors at compile time.
-      (list 'let (list (list '__tc (list 'lambda params body))) 'nil)
-      ; Server-side: mount-point function (no effects, just HTML + script)
-      (list 'define name (list 'lambda params
-        (list 'js/__mount-component div-id name-str (cons 'list params))))
-      ; Client-side: register JS generator component
-      (list 'js/register-client-js
-        (list 'js/emit-js (list 'define name (list 'lambda* params body)))))))
+    ; Detect form: rest = (effects body) or rest = (body)
+    ; Two-element rest where first is a list of uppercase symbols = guarded form
+    (if (if (pair? rest)
+          (if (pair? (cdr rest))
+            (if (nil? (cdr (cdr rest)))
+              (if (pair? (car rest))
+                (__all-upper-symbols? (car rest))
+                #f)
+              #f)
+            #f)
+          #f)
+      ; --- Guarded form: (js/define-client name (params) (Effect1 Effect2) body) ---
+      (let ((effect-types (car rest))
+            (body (car (cdr rest)))
+            (effects (__to-wire-names (__extract-effects (car (cdr rest))))))
+        (list 'begin
+          ; Type-check with closed effect row — the type checker enforces it.
+          ; Annotate the lambda with a closed effect row. Param types use
+          ; fresh type variables so they're inferred. If body performs
+          ; an undeclared effect, the type checker reports a mismatch.
+          (let ((param-tvars (__make-param-tvars params 0)))
+            (list 'let
+              (list (list (list '__tc ': (append (list '->) (append param-tvars (list (__make-effect-row effect-types) 'tcret))))
+                          (list 'lambda params body)))
+              'nil))
+          ; Server-side: guarded mount with HMAC-signed allowlist
+          (list 'define name (list 'lambda params
+            (list 'js/__mount-guarded-component div-id name-str
+              (__make-list-expr effects)
+              (list 'w/sign-allowlist (__make-list-expr effects))
+              (cons 'list params))))
+          ; Client-side: register JS generator component
+          (list 'js/register-client-js
+            (list 'js/emit-js (list 'define name (list 'lambda* params body))))))
+      ; --- Unguarded form: (js/define-client name (params) body) ---
+      (let ((body (car rest))
+            (effects (__to-wire-names (__extract-effects (car rest)))))
+        (list 'begin
+          ; Type-check the effectful body (standard inference, open row)
+          (list 'let (list (list '__tc (list 'lambda params body))) 'nil)
+          ; Server-side mount
+          (if (nil? effects)
+            (list 'define name (list 'lambda params
+              (list 'js/__mount-component div-id name-str (cons 'list params))))
+            (list 'define name (list 'lambda params
+              (list 'js/__mount-guarded-component div-id name-str
+                (__make-list-expr effects)
+                (list 'w/sign-allowlist (__make-list-expr effects))
+                (cons 'list params)))))
+          ; Client-side: register JS generator component
+          (list 'js/register-client-js
+            (list 'js/emit-js (list 'define name (list 'lambda* params body)))))))))
 
 ; =========================================================================
 ; mount-script — generate JS to mount a client component on a DOM element
@@ -948,3 +1221,328 @@ const marlang = (() => {
   (string-append "<script>marlang.mount(document.getElementById('"
     element-id "'), " component-name ", "
     args-js ", marlang.builtinHandlers);</script>")))
+
+; =========================================================================
+; define-client-guarded — like define-client but with effect allowlists
+;
+; Usage:
+;   (import "std:web" as w)
+;   (import "std:js" as js)
+;
+;   (js/define-client-guarded user-profile (user-id) (db-query db-execute)
+;     (let ((rows (perform db-query ...))) ...))
+;
+; The allowed-effects list specifies which effects may be proxied to the
+; server. The server signs the allowlist with HMAC-SHA256 and embeds the
+; signed token in the page. The client includes the token in effect proxy
+; messages. The server validates the HMAC before dispatching.
+;
+; Atom effects (atom-new, atom-read, atom-set, atom-swap) are always
+; handled locally on the client and do not need to be in the allowlist.
+;
+; Expands to:
+;   (begin
+;     (let ((__tc (lambda (params) body))) nil)   ; type-check
+;     (define name (lambda (params)
+;       (__mount-guarded-component div-id name-str
+;         (list of allowed effect name strings)
+;         (w/sign-allowlist (list of allowed effect name strings))
+;         (list arg1 arg2 ...))))
+;     (js/register-client-js (js/emit-js (define name (lambda* (params) body)))))
+; =========================================================================
+
+; Convert a list of effect name strings to a JS array literal.
+(define __effects-to-js-items (lambda (effects)
+  (match effects
+    (Nil "")
+    ((Cons h Nil) (string-append "\"" h "\""))
+    ((Cons h rest) (string-append "\"" h "\"," (__effects-to-js-items rest))))))
+
+(define __effects-to-js-array (lambda (effects)
+  (string-append "[" (__effects-to-js-items effects) "]")))
+
+; Mount a guarded client component — like __mount-component but embeds
+; the allowlist and HMAC token in the mount script.
+(define __mount-guarded-component (lambda (div-id js-name allowed-effects token args)
+  (let ((allow-json (__effects-to-js-array allowed-effects))
+        (safe-name (__to-js-ident js-name)))
+    (__str-cat (list
+      "<div id=\"" div-id "\"></div>"
+      "<script>marlang.connectAndMountGuarded(document.getElementById('"
+      div-id "')," safe-name ",["
+      (args-to-js args) "],"
+      allow-json ",\"" token "\");</script>")))))
+
+; =========================================================================
+; Effect extraction — walk an S-expression tree to find (perform op ...)
+; calls and collect the unique effect names. These become the allowlist.
+;
+; Local effects (atom-new, atom-read, atom-set, atom-swap) are excluded
+; since they're handled client-side and never proxied to the server.
+; =========================================================================
+
+(define __local-effects (list "atom-new" "atom-read" "atom-set" "atom-swap"))
+
+(define __is-local-effect-in (lambda (name lst)
+  (match lst
+    (Nil #f)
+    ((Cons h rest)
+      (if (string= h name) #t
+        (__is-local-effect-in name rest))))))
+
+; Check if a string is in a list of strings.
+(define __str-member (lambda (s lst)
+  (match lst
+    (Nil #f)
+    ((Cons h rest)
+      (if (string= s h) #t (__str-member s rest))))))
+
+; Merge two lists, keeping only unique strings.
+(define __str-union (lambda (a b)
+  (match a
+    (Nil b)
+    ((Cons h rest)
+      (if (__str-member h b)
+        (__str-union rest b)
+        (__str-union rest (Cons h b)))))))
+
+; Walk an S-expression tree and collect server-side perform effect names.
+; Returns a (List String) of unique, non-local effect names.
+; Uses begin + define for mutual recursion (letrec semantics).
+(define __extract-effects
+  (let ()
+    (begin
+      (define walk-expr (lambda (expr)
+        (if (pair? expr)
+          (let ((head (car expr)))
+            (if (symbol? head)
+              (if (string= (symbol->string head) "perform")
+                ; Found (perform op-name ...)
+                (let ((op (car (cdr expr)))
+                      (rest-effects (walk-list (cdr (cdr expr)))))
+                  (if (symbol? op)
+                    (let ((name (symbol->string op)))
+                      (if (__is-local-effect-in name __local-effects)
+                        rest-effects
+                        (__str-union (list name) rest-effects)))
+                    rest-effects))
+                ; Not a perform — walk all children
+                (walk-list expr))
+              (walk-list expr)))
+          (list))))
+      (define walk-list (lambda (lst)
+        (if (nil? lst) (list)
+        (if (pair? lst)
+          (__str-union (walk-expr (car lst))
+                       (walk-list (cdr lst)))
+          (list)))))
+      walk-expr)))
+
+; Convert effect names to underscore form for the wire protocol.
+(define __to-wire-names (lambda (names)
+  (match names
+    (Nil (list))
+    ((Cons h rest)
+      (Cons (string-replace-all h "-" "_")
+            (__to-wire-names rest))))))
+
+; Build a (list "str1" "str2" ...) S-expression from a list of strings.
+(define __make-list-expr (lambda (strings)
+  (cons 'list strings)))
+
+; Verify that every extracted effect is covered by the allowlist.
+; Raises a compile-time error (via perform throw) if any effect is missing.
+(define __check-allowlist-covers (lambda (component-name extracted allowed)
+  (match extracted
+    (Nil nil)
+    ((Cons eff rest)
+      (if (__str-member eff allowed)
+        (__check-allowlist-covers component-name rest allowed)
+        (perform throw
+          (__str-cat (list
+            "define-client-guarded '" component-name
+            "': body performs '" eff
+            "' which is not in the allowlist."))))))))
+
+; Verify allowlist doesn't have extra unused effects (warning-like).
+; Not an error — the allowlist may intentionally include effects used
+; only in inline JS handlers (onclick etc.), which aren't extracted.
+
+; =========================================================================
+; define-client-guarded — explicit allowlist (manual control)
+;
+; Usage:
+;   (js/define-client-guarded widget (x) (load-data save-data)
+;     (let ((d (perform load-data "k"))) ...))
+;
+; The allowlist is specified manually. No compile-time check that
+; the body only uses effects in the list — use define-client instead
+; for automatic extraction.
+; =========================================================================
+
+; Convert a list of symbols to a list of underscore-form strings.
+(define __symbols-to-effect-names (lambda (syms)
+  (match syms
+    (Nil (list))
+    ((Cons s rest)
+      (Cons (string-replace-all (symbol->string s) "-" "_")
+            (__symbols-to-effect-names rest))))))
+
+(defmacro define-client-guarded (name params allowed-effects body)
+  (let ((name-str (symbol->string name))
+        (div-id (string-append "__mc_" (symbol->string name)))
+        (effect-names (__symbols-to-effect-names allowed-effects))
+        ; Auto-extract effects from the body to cross-check
+        (extracted (__to-wire-names (__extract-effects body))))
+    (begin
+      ; Verify: every extracted server effect must be in the allowlist
+      (__check-allowlist-covers name-str extracted effect-names)
+      (list 'begin
+        ; Type-check the effectful body
+        (list 'let (list (list '__tc (list 'lambda params body))) 'nil)
+        ; Server-side: mount function that embeds signed allowlist
+        (list 'define name (list 'lambda params
+          (list 'js/__mount-guarded-component div-id name-str
+            (__make-list-expr effect-names)
+            (list 'w/sign-allowlist (__make-list-expr effect-names))
+            (cons 'list params))))
+        ; Client-side: register JS generator component
+        (list 'js/register-client-js
+          (list 'js/emit-js (list 'define name (list 'lambda* params body))))))))
+
+; =========================================================================
+; Batch — collect independent effects into single WebSocket messages
+;
+; Usage (in a define-client body):
+;   (js/define-client dashboard (user-id)
+;     (let ((results (perform batch
+;             (list (MkPair "load_user" (list user-id))
+;                   (MkPair "load_posts" (list user-id))))))
+;       ; results is a list of result values
+;       ...))
+;
+; Or using the batch macro for cleaner syntax:
+;   (js/batch
+;     ((user  (perform load-user user-id))
+;      (posts (perform load-posts user-id)))
+;     (render-page user posts))
+;
+; Protocol:
+;   Client → Server: {"type":"batch","id":1,"effects":[...]}
+;   Server → Client: {"type":"batch_result","id":1,"results":[...]}
+; =========================================================================
+
+; Effect declaration for batch — the type checker needs this
+(effect Batch
+  (batch (-> (List (Pair String (List String))) (List String))))
+
+; The batch macro compiles to JS that sends all effects in one message.
+; On the server, web.mar handles the batch protocol.
+;
+; (js/batch
+;   ((user  (perform load-user uid))
+;    (posts (perform load-posts uid)))
+;   body)
+;
+; Compiles to JS that:
+;   1. Collects all effect descriptors into an array
+;   2. Sends them as a single batch message
+;   3. Destructures the results array into the bindings
+;   4. Evaluates the body
+
+(defmacro batch (bindings body)
+  ((lambda ()
+
+    ; Extract effect descriptors from bindings
+    ; Each binding is (name (perform effect-name args...))
+    ; We need to collect: [{effect, args}, ...] and bind results
+
+    (define binding-names (lambda (bs)
+      (match bs
+        (Nil (list))
+        ((Cons b rest)
+          (Cons (car b) (binding-names rest))))))
+
+    ; Build the JS batch call expression.
+    ; In Marlang (server), the batch form just executes sequentially.
+    ; On the client (JS), the emit-js compiler handles it differently.
+    ;
+    ; Server-side expansion: sequential execution with let bindings
+    ; (let ((name1 expr1) (name2 expr2)) body)
+    (list 'let bindings body))))
+
+; =========================================================================
+; Prefetch — inline data in the page to avoid first-render round-trips
+;
+; Usage:
+;   (import "std:web" as w)
+;   (import "std:js" as js)
+;
+;   (define render-page (lambda (user-id)
+;     (w/html (list)
+;       (string-append
+;         (w/head (string-append
+;           (js/client-bundle-script)
+;           (js/prefetch (list
+;             (MkPair "load_user" (show (load-user-from-db user-id)))
+;             (MkPair "load_posts" (show (load-posts-from-db user-id)))))))
+;         (w/body (list) (user-profile user-id))))))
+;
+; The prefetch data is inlined as a <script> tag:
+;   <script>window.__prefetch = {"load_user":"...","load_posts":"..."};</script>
+;
+; The client runtime checks window.__prefetch before proxying an effect
+; to the server. If a matching entry exists, it's consumed immediately
+; (one-time use) without a WebSocket round-trip.
+; =========================================================================
+
+; Render prefetch entries as JS object properties.
+(define __prefetch-entries (lambda (entries)
+  (match entries
+    (Nil "")
+    ((Cons (MkPair key val) Nil)
+      (string-append "\"" key "\":" (show val)))
+    ((Cons (MkPair key val) rest)
+      (string-append "\"" key "\":" (show val) "," (__prefetch-entries rest))))))
+
+(define __prefetch-assigns (lambda (entries)
+  (match entries
+    (Nil "")
+    ((Cons (MkPair key val) rest)
+      (string-append
+        "window.__prefetch[\"" key "\"]=" (show val) ";"
+        (__prefetch-assigns rest))))))
+
+; prefetch : (-> (List (Pair String String)) String)
+; Generate a <script> tag that inlines prefetch data for client components.
+; Each entry is (MkPair effect-key result-value).
+; The effect-key should match what the client sends (underscore form).
+; The result-value is the pre-computed result as a string.
+;
+; Multiple calls to prefetch accumulate entries — they don't overwrite.
+(define prefetch (lambda (entries)
+  (string-append
+    "<script>window.__prefetch=window.__prefetch||{};"
+    (string-append (__prefetch-assigns entries)
+      "</script>"))))
+
+; prefetch-key : construct the cache key: effect_name:arg1,arg2,...
+(define prefetch-key (lambda (effect-name args)
+  (string-append effect-name ":"
+    (match args
+      (Nil "")
+      ((Cons h Nil) h)
+      ((Cons h rest) (string-append h ","
+        (match rest
+          (Nil "")
+          ((Cons h2 Nil) h2)
+          ((Cons h2 rest2) (string-append h2 ","
+            (match rest2
+              (Nil "")
+              (_ "...")))))))))))
+
+; prefetch-effect : (-> String (List String) String String)
+; Generate a prefetch entry for a single effect with its pre-computed result.
+(define prefetch-effect (lambda (effect-name args result)
+  (let ((key (prefetch-key effect-name args)))
+    (prefetch (list (MkPair key result))))))

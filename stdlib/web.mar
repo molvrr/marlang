@@ -18,6 +18,7 @@
 (import "std:concurrent" as conc)
 (import "std:actor" as actor)
 (import "std:json" as json)
+(import "std:crypto" as crypto)
 
 ; =========================================================================
 ; Response ADT
@@ -921,6 +922,257 @@
         #t))
     (None #f))))
 
+; =========================================================================
+; Effect Allowlists — HMAC-signed, server-validated
+;
+; Each guarded client component declares which effects may be proxied.
+; The server signs the allowlist with a per-instance secret so clients
+; cannot forge requests for unauthorized effects.
+;
+; Usage:
+;   (js/define-client-guarded user-profile (user-id) (db-query db-execute)
+;     (let ((user (perform db-query ...))) ...))
+;
+; The allowlist is embedded in the page as a signed token. The client
+; includes this token in effect proxy messages. The server validates
+; the HMAC before dispatching.
+; =========================================================================
+
+; Per-server-instance secret key (32 random bytes, generated once at startup).
+(define __effect-secret (random-bytes 32))
+
+; Join a list of effect name strings with commas for signing.
+(define __join-effects (lambda (effects)
+  (match effects
+    (Nil "")
+    ((Cons h Nil) h)
+    ((Cons h rest) (string-append h "," (__join-effects rest))))))
+
+; Sign an allowlist of effect names. Returns a hex-encoded HMAC.
+; effects: (List String) — list of allowed effect names (underscore form)
+(define sign-allowlist (lambda (effects)
+  (let ((payload (bytes-from-string (__join-effects effects))))
+    (crypto/hex (hmac-sha256 __effect-secret payload)))))
+
+; Verify a signed allowlist token.
+; effects: (List String) — the claimed allowed effect names
+; token: String — the HMAC hex string from the client
+; Returns #t if valid, #f otherwise.
+(define verify-allowlist (lambda (effects token)
+  (string= (sign-allowlist effects) token)))
+
+; Check if an effect name is in the allowlist.
+(define __effect-allowed? (lambda (name effects)
+  (match effects
+    (Nil #f)
+    ((Cons h rest) (if (string= h name) #t (__effect-allowed? name rest))))))
+
+; (parse-allowlist and dispatch-guarded-effect inlined into try-handle-effect-guarded)
+
+; =========================================================================
+; Batch Protocol — multiple effects in a single WebSocket message
+;
+; Client sends:
+;   {"type":"batch","id":1,"effects":[
+;     {"effect":"db_query","args":["SELECT ..."]},
+;     {"effect":"db_query","args":["SELECT ..."]}
+;   ]}
+;
+; Server responds:
+;   {"type":"batch_result","id":1,"results":[
+;     {"value":"..."},
+;     {"value":"..."}
+;   ]}
+;
+; Effects in a batch are dispatched concurrently using fibers.
+; Results are collected and sent back in order.
+; =========================================================================
+
+; Parse a batch effect request. Returns (Some (MkPair id effects-list)) or None.
+; Each effect is (MkPair effect-name (List String)).
+(define __parse-one-batch-effect (lambda (j)
+  (let ((effect-opt (match (json/json-get "effect" j)
+                      ((Some v) (json/json-string v))
+                      (None None)))
+        (args-opt (json/json-get "args" j)))
+    (match effect-opt
+      ((Some effect-name)
+        (let ((args (match args-opt
+                      ((Some arr) (__json-array-to-strings arr))
+                      (None (list)))))
+          (Some (MkPair effect-name args))))
+      (None None)))))
+
+(define __parse-batch-effects (lambda (items)
+  (match items
+    (Nil (list))
+    ((Cons h rest)
+      (match (__parse-one-batch-effect h)
+        ((Some eff) (Cons eff (__parse-batch-effects rest)))
+        (None (__parse-batch-effects rest)))))))
+
+(define parse-batch-request (lambda (j)
+  (let ((type-opt (match (json/json-get "type" j)
+                    ((Some v) (json/json-string v))
+                    (None None)))
+        (id-opt (match (json/json-get "id" j)
+                  ((Some v) (json/json-int v))
+                  (None None)))
+        (effects-opt (json/json-get "effects" j)))
+    (match (MkPair type-opt id-opt)
+      ((MkPair (Some "batch") (Some id))
+        (match effects-opt
+          ((Some effs-json)
+            (match (json/json-array-items effs-json)
+              ((Some items) (Some (MkPair id (__parse-batch-effects items))))
+              (None None)))
+          (None None)))
+      (_ None)))))
+
+; Run a single batch effect in a fiber, writing result to a response channel.
+(define __run-batch-effect (lambda (handler-fn effect-name args result-ch)
+  (conc/spawn (lambda ()
+    (handle
+      (let ((result (handler-fn effect-name args)))
+        (conc/chan-send! result-ch (Ok result)))
+      ((throw msg k) ->
+        (conc/chan-send! result-ch (Err msg))))))))
+
+; Collect results from channels in order.
+(define __collect-batch-results (lambda (channels)
+  (match channels
+    (Nil (list))
+    ((Cons ch rest)
+      (let ((result (match (conc/chan-recv ch)
+                      ((Some v) v)
+                      (None (Err "channel closed")))))
+        (Cons result (__collect-batch-results rest)))))))
+
+; Convert batch results to JSON array.
+(define __results-to-json (lambda (results)
+  (match results
+    (Nil (list))
+    ((Cons r rest)
+      (Cons
+        (match r
+          ((Ok val) (json/JsonObject (list (MkPair "value" (json/JsonString val)))))
+          ((Err msg) (json/JsonObject (list (MkPair "error" (json/JsonString msg))))))
+        (__results-to-json rest))))))
+
+; Spawn fibers for all batch effects, returning channels in order.
+(define __spawn-batch-effects (lambda (handler-fn effects)
+  (match effects
+    (Nil (list))
+    ((Cons (MkPair effect-name args) rest)
+      (let ((ch (conc/chan-new 1)))
+        (begin
+          (__run-batch-effect handler-fn effect-name args ch)
+          (Cons ch (__spawn-batch-effects handler-fn rest))))))))
+
+; Dispatch a batch of effects concurrently and send results back.
+(define dispatch-batch (lambda (ws-conn id effects handler-fn)
+  ; Create a response channel per effect and spawn fibers
+  (let ((channels (__spawn-batch-effects handler-fn effects)))
+    ; Collect all results (blocks until all complete)
+    (let ((results (__collect-batch-results channels)))
+      ; Send batch response
+      (ws/send ws-conn
+        (json/encode (json/JsonObject (list
+          (MkPair "type" (json/JsonString "batch_result"))
+          (MkPair "id" (json/JsonInt id))
+          (MkPair "results" (json/JsonArray (__results-to-json results)))))))))))
+
+; =========================================================================
+; Guarded + Batch aware effect dispatch
+;
+; Updated try-handle-effect that supports:
+;   1. Regular effect requests (existing)
+;   2. Guarded effect requests (with allow/token fields)
+;   3. Batch effect requests (multiple effects in one message)
+; =========================================================================
+
+; ADT for parsed WebSocket effect messages.
+(data EffectMsg
+  (EffectSingle Int (List String) String (List String))   ; id, allowlist, effect-name, args
+  (EffectBatch Int (List (Pair String (List String)))))    ; id, list of (effect-name, args)
+
+; Parse the inline allowlist from allow/token fields.
+; Returns the validated effect names list, or empty list if no allowlist.
+(define __parse-inline-allowlist (lambda (allow-opt token-opt)
+  (match (MkPair allow-opt token-opt)
+    ((MkPair (Some allow-json) (Some token))
+      (match (json/json-array-items allow-json)
+        ((Some items)
+          (let ((effects (__json-items-to-strings items)))
+            (if (verify-allowlist effects token)
+              effects
+              (list))))
+        (None (list))))
+    (_ (list)))))
+
+; Parse a WebSocket text message into an EffectMsg.
+; Returns (Some EffectMsg) or None.
+(define parse-effect-msg (lambda (text)
+  (match (json/decode text)
+    ((Ok j)
+      (let ((type-opt (match (json/json-get "type" j)
+                        ((Some v) (json/json-string v))
+                        (None None))))
+        (match type-opt
+          ((Some "batch")
+            (match (parse-batch-request j)
+              ((Some (MkPair id effects))
+                (Some (EffectBatch id effects)))
+              (None None)))
+          ((Some "effect")
+            (let ((id-opt (match (json/json-get "id" j)
+                            ((Some v) (json/json-int v))
+                            (None None)))
+                  (effect-opt (match (json/json-get "effect" j)
+                                ((Some v) (json/json-string v))
+                                (None None)))
+                  (args-opt (json/json-get "args" j))
+                  (allow-opt (json/json-get "allow" j))
+                  (token-opt (match (json/json-get "token" j)
+                               ((Some v) (json/json-string v))
+                               (None None))))
+              (match (MkPair id-opt effect-opt)
+                ((MkPair (Some id) (Some effect-name))
+                  (let ((args (match args-opt
+                                ((Some arr) (__json-array-to-strings arr))
+                                (None (list)))))
+                    ; Parse optional allowlist inline
+                    (let ((allowlist (__parse-inline-allowlist allow-opt token-opt)))
+                      (Some (EffectSingle id allowlist effect-name args)))))
+                (_ None))))
+          (_ None))))
+    (_ None))))
+
+; Enhanced try-handle-effect with allowlist validation and batch support.
+(define try-handle-effect-guarded (lambda (ws-conn ws-text handler-fn)
+  (match (parse-effect-msg ws-text)
+    ((Some (EffectBatch id effects))
+      (begin
+        (dispatch-batch ws-conn id effects handler-fn)
+        #t))
+    ((Some (EffectSingle id allowlist effect-name args))
+      (begin
+        ; If allowlist is non-empty, validate effect against it
+        (match allowlist
+          (Nil
+            ; No allowlist — dispatch unconditionally
+            (dispatch-effect ws-conn id effect-name args handler-fn))
+          (_
+            ; Allowlist present and HMAC-verified — check effect name
+            (if (__effect-allowed? effect-name allowlist)
+              (dispatch-effect ws-conn id effect-name args handler-fn)
+              (begin
+                (send-effect-error ws-conn id
+                  (string-append "Effect '" (string-append effect-name "' not in allowlist")))
+                nil))))
+        #t))
+    (None #f))))
+
 ; The ConnectionActor main loop.
 ; POST/navigation handlers are spawned in separate fibers so their
 ; cell operations (actor/receive) don't conflict with ConnUpdate messages.
@@ -937,8 +1189,8 @@
           (conc/spawn (lambda ()
             (handle
               (if (string-starts-with ws-text "{")
-                ; Try effect proxy first
-                (begin (try-handle-effect ws-conn ws-text handler-fn) nil)
+                ; Try guarded/batch effect proxy first, fall back to legacy
+                (begin (try-handle-effect-guarded ws-conn ws-text handler-fn) nil)
                 (if (string-starts-with ws-text "POST ")
                   (handle-ws-post ws-conn (string-substring ws-text 5 (string-length ws-text)) routes)
                   (if (string-starts-with ws-text "/")

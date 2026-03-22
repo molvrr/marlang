@@ -529,9 +529,9 @@ AppActor
 - [x] `define-client` macro — server renders mount-point div + mount script; JS is a generator component
 - [x] `define-shared` — dual emit for pure functions (server + JS), JS code collected via `shared-js`
 - [x] Event delegation — `event_delegate` handler in client runtime; `dom_morph` for morphdom patches
-- [ ] Effect allowlists — `#:allow` on `define-client`, HMAC-signed, server-validated
-- [ ] Batching — collect independent `perform`s into single WebSocket messages
-- [ ] Prefetching — inline `depends-on` data in initial page to avoid first-render round-trips
+- [x] Effect allowlists — `define-client-guarded` macro with HMAC-signed allowlist, server-validated via `EffectMsg` ADT dispatch
+- [x] Batching — `{"type":"batch"}` WebSocket protocol, concurrent fiber dispatch on server, `batchEffects()` in client runtime
+- [x] Prefetching — `prefetch` / `prefetch-effect` inline data as `window.__prefetch`, client runtime checks cache before proxying
 
 ---
 

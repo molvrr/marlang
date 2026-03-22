@@ -874,6 +874,7 @@ pub fn strip_all_marks(name: &str) -> &str {
 
 fn build_immune_set(interner: &Interner) -> HashSet<Symbol> {
     let names = [
+        // Special forms
         "define",
         "lambda",
         "if",
@@ -905,6 +906,30 @@ fn build_immune_set(interner: &Interner) -> HashSet<Symbol> {
         "unquote-splicing",
         "defmacro",
         "unshadow",
+        // Primitive types — lets macros synthesize type annotations
+        "Int",
+        "Float",
+        "Bool",
+        "String",
+        "Char",
+        "Unit",
+        "Bytes",
+        // Common type constructors
+        "List",
+        "Option",
+        "Result",
+        "Pair",
+        // ADT constructors used in type patterns
+        "Some",
+        "None",
+        "Ok",
+        "Err",
+        "Nil",
+        "Cons",
+        "MkPair",
+        // Effect row syntax (used by macros to synthesize type annotations)
+        "__effect_row",
+        "__row_var",
     ];
     names.iter().map(|n| interner.intern(n)).collect()
 }

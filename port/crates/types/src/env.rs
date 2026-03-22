@@ -287,6 +287,18 @@ impl TypeEnv {
         &self.inner.effects
     }
 
+    /// Collect all effects from this env and all parent envs.
+    pub fn all_effects(&self) -> HashMap<String, EffectDeclaration> {
+        let mut result = HashMap::new();
+        // Parent effects first (lower priority)
+        if let Some(parent) = &self.parent {
+            result.extend(parent.all_effects());
+        }
+        // Current level overrides
+        result.extend(self.inner.effects.clone());
+        result
+    }
+
     /// Access foreign_libs.
     pub fn foreign_libs(&self) -> &HashMap<String, Vec<ForeignFnDecl>> {
         &self.inner.foreign_libs
