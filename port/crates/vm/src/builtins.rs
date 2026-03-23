@@ -944,6 +944,18 @@ pub fn register_builtins(vm: &mut VM) {
         Ok(crate::value::Value::object(pair))
     });
 
+    // epoch-ms: current wall-clock time as milliseconds since Unix epoch
+    builtin(vm, "epoch-ms", |_vm, args| {
+        if !args.is_empty() {
+            return Err(VMError::runtime("epoch-ms expects 0 arguments"));
+        }
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        Ok(Value::int(ms))
+    });
+
     // === Bytes builtins ===
 
     // bytes-new: create zero-filled Bytes of given length

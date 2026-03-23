@@ -1216,13 +1216,17 @@
 
 ; --- Per-client lifecycle ---
 
-(define handle-live-client (lambda (ws-conn routes handler-fn)
+; effects-only: if true, skip live source subscription (for client component
+; WebSocket connections that only need effect proxying, not morphdom pushes).
+(define handle-live-client (lambda (ws-conn routes handler-fn effects-only)
   (let ((conn-pid (conc/spawn (lambda () (conn-loop ws-conn routes handler-fn)))))
     (begin
-      (actor/send __router (RouterConnect conn-pid))
+      (if effects-only nil
+        (actor/send __router (RouterConnect conn-pid)))
       (ws-reader ws-conn conn-pid)
       ; WebSocket closed — ws-reader sent ConnWsClosed to actor.
-      (actor/send __router (RouterDisconnect conn-pid))))))
+      (if effects-only nil
+        (actor/send __router (RouterDisconnect conn-pid)))))))
 
 ; --- Server with live update support ---
 
@@ -1233,12 +1237,13 @@
       (begin
         (handle
           (if (ws/upgrade? headers)
-            (match (ws/upgrade conn)
-              ((Ok ws-conn)
-                (begin
-                  (conc/spawn (lambda () (handle-live-client ws-conn routes handler-fn)))
-                  nil))
-              ((Err msg) nil))
+            (let ((effects-only (string-contains path "mode=effects")))
+              (match (ws/upgrade conn)
+                ((Ok ws-conn)
+                  (begin
+                    (conc/spawn (lambda () (handle-live-client ws-conn routes handler-fn effects-only)))
+                    nil))
+                ((Err msg) nil)))
             (begin
               (io/println (string-append method " " path))
               (dispatch method path headers body conn routes)))

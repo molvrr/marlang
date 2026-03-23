@@ -140,6 +140,7 @@
 
 ; Profiling
 (declare time-it (-> (-> Unit {| e} a) (Pair a Float)))
+(declare epoch-ms (-> Unit Int))
 
 ; FFI
 (declare ffi-open (-> String (List a) FFILibrary))
