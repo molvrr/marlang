@@ -1,6 +1,0 @@
-; Module that uses math
-
-(import "./math.mar")
-
-(define (quad : (-> Int Int))
-  (lambda (x) (square (square x))))
