@@ -430,6 +430,7 @@ const HANDLED_EFFECTS: &[&str] = &[
     "read-line",
     "read-file",
     "read-file-bytes",
+    "read-file-bytes-in",
     "write-file",
     "write-file-bytes",
     // Layer 4: TCP
@@ -720,8 +721,8 @@ fn handle_effect(
                 .ok_or_else(|| VMError::runtime("chan-close: invalid channel"))?;
 
             chan.closed = true;
-            let receivers: Vec<WaitingReceiver> = chan.waiting_receivers.drain(..).collect();
-            let senders: Vec<WaitingSender> = chan.waiting_senders.drain(..).collect();
+            let receivers = std::mem::take(&mut chan.waiting_receivers);
+            let senders = std::mem::take(&mut chan.waiting_senders);
             drop(channels);
 
             for receiver in receivers {
@@ -1078,6 +1079,36 @@ fn handle_effect(
                 let result = match tokio::fs::read(&path).await {
                     Ok(data) => Ok(make_ok(Value::bytes(data))),
                     Err(e) => Ok(make_err(&format!("read-file-bytes: {}", e))),
+                };
+                let _ = sender.send(SchedulerMessage::IoComplete { pid, result });
+            });
+        }
+
+        // Resolve and open relative to a directory capability, rather than checking
+        // canonical paths and then reopening them (which permits symlink races).
+        "read-file-bytes-in" => {
+            let base = args
+                .first()
+                .and_then(|v| v.as_string())
+                .ok_or_else(|| VMError::runtime("read-file-bytes-in: base must be a string"))?
+                .to_string();
+            let path = args
+                .get(1)
+                .and_then(|v| v.as_string())
+                .ok_or_else(|| VMError::runtime("read-file-bytes-in: path must be a string"))?
+                .to_string();
+            let sender = shared.scheduler_senders[sched.id].clone();
+            let pid = sched.current_pid;
+
+            sched.io_parked.insert(pid, cont);
+            shared.pending_io.fetch_add(1, Ordering::AcqRel);
+
+            shared.tokio_handle.spawn_blocking(move || {
+                let read = cap_std::fs::Dir::open_ambient_dir(&base, cap_std::ambient_authority())
+                    .and_then(|dir| dir.read(&path));
+                let result = match read {
+                    Ok(data) => Ok(make_ok(Value::bytes(data))),
+                    Err(e) => Ok(make_err(&format!("read-file-bytes-in: {}", e))),
                 };
                 let _ = sender.send(SchedulerMessage::IoComplete { pid, result });
             });

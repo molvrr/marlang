@@ -238,8 +238,8 @@ impl VM {
     /// Clear stack slots in range [new_top..old_top) to release Arc references.
     pub(crate) fn clear_stack_slots(&mut self, new_top: usize) {
         let end = self.stack_top.min(self.stack.len());
-        for i in new_top..end {
-            self.stack[i] = Value::nil();
+        for slot in self.stack.iter_mut().take(end).skip(new_top) {
+            *slot = Value::nil();
         }
     }
 
@@ -1076,11 +1076,10 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
                 vm.frame_count -= 1;
 
                 // Check if we're returning from a handler dispatch (body or clause)
-                if let Some(dispatch) = vm.handler_dispatch_stack.last()
-                    && vm.frame_count <= dispatch.dispatch_frame
+                if let Some(dispatch) = vm
+                    .handler_dispatch_stack
+                    .pop_if(|dispatch| vm.frame_count <= dispatch.dispatch_frame)
                 {
-                    let dispatch = vm.handler_dispatch_stack.pop().unwrap();
-
                     // Remove the handler frame if still present
                     if let Some(pos) = vm
                         .handler_stack
@@ -2257,8 +2256,12 @@ pub(crate) fn run(vm: &mut VM, base_frame_count: usize) -> Result<Value, VMSigna
 
                     // Capture continuation
                     let mut captured_frames = Vec::new();
-                    for f_idx in capture_frame_start..vm.frame_count {
-                        let f = &vm.frames[f_idx];
+                    for f in vm
+                        .frames
+                        .iter()
+                        .take(vm.frame_count)
+                        .skip(capture_frame_start)
+                    {
                         captured_frames.push(CallFrame {
                             closure: f.closure.clone(),
                             ip: f.ip,

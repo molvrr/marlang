@@ -5699,6 +5699,66 @@ fn http_server_client_roundtrip() {
     );
 }
 
+// ===== Confined File IO Tests =====
+
+fn assert_confined_read(base: &Path, path: &str, expected: &str) {
+    // Escape filesystem paths as Marlang string literals (including Windows separators).
+    let quote = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let source = format!(
+        r#"(import "std:io" as io)
+        (match (io/read-file-bytes-in {} {})
+          ((Ok content) (match (bytes-to-string content)
+            ((Ok text) text)
+            ((Err _) "invalid utf8")))
+          ((Err _) "denied"))"#,
+        quote(base.to_str().unwrap()),
+        quote(path),
+    );
+    assert_module_formatted(&source, "dummy.mar", expected);
+}
+
+#[test]
+fn confined_file_read_blocks_traversal_and_absolute_paths() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().join("public");
+    std::fs::create_dir_all(base.join("nested")).unwrap();
+    std::fs::write(base.join("nested/ok.txt"), b"ok").unwrap();
+    std::fs::write(temp.path().join("secret.txt"), b"secret").unwrap();
+    std::fs::create_dir(temp.path().join("public-other")).unwrap();
+    std::fs::write(temp.path().join("public-other/secret.txt"), b"secret").unwrap();
+
+    assert_confined_read(&base, "nested/ok.txt", "\"ok\"");
+    for path in [
+        "../secret.txt",
+        "nested/../../secret.txt",
+        "../public-other/secret.txt",
+        "missing.txt",
+        temp.path().join("secret.txt").to_str().unwrap(),
+    ] {
+        assert_confined_read(&base, path, "\"denied\"");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn confined_file_read_blocks_escaping_symlinks() {
+    use std::os::unix::fs::symlink;
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().join("public");
+    std::fs::create_dir(&base).unwrap();
+    std::fs::write(base.join("ok.txt"), b"ok").unwrap();
+    std::fs::write(temp.path().join("secret.txt"), b"secret").unwrap();
+    symlink("ok.txt", base.join("inside")).unwrap();
+    symlink("../secret.txt", base.join("outside")).unwrap();
+    symlink("..", base.join("outside-dir")).unwrap();
+    symlink(temp.path().join("secret.txt"), base.join("absolute")).unwrap();
+
+    assert_confined_read(&base, "inside", "\"ok\"");
+    for path in ["outside", "outside-dir/secret.txt", "absolute"] {
+        assert_confined_read(&base, path, "\"denied\"");
+    }
+}
+
 // ===== Effect Allowlist Tests =====
 // These tests use the CLI with timeout because importing std:web spawns
 // a background router actor that prevents clean in-process shutdown.
@@ -5745,141 +5805,91 @@ fn run_cli(source: &str, subcommand: &str) -> (String, String, bool) {
 }
 
 #[test]
-fn define_client_auto_extracts_server_effects() {
-    let (stdout, stderr, _) = run_cli(
+fn web_serve_file_confines_request_paths() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().join("public");
+    std::fs::create_dir_all(base.join("nested")).unwrap();
+    std::fs::write(base.join("nested/ok.txt"), b"public content").unwrap();
+    std::fs::write(temp.path().join("secret.txt"), b"secret content").unwrap();
+    std::fs::create_dir(temp.path().join("public-other")).unwrap();
+    std::fs::write(
+        temp.path().join("public-other/secret.txt"),
+        b"secret content",
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let base = base
+        .to_str()
+        .unwrap()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let source = format!(
         r#"
-(import "std:js" as js)
-(import "std:web" as w)
-(import "std:io" as io)
-(effect Server
-  (load-data  (-> String String))
-  (save-data  (-> String String String)))
-(js/define-client my-widget (x)
-  (let ((d (perform load-data "key"))
-        (s (perform save-data "k" "v")))
-    (string-append d s)))
-(io/println (my-widget 0))
+{}
+(define serve-next (lambda (server remaining)
+  (if (= remaining 0) (http/close-server server)
+    (match (http/accept server)
+      ((Some (HttpRequest method path headers body conn))
+        (begin
+          (if (serve-file conn "{base}" path) nil
+            (http/respond-text! conn 404 (list) "not found"))
+          (serve-next server (- remaining 1))))
+      (None nil)))))
+(serve-next (http/serve! {port}) 4)
 "#,
-        "run",
+        include_str!("../../../../stdlib/web.mar"),
     );
-    let combined = format!("{}{}", stdout, stderr);
-    assert!(
-        combined.contains("connectAndMountGuarded"),
-        "expected guarded mount for server effects, got: {}",
-        combined
-    );
-    assert!(
-        combined.contains("load_data") && combined.contains("save_data"),
-        "expected extracted effects in allowlist, got: {}",
-        combined
-    );
-}
-
-#[test]
-fn define_client_pure_uses_unguarded_mount() {
-    let (stdout, stderr, _) = run_cli(
-        r#"
-(import "std:js" as js)
-(import "std:web" as w)
-(import "std:io" as io)
-(js/define-client pure-widget (x)
-  (let ((ref (perform atom-new x)))
-    (show (perform atom-read ref))))
-(io/println (pure-widget 0))
-"#,
-        "run",
-    );
-    let combined = format!("{}{}", stdout, stderr);
-    assert!(
-        combined.contains("connectAndMount("),
-        "expected unguarded mount for pure client, got: {}",
-        combined
-    );
-    assert!(
-        !combined.contains("connectAndMountGuarded"),
-        "should NOT use guarded mount for pure client, got: {}",
-        combined
-    );
-}
-
-#[test]
-fn define_client_guarded_rejects_undeclared_effect() {
-    let (_stdout, stderr, success) = run_cli(
-        r#"
-(import "std:js" as js)
-(import "std:web" as w)
-(effect Server
-  (load-data  (-> String String))
-  (secret-op  (-> Unit String)))
-(js/define-client-guarded bad-widget (x) (load-data)
-  (let ((d (perform load-data "key"))
-        (s (perform secret-op)))
-    (string-append d s)))
-"#,
-        "typecheck",
-    );
-    assert!(!success, "should fail at compile time");
-    assert!(
-        stderr.contains("secret_op") && stderr.contains("not in the allowlist"),
-        "expected allowlist error mentioning secret_op, got: {}",
-        stderr
-    );
-}
-
-#[test]
-fn define_client_guarded_accepts_matching_allowlist() {
-    let (stdout, stderr, _) = run_cli(
-        r#"
-(import "std:js" as js)
-(import "std:web" as w)
-(import "std:io" as io)
-(effect Server
-  (load-data  (-> String String))
-  (secret-op  (-> Unit String)))
-(js/define-client-guarded good-widget (x) (load-data secret-op)
-  (let ((d (perform load-data "key"))
-        (s (perform secret-op)))
-    (string-append d s)))
-(io/println (good-widget 0))
-"#,
-        "run",
-    );
-    let combined = format!("{}{}", stdout, stderr);
-    assert!(
-        combined.contains("connectAndMountGuarded"),
-        "expected guarded mount, got: {}",
-        combined
-    );
-    assert!(
-        combined.contains("load_data") && combined.contains("secret_op"),
-        "expected both effects in allowlist, got: {}",
-        combined
-    );
-}
-
-#[test]
-fn prefetch_generates_script_tag() {
-    let (stdout, stderr, success) = run_cli(
-        r#"
-(import "std:js" as js)
-(import "std:io" as io)
-(io/println (js/prefetch (list
-  (MkPair "load_user" "alice")
-  (MkPair "load_posts" "3 posts"))))
-"#,
-        "run",
-    );
-    assert!(success, "prefetch should succeed, stderr: {}", stderr);
-    assert!(
-        stdout.contains("window.__prefetch"),
-        "expected __prefetch, got: {}",
-        stdout
-    );
-    assert!(
-        stdout.contains("load_user") && stdout.contains("alice"),
-        "expected prefetch data, got: {}",
-        stdout
-    );
+    let server = std::thread::spawn(move || run_cli(&source, "run"));
+    for (path, expected) in [
+        ("/nested/ok.txt", "public content"),
+        ("/../secret.txt", "not found"),
+        ("/../public-other/secret.txt", "not found"),
+        ("/missing.txt", "not found"),
+    ] {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!(
+                    "web server did not start: {err}; {:?}",
+                    server.join().unwrap()
+                ),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        // Send the raw path: browsers/URL libraries may normalize away '..'.
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").expect("HTTP response");
+        assert_eq!(body, expected, "path: {path}");
+        if expected == "public content" {
+            assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+            assert!(
+                headers.contains("content-type: text/plain; charset=utf-8"),
+                "{headers}"
+            );
+        } else {
+            assert!(headers.starts_with("HTTP/1.1 404"), "{headers}");
+        }
+    }
+    let (_, stderr, _) = server.join().unwrap();
+    // std:web's background router keeps the process alive until the helper timeout.
+    assert!(stderr.is_empty(), "{stderr}");
 }
 
 #[test]
@@ -5955,53 +5965,6 @@ fn hygiene_immune_adt_constructors_in_macros() {
         stderr
     );
     assert_eq!(stdout.trim(), "42");
-}
-
-#[test]
-fn define_client_typed_effect_row_passes() {
-    let (stdout, stderr, _) = run_cli(
-        r#"
-(import "std:web" as w)
-(import "std:js" as js)
-(import "std:io" as io)
-(effect Server (load-data (-> String String)))
-(js/define-client widget (x) (js/Atom Server)
-  (let ((ref (perform atom-new x))
-        (d (perform load-data "key")))
-    (string-append (show (perform atom-read ref)) d)))
-(io/println (widget 0))
-"#,
-        "run",
-    );
-    let combined = format!("{}{}", stdout, stderr);
-    assert!(
-        combined.contains("connectAndMountGuarded"),
-        "expected guarded mount with typed effect row, got: {}",
-        combined
-    );
-}
-
-#[test]
-fn define_client_typed_effect_row_rejects_unauthorized() {
-    let (_stdout, stderr, success) = run_cli(
-        r#"
-(import "std:web" as w)
-(import "std:js" as js)
-(effect Server (load-data (-> String String)))
-(effect Secret (secret-op (-> Unit String)))
-(js/define-client bad (x) (js/Atom Server)
-  (let ((d (perform load-data "key"))
-        (s (perform secret-op)))
-    (string-append d s)))
-"#,
-        "typecheck",
-    );
-    assert!(!success, "should reject unauthorized Secret effect");
-    assert!(
-        stderr.contains("Secret"),
-        "error should mention Secret, got: {}",
-        stderr
-    );
 }
 
 #[test]

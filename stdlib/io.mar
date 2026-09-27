@@ -29,6 +29,7 @@
   (read-line (-> Unit String))
   (read-file (-> String (Result String String)))
   (read-file-bytes (-> String (Result String Bytes)))
+  (read-file-bytes-in (-> String String (Result String Bytes)))
   (write-file (-> String String (Result String Unit)))
   (write-file-bytes (-> String Bytes (Result String Unit))))
 
@@ -78,6 +79,12 @@
 ; read-file-bytes : (-> String {IO} (Result String Bytes))
 ; Read the entire contents of a file as raw bytes. Returns (Ok bytes) or (Err msg).
 (define read-file-bytes (lambda (path) (perform read-file-bytes path)))
+
+; read-file-bytes-in : (-> String String {IO} (Result String Bytes))
+; Read a relative path confined to base-dir. Rejects absolute paths and escapes
+; through parent components or symlinks, including concurrent symlink changes.
+(define read-file-bytes-in (lambda (base-dir path)
+  (perform read-file-bytes-in base-dir path)))
 
 ; read-file-bytes! : (-> String {IO, Exception} Bytes)
 ; Read the entire contents of a file as raw bytes. Throws on error.

@@ -365,11 +365,15 @@
 
 ; serve-file : (-> HttpConnection String String Bool)
 ; Serve a static file. base-dir is the filesystem directory, url-path
-; is the path relative to it. Reads the file as bytes and responds with
-; the correct Content-Type. Returns #t if the file was served, #f if not found.
+; is relative to it (an optional leading URL slash is removed). Reads are
+; confined to base-dir, including symlink resolution. Returns #t if served,
+; #f if missing or inaccessible. URL decoding, if needed, must happen before
+; calling this function, never after the confined read.
 (define serve-file (lambda (conn base-dir url-path)
-  (let ((file-path (string-append base-dir url-path)))
-    (match (io/read-file-bytes file-path)
+  (let ((file-path (if (string-starts-with url-path "/")
+                     (string-substring url-path 1 (string-length url-path))
+                     url-path)))
+    (match (io/read-file-bytes-in base-dir file-path)
       ((Ok content)
         (begin
           (http/respond! conn 200
@@ -925,17 +929,15 @@
 ; =========================================================================
 ; Effect Allowlists — HMAC-signed, server-validated
 ;
-; Each guarded client component declares which effects may be proxied.
-; The server signs the allowlist with a per-instance secret so clients
+; The server signs an allowlist with a per-instance secret so clients
 ; cannot forge requests for unauthorized effects.
 ;
 ; Usage:
-;   (js/define-client-guarded user-profile (user-id) (db-query db-execute)
-;     (let ((user (perform db-query ...))) ...))
+;   (sign-allowlist (list "db_query" "db_execute"))
 ;
-; The allowlist is embedded in the page as a signed token. The client
-; includes this token in effect proxy messages. The server validates
-; the HMAC before dispatching.
+; Applications pass this token and allowlist to their clients. The client
+; includes them in effect proxy messages. The server validates the HMAC
+; before dispatching. The former std:js client-component macros are removed.
 ; =========================================================================
 
 ; Per-server-instance secret key (32 random bytes, generated once at startup).
